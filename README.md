@@ -1,6 +1,6 @@
 # Swarm Provenance MCP
 
-[![Regression and Safety Tests](https://github.com/datafund/swarm_provenance_mcp/actions/workflows/regression_tests.yml/badge.svg)](https://github.com/datafund/swarm_provenance_mcp/actions/workflows/regression_tests.yml)
+[![Regression and Safety Tests](https://github.com/datafund/swarm_provenance_MCP/actions/workflows/regression_tests.yml/badge.svg)](https://github.com/datafund/swarm_provenance_MCP/actions/workflows/regression_tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 > ⚠️ **ALPHA SOFTWARE - PROOF OF CONCEPT**
@@ -47,7 +47,7 @@ This MCP server is specifically designed for provenance data use cases, leveragi
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/datafund/swarm_provenance_mcp.git
+git clone https://github.com/datafund/swarm_provenance_MCP.git
 cd swarm_provenance_mcp
 ```
 
@@ -256,7 +256,7 @@ Check gateway and Swarm network connectivity status.
 2. **Clone and set up this repository**:
 ```bash
 # Clone the repository
-git clone https://github.com/datafund/swarm_provenance_mcp.git
+git clone https://github.com/datafund/swarm_provenance_MCP.git
 
 # Navigate to the project directory
 cd swarm_provenance_mcp

@@ -1,5 +1,8 @@
 # Swarm Provenance MCP
 
+[![Regression and Safety Tests](https://github.com/datafund/swarm_provenance_mcp/actions/workflows/regression_tests.yml/badge.svg)](https://github.com/datafund/swarm_provenance_mcp/actions/workflows/regression_tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 > ⚠️ **ALPHA SOFTWARE - PROOF OF CONCEPT**
 > This software is in **Alpha stage** and should be considered a **Proof of Concept**. Use for testing and experimentation only. Not recommended for production use.
 

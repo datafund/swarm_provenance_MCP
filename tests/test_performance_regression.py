@@ -145,13 +145,15 @@ class TestConcurrencyAndLoad:
         # Test with data near the 4KB limit
         large_data = "x" * 4000  # Just under 4KB limit
 
+        # Mock HTTP call so we measure data processing, not network latency
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"reference": "abc123"}
+        mock_response.raise_for_status = MagicMock()
+
         start_time = time.time()
 
-        try:
-            # This will fail due to no gateway, but we're testing the data processing
+        with patch.object(client.session, 'post', return_value=mock_response):
             client.upload_data(large_data, "fake_stamp")
-        except:
-            pass  # Expected to fail
 
         processing_time = time.time() - start_time
 

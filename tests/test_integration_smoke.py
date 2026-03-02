@@ -97,6 +97,7 @@ class TestMCPFrameworkCompatibility:
     async def test_tool_definitions_format_stable(self):
         """Test that tool definitions maintain expected structure."""
         from swarm_provenance_mcp.server import create_server
+        from mcp.types import ListToolsRequest
 
         server = create_server()
 
@@ -108,11 +109,14 @@ class TestMCPFrameworkCompatibility:
                 break
 
         if list_tools_handler:
-            tools = await list_tools_handler()
+            result = await list_tools_handler(ListToolsRequest(method="tools/list"))
+            # Unwrap ServerResult -> ListToolsResult -> tools list
+            inner = result.root if hasattr(result, 'root') else result
+            tools = inner.tools if hasattr(inner, 'tools') else inner
 
             for tool in tools:
                 # Each tool must have these attributes
-                assert hasattr(tool, 'name'), f"Tool missing name attribute"
+                assert hasattr(tool, 'name'), "Tool missing name attribute"
                 assert hasattr(tool, 'description'), f"Tool {tool.name} missing description"
                 assert hasattr(tool, 'inputSchema'), f"Tool {tool.name} missing inputSchema"
 

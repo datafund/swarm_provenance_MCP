@@ -68,6 +68,43 @@ cp .env.example .env
 # Edit .env to configure your gateway URL and defaults
 ```
 
+### Docker
+
+Run the MCP server in a container with no local dependencies.
+
+**Quick start** (pre-built image):
+```bash
+docker pull ghcr.io/datafund/swarm-provenance-mcp:latest
+docker run -i --rm ghcr.io/datafund/swarm-provenance-mcp
+```
+
+**Build from source:**
+```bash
+docker build -t swarm-provenance-mcp .
+docker run -i --rm swarm-provenance-mcp
+```
+
+**With environment variables:**
+```bash
+docker run -i --rm \
+  -e SWARM_GATEWAY_URL=https://provenance-gateway.datafund.io \
+  -e DEFAULT_STAMP_AMOUNT=2000000000 \
+  -e DEFAULT_STAMP_DEPTH=17 \
+  swarm-provenance-mcp
+```
+
+**Docker Compose:**
+```bash
+docker compose build
+docker compose run --rm swarm-provenance-mcp
+```
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SWARM_GATEWAY_URL` | Gateway endpoint URL | `https://provenance-gateway.datafund.io` |
+| `DEFAULT_STAMP_AMOUNT` | Default stamp amount in wei | `2000000000` |
+| `DEFAULT_STAMP_DEPTH` | Default stamp depth (16-24) | `17` |
+
 ## Configuration
 
 Environment variables (set in `.env` file):
@@ -305,6 +342,27 @@ cp .env.example .env
 
 **Alternative (if package is installed)**: You can use `"command": "swarm-provenance-mcp"` instead after running `pip install -e .`
 
+#### Docker-based
+
+Use Docker for a zero-install experience — no Python, venv, or pip required:
+
+```json
+{
+  "mcpServers": {
+    "swarm-provenance": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-e", "SWARM_GATEWAY_URL=https://provenance-gateway.datafund.io",
+        "ghcr.io/datafund/swarm-provenance-mcp"
+      ]
+    }
+  }
+}
+```
+
+> **Docker Desktop MCP Toolkit**: If you use Docker Desktop with MCP Toolkit support, the server can be discovered automatically from the Docker MCP catalog.
+
 4. **Restart Claude Desktop** and test with: "List all available Swarm stamps"
 
 ## Development
@@ -320,6 +378,20 @@ pytest
 
 # Run with coverage
 pytest --cov=swarm_provenance_mcp
+```
+
+### Docker Testing
+
+Requires Docker daemon to be running:
+
+```bash
+# Run all Docker tests (builds image, tests MCP protocol, tool calls)
+pytest tests/test_docker.py -v -m docker
+
+# Verify manually
+docker build -t swarm-provenance-mcp .
+docker run -i --rm swarm-provenance-mcp                           # starts, waits for MCP input
+docker run -i --rm -e SWARM_GATEWAY_URL=https://provenance-gateway.datafund.io swarm-provenance-mcp  # env override
 ```
 
 ### Code Quality

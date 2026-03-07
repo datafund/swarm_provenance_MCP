@@ -86,6 +86,7 @@ markers = [
     "performance: marks tests as performance-focused",
     "regression: marks tests as regression tests",
     "smoke: marks tests as smoke tests for quick validation",
+    "docker: marks tests requiring a running Docker daemon",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:pydantic.*",

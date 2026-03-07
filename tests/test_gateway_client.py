@@ -26,7 +26,7 @@ class TestSwarmGatewayClient:
                 "batchID": "test-batch-id-123",
                 "message": "Postage stamp purchased successfully"
             }
-            m.post(f"{self.base_url}/api/v1/stamps", json=expected_response)
+            m.post(f"{self.base_url}/api/v1/stamps/", json=expected_response)
 
             result = self.client.purchase_stamp(
                 amount=2000000000,
@@ -48,7 +48,7 @@ class TestSwarmGatewayClient:
                 "batchID": "test-batch-id-456",
                 "message": "Postage stamp purchased successfully"
             }
-            m.post(f"{self.base_url}/api/v1/stamps", json=expected_response)
+            m.post(f"{self.base_url}/api/v1/stamps/", json=expected_response)
 
             result = self.client.purchase_stamp(amount=500000000, depth=16)
 
@@ -94,7 +94,7 @@ class TestSwarmGatewayClient:
                 ],
                 "total_count": 2
             }
-            m.get(f"{self.base_url}/api/v1/stamps", json=expected_response)
+            m.get(f"{self.base_url}/api/v1/stamps/", json=expected_response)
 
             result = self.client.list_stamps()
 
@@ -119,7 +119,7 @@ class TestSwarmGatewayClient:
     def test_request_failure(self):
         """Test handling of request failures."""
         with requests_mock.Mocker() as m:
-            m.get(f"{self.base_url}/api/v1/stamps", status_code=500)
+            m.get(f"{self.base_url}/api/v1/stamps/", status_code=500)
 
             with pytest.raises(RequestException):
                 self.client.list_stamps()
@@ -127,7 +127,7 @@ class TestSwarmGatewayClient:
     def test_custom_headers(self):
         """Test that custom headers are set correctly."""
         with requests_mock.Mocker() as m:
-            m.get(f"{self.base_url}/api/v1/stamps", json={"stamps": [], "total_count": 0})
+            m.get(f"{self.base_url}/api/v1/stamps/", json={"stamps": [], "total_count": 0})
 
             self.client.list_stamps()
 

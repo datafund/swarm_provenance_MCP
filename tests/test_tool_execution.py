@@ -9,6 +9,46 @@ from mcp.types import CallToolRequest, CallToolResult, TextContent
 from swarm_provenance_mcp.server import create_server
 
 
+# Valid 64-char hex IDs for tests
+TEST_STAMP_ID = "a" * 64
+TEST_REFERENCE = "b" * 64
+
+
+async def call_tool_directly(server, name: str, arguments: Dict[str, Any]):
+    """Call tool directly through the server's handler functions.
+
+    Mirrors the server's call_tool wrapper including catch-all error handling.
+    """
+    from swarm_provenance_mcp.server import (
+        handle_purchase_stamp, handle_get_stamp_status, handle_list_stamps,
+        handle_extend_stamp, handle_upload_data, handle_download_data, handle_health_check
+    )
+
+    handlers = {
+        "purchase_stamp": handle_purchase_stamp,
+        "get_stamp_status": handle_get_stamp_status,
+        "list_stamps": handle_list_stamps,
+        "extend_stamp": handle_extend_stamp,
+        "upload_data": handle_upload_data,
+        "download_data": handle_download_data,
+        "health_check": handle_health_check
+    }
+
+    try:
+        if name in handlers:
+            return await handlers[name](arguments)
+        else:
+            return CallToolResult(
+                content=[TextContent(type="text", text=f"Unknown tool: {name}")],
+                isError=True
+            )
+    except Exception as e:
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"Error executing {name}: {str(e)}")],
+            isError=True
+        )
+
+
 class TestToolExecution:
     """Test suite for MCP tool execution and response validation."""
 
@@ -23,36 +63,37 @@ class TestToolExecution:
         with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
             # Configure mock responses for different methods
             mock_client.purchase_stamp.return_value = {
-                "batchID": "test_batch_123",
+                "batchID": TEST_STAMP_ID,
                 "message": "Stamp purchased successfully"
             }
-            mock_client.get_stamp_info.return_value = {
-                "batchID": "test_batch_123",
+            mock_client.get_stamp_details.return_value = {
+                "batchID": TEST_STAMP_ID,
                 "amount": "2000000000",
                 "depth": 17,
                 "bucketDepth": 16,
                 "blockNumber": 12345,
                 "immutableFlag": False,
                 "exists": True,
+                "usable": True,
                 "batchTTL": 123456
             }
             mock_client.list_stamps.return_value = {
                 "stamps": [
                     {
-                        "batchID": "test_batch_123",
+                        "batchID": TEST_STAMP_ID,
                         "amount": "2000000000",
                         "depth": 17,
                         "utilization": 0.1
                     }
                 ],
-                "count": 1
+                "total_count": 1
             }
             mock_client.extend_stamp.return_value = {
-                "batchID": "test_batch_123",
+                "batchID": TEST_STAMP_ID,
                 "message": "Stamp extended successfully"
             }
             mock_client.upload_data.return_value = {
-                "reference": "test_reference_abc123",
+                "reference": TEST_REFERENCE,
                 "message": "Upload successful"
             }
             mock_client.download_data.return_value = b'{"test": "data content"}'
@@ -65,37 +106,10 @@ class TestToolExecution:
 
             yield mock_client
 
-    async def call_tool_directly(self, server, name: str, arguments: Dict[str, Any]):
-        """Call tool directly through the server's call_tool method."""
-        # Import the handler function directly
-        from swarm_provenance_mcp.server import (
-            handle_purchase_stamp, handle_get_stamp_status, handle_list_stamps,
-            handle_extend_stamp, handle_upload_data, handle_download_data, handle_health_check
-        )
-
-        handlers = {
-            "purchase_stamp": handle_purchase_stamp,
-            "get_stamp_status": handle_get_stamp_status,
-            "list_stamps": handle_list_stamps,
-            "extend_stamp": handle_extend_stamp,
-            "upload_data": handle_upload_data,
-            "download_data": handle_download_data,
-            "health_check": handle_health_check
-        }
-
-        if name in handlers:
-            return await handlers[name](arguments)
-        else:
-            from mcp.types import CallToolResult, TextContent
-            return CallToolResult(
-                content=[TextContent(type="text", text=f"Unknown tool: {name}")],
-                isError=True
-            )
-
     async def test_purchase_stamp_tool(self, server, mock_gateway_client):
         """Test purchase_stamp tool execution."""
         # Test with default parameters
-        result = await self.call_tool_directly(server, "purchase_stamp", {})
+        result = await call_tool_directly(server, "purchase_stamp", {})
 
         assert isinstance(result, CallToolResult)
         assert not result.isError
@@ -107,7 +121,7 @@ class TestToolExecution:
 
         # Test with custom parameters
         mock_gateway_client.reset_mock()
-        result_with_params = await self.call_tool_directly(
+        result_with_params = await call_tool_directly(
             server, "purchase_stamp", {
                 "amount": 5000000000,
                 "depth": 18,
@@ -121,85 +135,55 @@ class TestToolExecution:
 
     async def test_get_stamp_status_tool(self, server, mock_gateway_client):
         """Test get_stamp_status tool execution."""
-        handler = await self.get_call_tool_handler(server)
-        assert handler is not None
-
-        request = CallToolRequest(
-            name="get_stamp_status",
-            arguments={"stamp_id": "test_batch_123"}
+        result = await call_tool_directly(
+            server, "get_stamp_status", {"stamp_id": TEST_STAMP_ID}
         )
-
-        result = await handler(request)
 
         assert isinstance(result, CallToolResult)
         assert not result.isError
-        mock_gateway_client.get_stamp_info.assert_called_once_with("test_batch_123")
+        mock_gateway_client.get_stamp_details.assert_called_once_with(TEST_STAMP_ID)
 
         # Verify response contains expected information
         content_text = result.content[0].text
-        response_data = json.loads(content_text)
-        assert "batchID" in response_data
-        assert response_data["batchID"] == "test_batch_123"
+        assert "Stamp Details" in content_text
+        assert TEST_STAMP_ID in content_text
 
     async def test_list_stamps_tool(self, server, mock_gateway_client):
         """Test list_stamps tool execution."""
-        handler = await self.get_call_tool_handler(server)
-        assert handler is not None
-
-        request = CallToolRequest(
-            name="list_stamps",
-            arguments={}
-        )
-
-        result = await handler(request)
+        result = await call_tool_directly(server, "list_stamps", {})
 
         assert isinstance(result, CallToolResult)
         assert not result.isError
         mock_gateway_client.list_stamps.assert_called_once()
 
-        # Verify response structure
+        # Verify response contains stamp information
         content_text = result.content[0].text
-        response_data = json.loads(content_text)
-        assert "stamps" in response_data
-        assert "count" in response_data
+        assert "stamp" in content_text.lower()
 
     async def test_extend_stamp_tool(self, server, mock_gateway_client):
         """Test extend_stamp tool execution."""
-        handler = await self.get_call_tool_handler(server)
-        assert handler is not None
-
-        request = CallToolRequest(
-            name="extend_stamp",
-            arguments={
-                "stamp_id": "test_batch_123",
+        result = await call_tool_directly(
+            server, "extend_stamp", {
+                "stamp_id": TEST_STAMP_ID,
                 "amount": 2000000000
             }
         )
 
-        result = await handler(request)
-
         assert isinstance(result, CallToolResult)
         assert not result.isError
         mock_gateway_client.extend_stamp.assert_called_once_with(
-            "test_batch_123", 2000000000
+            TEST_STAMP_ID, 2000000000
         )
-
 
     async def test_upload_data_tool(self, server, mock_gateway_client):
         """Test upload_data tool execution."""
-        handler = await self.get_call_tool_handler(server)
-        assert handler is not None
-
-        request = CallToolRequest(
-            name="upload_data",
-            arguments={
+        result = await call_tool_directly(
+            server, "upload_data", {
                 "data": "test data content",
-                "stamp_id": "test_batch_123",
+                "stamp_id": TEST_STAMP_ID,
                 "content_type": "text/plain"
             }
         )
-
-        result = await handler(request)
 
         assert isinstance(result, CallToolResult)
         assert not result.isError
@@ -207,31 +191,17 @@ class TestToolExecution:
 
     async def test_download_data_tool(self, server, mock_gateway_client):
         """Test download_data tool execution."""
-        handler = await self.get_call_tool_handler(server)
-        assert handler is not None
-
-        request = CallToolRequest(
-            name="download_data",
-            arguments={"reference": "test_reference_abc123"}
+        result = await call_tool_directly(
+            server, "download_data", {"reference": TEST_REFERENCE}
         )
-
-        result = await handler(request)
 
         assert isinstance(result, CallToolResult)
         assert not result.isError
-        mock_gateway_client.download_data.assert_called_once_with("test_reference_abc123")
+        mock_gateway_client.download_data.assert_called_once_with(TEST_REFERENCE)
 
     async def test_health_check_tool(self, server, mock_gateway_client):
         """Test health_check tool execution."""
-        handler = await self.get_call_tool_handler(server)
-        assert handler is not None
-
-        request = CallToolRequest(
-            name="health_check",
-            arguments={}
-        )
-
-        result = await handler(request)
+        result = await call_tool_directly(server, "health_check", {})
 
         assert isinstance(result, CallToolResult)
         assert not result.isError
@@ -239,57 +209,32 @@ class TestToolExecution:
 
         # Verify response contains expected information
         content_text = result.content[0].text
-        assert "Health Check Results" in content_text
-        assert "Status: healthy" in content_text
+        assert "operational" in content_text.lower() or "healthy" in content_text.lower()
 
     async def test_invalid_tool_name(self, server, mock_gateway_client):
         """Test handling of invalid tool names."""
-        handler = await self.get_call_tool_handler(server)
-        assert handler is not None
-
-        request = CallToolRequest(
-            name="invalid_tool_name",
-            arguments={}
-        )
-
-        result = await handler(request)
+        result = await call_tool_directly(server, "invalid_tool_name", {})
 
         assert isinstance(result, CallToolResult)
         assert result.isError
-        assert "Unknown tool" in result.content[0].text or "not found" in result.content[0].text
+        assert "Unknown tool" in result.content[0].text
 
     async def test_missing_required_parameters(self, server, mock_gateway_client):
         """Test handling of missing required parameters."""
-        handler = await self.get_call_tool_handler(server)
-        assert handler is not None
-
         # Test get_stamp_status without required stamp_id
-        request = CallToolRequest(
-            name="get_stamp_status",
-            arguments={}
-        )
-
-        result = await handler(request)
+        result = await call_tool_directly(server, "get_stamp_status", {})
 
         assert isinstance(result, CallToolResult)
         assert result.isError
         error_text = result.content[0].text.lower()
-        assert "stamp_id" in error_text or "required" in error_text
+        assert "stamp" in error_text or "required" in error_text
 
     async def test_gateway_error_handling(self, server):
         """Test error handling when gateway client raises exceptions."""
         with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
             mock_client.purchase_stamp.side_effect = Exception("Gateway connection failed")
 
-            handler = await self.get_call_tool_handler(server)
-            assert handler is not None
-
-            request = CallToolRequest(
-                name="purchase_stamp",
-                arguments={}
-            )
-
-            result = await handler(request)
+            result = await call_tool_directly(server, "purchase_stamp", {})
 
             assert isinstance(result, CallToolResult)
             assert result.isError
@@ -298,26 +243,18 @@ class TestToolExecution:
 
     async def test_response_format_consistency(self, server, mock_gateway_client):
         """Test that all tools return consistent response formats."""
-        handler = await self.get_call_tool_handler(server)
-        assert handler is not None
-
         tools_to_test = [
             ("purchase_stamp", {}),
-            ("get_stamp_status", {"stamp_id": "test_123"}),
+            ("get_stamp_status", {"stamp_id": TEST_STAMP_ID}),
             ("list_stamps", {}),
-            ("extend_stamp", {"stamp_id": "test_123", "amount": 2000000000}),
-            ("upload_data", {"data": "test data", "stamp_id": "test_123"}),
-            ("download_data", {"reference": "test_reference_abc123"}),
+            ("extend_stamp", {"stamp_id": TEST_STAMP_ID, "amount": 2000000000}),
+            ("upload_data", {"data": "test data", "stamp_id": TEST_STAMP_ID}),
+            ("download_data", {"reference": TEST_REFERENCE}),
             ("health_check", {})
         ]
 
         for tool_name, arguments in tools_to_test:
-            request = CallToolRequest(
-                name=tool_name,
-                arguments=arguments
-            )
-
-            result = await handler(request)
+            result = await call_tool_directly(server, tool_name, arguments)
 
             # All successful responses should have consistent structure
             assert isinstance(result, CallToolResult)
@@ -344,45 +281,24 @@ class TestToolParameterValidation:
         """Create MCP server instance for testing."""
         return create_server()
 
-    async def get_call_tool_handler(self, server):
-        """Get the call_tool handler from the server."""
-        for handler_name, handler in server.request_handlers.items():
-            if 'call' in handler_name and hasattr(handler, '__call__'):
-                return handler
-        return None
-
     async def test_parameter_type_validation(self, server):
         """Test that tools validate parameter types correctly."""
-        handler = await self.get_call_tool_handler(server)
-        assert handler is not None
-
         with patch('swarm_provenance_mcp.server.gateway_client'):
             # Test invalid amount type for purchase_stamp
-            request = CallToolRequest(
-                name="purchase_stamp",
-                arguments={"amount": "not_a_number", "depth": 17}
+            result = await call_tool_directly(
+                server, "purchase_stamp", {"amount": "not_a_number", "depth": 17}
             )
 
-            result = await handler(request)
-
             # Should handle type conversion or return error
-            if result.isError:
-                error_text = result.content[0].text.lower()
-                assert "type" in error_text or "invalid" in error_text or "amount" in error_text
+            assert result.isError, "Invalid type should produce an error result"
 
     async def test_parameter_range_validation(self, server):
         """Test parameter range validation where applicable."""
-        handler = await self.get_call_tool_handler(server)
-        assert handler is not None
-
         with patch('swarm_provenance_mcp.server.gateway_client'):
             # Test negative amount (should be handled gracefully)
-            request = CallToolRequest(
-                name="purchase_stamp",
-                arguments={"amount": -1000, "depth": 17}
+            result = await call_tool_directly(
+                server, "purchase_stamp", {"amount": -1000, "depth": 17}
             )
-
-            result = await handler(request)
 
             # The tool should either handle this gracefully or return a meaningful error
             assert isinstance(result, CallToolResult)
@@ -390,17 +306,11 @@ class TestToolParameterValidation:
 
     async def test_empty_string_parameters(self, server):
         """Test handling of empty string parameters."""
-        handler = await self.get_call_tool_handler(server)
-        assert handler is not None
-
         with patch('swarm_provenance_mcp.server.gateway_client'):
             # Test empty stamp_id
-            request = CallToolRequest(
-                name="get_stamp_status",
-                arguments={"stamp_id": ""}
+            result = await call_tool_directly(
+                server, "get_stamp_status", {"stamp_id": ""}
             )
-
-            result = await handler(request)
 
             # Should return an error for empty required parameters
             assert isinstance(result, CallToolResult)

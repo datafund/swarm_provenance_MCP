@@ -7,7 +7,31 @@ from unittest.mock import AsyncMock, patch
 
 from swarm_provenance_mcp.server import create_server
 from swarm_provenance_mcp.gateway_client import SwarmGatewayClient
-from mcp.types import Tool
+from mcp.types import Tool, ListToolsRequest
+
+
+async def _get_tools_from_server(server):
+    """Get tools list from a server instance using the registered handler."""
+    list_tools_handler = None
+    for handler_key, handler in server.request_handlers.items():
+        if hasattr(handler, '__name__') and 'list_tools' in str(handler):
+            list_tools_handler = handler
+            break
+
+    if list_tools_handler is None:
+        return []
+
+    result = await list_tools_handler(ListToolsRequest(method="tools/list"))
+    inner = result.root if hasattr(result, 'root') else result
+    tools = inner.tools if hasattr(inner, 'tools') else inner
+    return tools
+
+
+@pytest.fixture
+async def tool_list():
+    """Get the list of tools from the MCP server."""
+    server = create_server()
+    return await _get_tools_from_server(server)
 
 
 class TestToolDefinitions:
@@ -17,30 +41,6 @@ class TestToolDefinitions:
     def server(self):
         """Create MCP server instance for testing."""
         return create_server()
-
-    @pytest.fixture
-    async def tool_list(self, server):
-        """Get the list of tools from the MCP server."""
-        # Call the list_tools method directly from the server
-        try:
-            # Try to get tools through the server's list_tools capabilities
-            if hasattr(server, 'list_tools'):
-                tools = await server.list_tools()
-                return tools
-
-            # Alternative: look for registered handlers
-            handlers = getattr(server, 'request_handlers', {})
-            for handler_name, handler in handlers.items():
-                if 'list_tools' in handler_name:
-                    tools = await handler()
-                    return tools
-
-            return []
-        except Exception as e:
-            # If we can't get tools dynamically, return the expected ones
-            # This ensures tests can still validate the expected tool set
-            print(f"Warning: Could not retrieve tools dynamically: {e}")
-            return []
 
     @pytest.fixture
     def gateway_client_methods(self):
@@ -154,14 +154,20 @@ class TestToolDefinitions:
 
     async def test_tool_handler_implementation(self, server):
         """Test that all defined tools have corresponding handler implementations."""
+        from mcp.types import CallToolRequest
+
         # Get tool handlers from the server
         handlers = getattr(server, 'request_handlers', {})
 
-        # Look for call_tool or similar handlers
-        call_handlers = [h for h in handlers.keys() if 'call' in h.lower() or 'tool' in h.lower()]
-
         # Should have some form of tool execution capability
         assert len(handlers) > 0, "No request handlers found in server"
+
+        # Check that call_tool handler is registered (using type-based check)
+        has_call_handler = any(
+            hasattr(h, '__name__') and 'call_tool' in str(h)
+            for h in handlers.values()
+        )
+        assert has_call_handler, "No call_tool handler found in server"
 
         # This is a basic check - the server should have request handling capability
         assert hasattr(server, 'request_handlers'), \

@@ -88,7 +88,7 @@ class TestToolSynchronization:
 
                     # Check if it's comparing tool_name
                     if (isinstance(node.test.left, ast.Name) and
-                        node.test.left.id == 'tool_name'):
+                        node.test.left.id in ('tool_name', 'name')):
                         tool_name = node.test.comparators[0].value
                         handlers[tool_name] = {
                             'implemented': True,
@@ -154,19 +154,23 @@ class TestToolSynchronization:
 
     async def test_runtime_tool_registration(self):
         """Test that tools are properly registered at runtime."""
+        from mcp.types import ListToolsRequest
+
         server = create_server()
 
-        # Get the list_tools handler
+        # Get the list_tools handler using the type key
         list_tools_handler = None
-        for handler_name, handler in server.request_handlers.items():
-            if 'list_tools' in handler_name:
+        for handler_key, handler in server.request_handlers.items():
+            if hasattr(handler, '__name__') and 'list_tools' in str(handler):
                 list_tools_handler = handler
                 break
 
         assert list_tools_handler is not None, "list_tools handler not registered"
 
         # Call the handler to get tools
-        tools = await list_tools_handler()
+        result = await list_tools_handler(ListToolsRequest(method="tools/list"))
+        inner = result.root if hasattr(result, 'root') else result
+        tools = inner.tools if hasattr(inner, 'tools') else inner
         tool_names = {tool.name for tool in tools}
 
         expected_tools = {
@@ -265,16 +269,20 @@ class TestFutureProofing:
 
     async def test_tool_schema_extensibility(self):
         """Test that tool schemas can be extended without breaking existing functionality."""
+        from mcp.types import ListToolsRequest
+
         server = create_server()
 
-        # Get tools
+        # Get tools using the type-based lookup
         list_tools_handler = None
-        for handler_name, handler in server.request_handlers.items():
-            if 'list_tools' in handler_name:
+        for handler_key, handler in server.request_handlers.items():
+            if hasattr(handler, '__name__') and 'list_tools' in str(handler):
                 list_tools_handler = handler
                 break
 
-        tools = await list_tools_handler()
+        result = await list_tools_handler(ListToolsRequest(method="tools/list"))
+        inner = result.root if hasattr(result, 'root') else result
+        tools = inner.tools if hasattr(inner, 'tools') else inner
 
         for tool in tools:
             schema = tool.inputSchema

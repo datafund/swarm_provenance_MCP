@@ -320,7 +320,7 @@ class TestEndToEndWorkflow:
                 print("✅ Stamp requires propagation time (expected)")
 
                 # Try to wait for it to become usable
-                became_usable = workflow_tester.wait_for_stamp_usable(stamp_id, max_wait_seconds=60)
+                became_usable = workflow_tester.wait_for_stamp_usable(stamp_id, max_wait_seconds=120)
                 assert became_usable, "Stamp never became usable"
 
         except Exception as e:

@@ -1,12 +1,13 @@
 """Integration tests for the MCP server with real gateway integration."""
 
+import os
 import pytest
 import requests
 from swarm_provenance_mcp.gateway_client import SwarmGatewayClient
 
 
 # Gateway configuration
-GATEWAY_URL = "http://127.0.0.1:8000"
+GATEWAY_URL = os.getenv("SWARM_GATEWAY_URL", "http://127.0.0.1:8000")
 GATEWAY_HEALTH_URL = f"{GATEWAY_URL}/"
 
 
@@ -23,7 +24,7 @@ def is_gateway_running():
 def check_gateway():
     """Ensure gateway is running before running integration tests."""
     if not is_gateway_running():
-        pytest.fail(
+        pytest.skip(
             f"Gateway is not running at {GATEWAY_URL}. "
             "Please start the swarm_connect gateway before running integration tests."
         )
@@ -37,6 +38,7 @@ def gateway_client():
     client.close()
 
 
+@pytest.mark.integration
 def test_gateway_client_purchase_stamp(gateway_client):
     """Test actual stamp purchase through gateway client."""
     try:
@@ -56,6 +58,7 @@ def test_gateway_client_purchase_stamp(gateway_client):
         pytest.fail(f"Stamp purchase failed: {e}")
 
 
+@pytest.mark.integration
 def test_gateway_client_list_stamps(gateway_client):
     """Test stamp listing through gateway client."""
     try:
@@ -71,6 +74,7 @@ def test_gateway_client_list_stamps(gateway_client):
         pytest.fail(f"Stamp listing failed: {e}")
 
 
+@pytest.mark.integration
 def test_gateway_client_extend_stamp(gateway_client):
     """Test stamp extension through gateway client."""
     # First purchase a stamp to extend
@@ -102,6 +106,7 @@ def test_gateway_client_extend_stamp(gateway_client):
 # Note: get_stamp_utilization was removed as utilization data is available in get_stamp_details
 
 
+@pytest.mark.integration
 def test_gateway_client_connection_failure():
     """Test that client fails properly when gateway is not available."""
     # Create client with bad URL
@@ -122,6 +127,7 @@ def test_gateway_client_connection_failure():
         bad_client.close()
 
 
+@pytest.mark.integration
 def test_gateway_client_invalid_stamp_operations(gateway_client):
     """Test operations with invalid stamp IDs."""
     fake_stamp_id = "1234567890abcdef" * 4  # 64 char fake ID

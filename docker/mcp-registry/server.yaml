@@ -1,0 +1,29 @@
+title: Swarm Provenance MCP
+description: >
+  MCP server for managing Swarm postage stamps and provenance data storage.
+  Enables AI agents to purchase stamps, upload/download data to the
+  decentralized Swarm network, and manage immutable provenance records.
+category: storage
+tags:
+  - swarm
+  - decentralized
+  - provenance
+  - storage
+  - web3
+
+image: ghcr.io/datafund/swarm-provenance-mcp:latest
+transport: stdio
+
+env:
+  SWARM_GATEWAY_URL:
+    description: URL of the swarm_connect FastAPI gateway
+    default: "https://provenance-gateway.datafund.io"
+    required: false
+  DEFAULT_STAMP_AMOUNT:
+    description: Default postage stamp amount in wei
+    default: "2000000000"
+    required: false
+  DEFAULT_STAMP_DEPTH:
+    description: Default postage stamp depth (16-24)
+    default: "17"
+    required: false

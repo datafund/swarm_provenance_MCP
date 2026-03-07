@@ -29,6 +29,9 @@ env/
 .coverage
 htmlcov/
 
+# Docker
+docker-compose.override.yml
+
 # OS
 .DS_Store
 Thumbs.db

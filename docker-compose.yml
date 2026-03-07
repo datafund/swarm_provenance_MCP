@@ -1,0 +1,15 @@
+services:
+  swarm-provenance-mcp:
+    build:
+      context: .
+      args:
+        VERSION: "0.1.0"
+    image: swarm-provenance-mcp:local
+    stdin_open: true
+    environment:
+      - SWARM_GATEWAY_URL=${SWARM_GATEWAY_URL:-https://provenance-gateway.datafund.io}
+      - DEFAULT_STAMP_AMOUNT=${DEFAULT_STAMP_AMOUNT:-2000000000}
+      - DEFAULT_STAMP_DEPTH=${DEFAULT_STAMP_DEPTH:-17}
+    env_file:
+      - path: .env
+        required: false

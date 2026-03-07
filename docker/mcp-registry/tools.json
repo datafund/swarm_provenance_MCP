@@ -1,0 +1,52 @@
+[
+  {
+    "name": "purchase_stamp",
+    "description": "Purchase a new Swarm postage stamp with configurable amount and depth.",
+    "parameters": {
+      "amount": "integer (optional) — stamp amount in wei",
+      "depth": "integer (optional) — stamp depth 16-24",
+      "label": "string (optional) — human-readable label"
+    }
+  },
+  {
+    "name": "get_stamp_status",
+    "description": "Get detailed information about a specific stamp including TTL, expiration, and usability.",
+    "parameters": {
+      "stamp_id": "string (required) — 64-char hex batch ID"
+    }
+  },
+  {
+    "name": "list_stamps",
+    "description": "List all available postage stamps with their details.",
+    "parameters": {}
+  },
+  {
+    "name": "extend_stamp",
+    "description": "Extend an existing stamp with additional funds to increase its TTL.",
+    "parameters": {
+      "stamp_id": "string (required) — 64-char hex batch ID",
+      "amount": "integer (required) — additional amount in wei"
+    }
+  },
+  {
+    "name": "upload_data",
+    "description": "Upload data to the Swarm network using a valid postage stamp (max 4KB).",
+    "parameters": {
+      "data": "string (required) — data content to upload",
+      "stamp_id": "string (required) — 64-char hex batch ID",
+      "content_type": "string (optional) — MIME type, default application/json"
+    }
+  },
+  {
+    "name": "download_data",
+    "description": "Download data from the Swarm network using a reference hash.",
+    "parameters": {
+      "reference": "string (required) — 64-char hex Swarm reference"
+    }
+  },
+  {
+    "name": "health_check",
+    "description": "Check gateway and Swarm network connectivity status.",
+    "parameters": {}
+  }
+]

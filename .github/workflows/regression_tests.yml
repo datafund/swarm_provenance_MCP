@@ -165,9 +165,30 @@ jobs:
         path: |
           bandit-report.json
 
+  docker-tests:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install test dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest
+
+    - name: Build Docker image
+      run: docker build -t swarm-provenance-mcp:test .
+
+    - name: Run Docker tests
+      run: pytest tests/test_docker.py -v --tb=short -m docker
+
   test-results:
     runs-on: ubuntu-latest
-    needs: [smoke-tests, performance-tests, compatibility-tests, security-audit]
+    needs: [smoke-tests, performance-tests, compatibility-tests, security-audit, docker-tests]
     if: always()
     steps:
     - name: Report test results
@@ -177,6 +198,7 @@ jobs:
         echo "- Performance tests: ${{ needs.performance-tests.result }}" >> $GITHUB_STEP_SUMMARY
         echo "- Compatibility tests: ${{ needs.compatibility-tests.result }}" >> $GITHUB_STEP_SUMMARY
         echo "- Security audit: ${{ needs.security-audit.result }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Docker tests: ${{ needs.docker-tests.result }}" >> $GITHUB_STEP_SUMMARY
 
     - name: Fail if critical tests failed
       if: needs.smoke-tests.result == 'failure' || needs.security-audit.result == 'failure'

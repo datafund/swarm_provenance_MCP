@@ -53,6 +53,25 @@ pytest tests/test_integration.py
 pytest -v
 ```
 
+### Docker
+```bash
+# Build image
+docker build -t swarm-provenance-mcp .
+
+# Run container (stdio mode)
+docker run -i --rm swarm-provenance-mcp
+
+# Run with custom gateway
+docker run -i --rm -e SWARM_GATEWAY_URL=https://provenance-gateway.datafund.io swarm-provenance-mcp
+
+# Docker Compose
+docker compose build
+docker compose run --rm swarm-provenance-mcp
+
+# Run Docker tests (requires Docker daemon)
+pytest tests/test_docker.py -v -m docker
+```
+
 ## Architecture Overview
 
 ### Core Components

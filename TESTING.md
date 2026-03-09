@@ -70,6 +70,9 @@ pytest tests/test_security_safety.py -v
 
 # Integration smoke tests
 pytest tests/test_integration_smoke.py -v
+
+# Docker tests (requires Docker)
+pytest tests/test_docker.py -v
 ```
 
 ### CI/CD Integration
@@ -118,6 +121,19 @@ pytest -m performance
 - Error responses follow MCP protocol
 - No resource leaks (memory, file descriptors, connections)
 
+### 5. **Docker Tests** (`test_docker.py`)
+Validate Docker containerization is correct:
+- Build succeeds with and without VERSION arg
+- Container runs as non-root `mcp` user
+- PYTHONUNBUFFERED is set for stdio reliability
+- Environment variables are passed through
+- No ports exposed (stdio server)
+- .dockerignore excludes tests, .git, .env
+- Package source is present in image
+- OCI metadata labels are set correctly
+
+> **Note**: Docker tests require Docker to be installed and running. They are automatically skipped if Docker is unavailable.
+
 ## Adding New Tests
 
 ### When to Add Regression Tests
@@ -133,6 +149,7 @@ pytest -m performance
 - `test_schema_compliance.py` - API and schema validation
 - `test_performance_regression.py` - Performance monitoring
 - `test_security_safety.py` - Security and safety validation
+- `test_docker.py` - Docker build, runtime, and context validation
 
 ### Writing New Tests
 

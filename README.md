@@ -222,6 +222,52 @@ Check gateway and Swarm network connectivity status.
 }
 ```
 
+## Docker
+
+### Building
+
+```bash
+docker build -t swarm-provenance-mcp .
+```
+
+To tag with a specific version:
+
+```bash
+docker build --build-arg VERSION=0.1.0 -t swarm-provenance-mcp:0.1.0 .
+```
+
+### Running
+
+The server communicates via stdio (no ports). Pass `-i` for interactive stdin:
+
+```bash
+docker run -i --rm swarm-provenance-mcp
+```
+
+Configure the gateway URL and other settings via environment variables:
+
+```bash
+docker run -i --rm \
+  -e SWARM_GATEWAY_URL=https://provenance-gateway.datafund.io \
+  -e DEFAULT_STAMP_DEPTH=20 \
+  swarm-provenance-mcp
+```
+
+### Claude Desktop with Docker
+
+Add to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "swarm-provenance": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "swarm-provenance-mcp"]
+    }
+  }
+}
+```
+
 ## Architecture
 
 ```

@@ -246,6 +246,48 @@ Download data from the Swarm network using a reference hash.
 }
 ```
 
+#### `check_stamp_health`
+Run a health check on a specific stamp. Returns whether uploads can proceed, plus any errors or warnings with actionable suggestions.
+
+**Parameters:**
+- `stamp_id` (string): The batch ID of the stamp to check
+
+**Example:**
+```json
+{
+  "name": "check_stamp_health",
+  "arguments": {
+    "stamp_id": "000de42079daebd58347bb38ce05bdc477701d93651d3bba318a9aee3fbd786a"
+  }
+}
+```
+
+#### `get_wallet_info`
+Get the gateway node's wallet address and BZZ balance. Useful for checking if the node has sufficient funds. Note: this is a debugging/diagnostic tool and may be removed in future versions.
+
+**Parameters:** None
+
+**Example:**
+```json
+{
+  "name": "get_wallet_info",
+  "arguments": {}
+}
+```
+
+#### `get_notary_info`
+Check whether the notary signing service is enabled and available on the gateway.
+
+**Parameters:** None
+
+**Example:**
+```json
+{
+  "name": "get_notary_info",
+  "arguments": {}
+}
+```
+
 #### `health_check`
 Check gateway and Swarm network connectivity status.
 

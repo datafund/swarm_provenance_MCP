@@ -248,6 +248,39 @@ def create_server() -> Server:
                 }
             ),
             Tool(
+                name="check_stamp_health",
+                description="Run a health check on a specific stamp. Returns whether uploads can proceed, plus any errors (blocking) or warnings (non-blocking) with actionable suggestions. More detailed than get_stamp_status — use this to diagnose why an upload might fail.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "stamp_id": {
+                            "type": "string",
+                            "description": "The 64-character hexadecimal batch ID of the stamp (without 0x prefix)",
+                            "pattern": "^[a-fA-F0-9]{64}$"
+                        }
+                    },
+                    "required": ["stamp_id"]
+                }
+            ),
+            Tool(
+                name="get_wallet_info",
+                description="Get the gateway node's wallet address and BZZ balance. Useful for checking if the node has sufficient funds to purchase stamps. Note: this is a debugging/diagnostic tool and may be removed in future versions.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            ),
+            Tool(
+                name="get_notary_info",
+                description="Check whether the notary signing service is enabled and available on the gateway. When available, uploads can be cryptographically signed for provenance verification.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            ),
+            Tool(
                 name="health_check",
                 description="Check gateway and Swarm network connectivity status. Returns gateway URL, response time, and connection status. Call this first to verify the gateway is reachable before purchasing stamps or uploading data.",
                 inputSchema={
@@ -274,6 +307,12 @@ def create_server() -> Server:
                 return await handle_upload_data(arguments)
             elif name == "download_data":
                 return await handle_download_data(arguments)
+            elif name == "check_stamp_health":
+                return await handle_check_stamp_health(arguments)
+            elif name == "get_wallet_info":
+                return await handle_get_wallet_info(arguments)
+            elif name == "get_notary_info":
+                return await handle_get_notary_info(arguments)
             elif name == "health_check":
                 return await handle_health_check(arguments)
             else:
@@ -722,6 +761,115 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         logger.error(f"Health check failed: {str(e)}")
         return CallToolResult(
             content=[TextContent(type="text", text=error_msg)],
+            isError=True
+        )
+
+
+async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult:
+    """Handle stamp health check requests."""
+    try:
+        stamp_id = arguments.get("stamp_id")
+        if not stamp_id:
+            raise ValueError("Stamp ID is required")
+
+        clean_stamp_id = validate_and_clean_stamp_id(stamp_id)
+        result = gateway_client.check_stamp_health(clean_stamp_id)
+
+        can_upload = result.get('can_upload', False)
+        errors = result.get('errors', [])
+        warnings = result.get('warnings', [])
+        status = result.get('status', {})
+
+        if can_upload:
+            response_text = f"✅ Stamp {clean_stamp_id[:16]}... is healthy and ready for uploads.\n\n"
+        else:
+            response_text = f"❌ Stamp {clean_stamp_id[:16]}... cannot be used for uploads.\n\n"
+
+        if errors:
+            response_text += "Errors:\n"
+            for err in errors:
+                response_text += f"   [{err.get('code', '?')}] {err.get('message', '')}\n"
+                if err.get('suggestion'):
+                    response_text += f"   → {err['suggestion']}\n"
+
+        if warnings:
+            response_text += "Warnings:\n"
+            for warn in warnings:
+                response_text += f"   [{warn.get('code', '?')}] {warn.get('message', '')}\n"
+                if warn.get('suggestion'):
+                    response_text += f"   → {warn['suggestion']}\n"
+
+        if status:
+            response_text += f"\nStatus:\n"
+            if status.get('utilizationPercent') is not None:
+                response_text += f"   Utilization: {status['utilizationPercent']}% ({status.get('utilizationStatus', 'unknown')})\n"
+            if status.get('batchTTL') is not None:
+                ttl = status['batchTTL']
+                response_text += f"   TTL: {ttl:,} seconds ({ttl/86400:.1f} days)\n"
+            if status.get('expectedExpiration'):
+                response_text += f"   Expires: {status['expectedExpiration']}\n"
+
+        return CallToolResult(
+            content=[TextContent(type="text", text=response_text)]
+        )
+
+    except ValueError as e:
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"Validation error: {str(e)}")],
+            isError=True
+        )
+    except RequestException as e:
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"Failed to check stamp health: {str(e)}")],
+            isError=True
+        )
+
+
+async def handle_get_wallet_info(arguments: Dict[str, Any]) -> CallToolResult:
+    """Handle wallet info requests."""
+    try:
+        result = gateway_client.get_wallet_info()
+
+        response_text = f"Wallet Information:\n"
+        response_text += f"   Address: {result.get('walletAddress', 'N/A')}\n"
+        response_text += f"   BZZ Balance: {result.get('bzzBalance', 'N/A')}\n"
+
+        return CallToolResult(
+            content=[TextContent(type="text", text=response_text)]
+        )
+
+    except RequestException as e:
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"Failed to get wallet info: {str(e)}")],
+            isError=True
+        )
+
+
+async def handle_get_notary_info(arguments: Dict[str, Any]) -> CallToolResult:
+    """Handle notary info requests."""
+    try:
+        result = gateway_client.get_notary_info()
+
+        enabled = result.get('enabled', False)
+        available = result.get('available', False)
+
+        if enabled and available:
+            response_text = f"✅ Notary service is enabled and available.\n\n"
+            response_text += f"   Address: {result.get('address', 'N/A')}\n"
+        elif enabled and not available:
+            response_text = f"⚠️  Notary service is enabled but not currently available.\n\n"
+        else:
+            response_text = f"Notary service is not enabled on this gateway.\n\n"
+
+        response_text += f"   Status: {result.get('message', 'N/A')}\n"
+
+        return CallToolResult(
+            content=[TextContent(type="text", text=response_text)]
+        )
+
+    except RequestException as e:
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"Failed to get notary info: {str(e)}")],
             isError=True
         )
 

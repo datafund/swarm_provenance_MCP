@@ -12,6 +12,8 @@ import time
 
 import pytest
 
+pytestmark = pytest.mark.docker
+
 IMAGE_NAME = "swarm-provenance-mcp:test"
 
 INITIALIZE_REQUEST = {

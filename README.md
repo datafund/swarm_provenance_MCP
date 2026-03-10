@@ -103,7 +103,7 @@ docker compose run --rm swarm-provenance-mcp
 |----------|-------------|---------|
 | `SWARM_GATEWAY_URL` | Gateway endpoint URL | `https://provenance-gateway.datafund.io` |
 | `DEFAULT_STAMP_AMOUNT` | Default stamp amount in wei | `2000000000` |
-| `DEFAULT_STAMP_DEPTH` | Default stamp depth (16-24) | `17` |
+| `DEFAULT_STAMP_DEPTH` | Default stamp depth: 17 (small), 20 (medium), 22 (large) | `17` |
 
 ## Configuration
 

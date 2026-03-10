@@ -4,7 +4,7 @@
     "description": "Purchase a new Swarm postage stamp with configurable amount and depth.",
     "parameters": {
       "amount": "integer (optional) — stamp amount in wei",
-      "depth": "integer (optional) — stamp depth 16-24",
+      "depth": "integer (optional) — stamp depth: 17 (small), 20 (medium), 22 (large)",
       "label": "string (optional) — human-readable label"
     }
   },

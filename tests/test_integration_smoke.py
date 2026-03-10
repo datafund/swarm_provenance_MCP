@@ -194,6 +194,7 @@ class TestConfigurationStability:
             'swarm_gateway_url',
             'default_stamp_amount',
             'default_stamp_depth',
+            'payment_mode',
             'mcp_server_name',
             'mcp_server_version'
         ]

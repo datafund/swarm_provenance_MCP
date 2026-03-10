@@ -13,6 +13,7 @@ ENV PYTHONUNBUFFERED=1
 ENV SWARM_GATEWAY_URL=https://provenance-gateway.datafund.io
 ENV DEFAULT_STAMP_AMOUNT=2000000000
 ENV DEFAULT_STAMP_DEPTH=17
+ENV PAYMENT_MODE=free
 
 RUN groupadd --gid 1000 mcp \
     && useradd --uid 1000 --gid mcp --create-home mcp

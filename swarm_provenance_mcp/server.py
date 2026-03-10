@@ -107,8 +107,8 @@ def validate_stamp_depth(depth: int) -> None:
     Raises:
         ValueError: If depth is invalid
     """
-    if not (16 <= depth <= 24):
-        raise ValueError(f"Stamp depth must be between 16 and 24, got: {depth}")
+    if not (17 <= depth <= 22):
+        raise ValueError(f"Stamp depth must be 17 (small), 20 (medium), or 22 (large), got: {depth}")
 
 
 def validate_data_size(data: str) -> None:
@@ -137,22 +137,22 @@ def create_server() -> Server:
         return [
             Tool(
                 name="purchase_stamp",
-                description="Purchase a new Swarm postage stamp. Returns a 64-character hexadecimal batch ID (without 0x prefix) that can be used for uploading data to Swarm. AGENT GUIDANCE: Celebrate the success and provide next steps. Emphasize that it takes ~1 minute for stamp info to be available on blockchain. Suggest using it for only one file upload (max 4KB), then purchase another stamp for the next upload.",
+                description="Purchase a new Swarm postage stamp. Returns a 64-character hex batch ID that can be used with upload_data. A stamp can be reused for multiple uploads until its capacity or TTL is exhausted. After purchase, wait ~1 minute for blockchain propagation before using the stamp.",
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "amount": {
                             "type": "integer",
-                            "description": f"Amount of the stamp in wei. Higher amounts provide longer TTL (time-to-live) before stamp expires (default: {settings.default_stamp_amount})",
+                            "description": f"Amount in wei — controls TTL (time-to-live). Higher amount = longer before the stamp expires (default: {settings.default_stamp_amount})",
                             "default": settings.default_stamp_amount,
                             "minimum": 1000000
                         },
                         "depth": {
                             "type": "integer",
-                            "description": f"Depth of the stamp (16-24). Depth determines storage capacity - higher depth allows storing more chunks (default: {settings.default_stamp_depth})",
+                            "description": f"Depth — controls storage capacity. Three practical sizes: 17 (small, ~35KB), 20 (medium, ~500MB), 22 (large, ~6GB). Capacities are approximate effective volumes with erasure coding. Higher depth costs more (default: {settings.default_stamp_depth})",
                             "default": settings.default_stamp_depth,
-                            "minimum": 16,
-                            "maximum": 24
+                            "minimum": 17,
+                            "maximum": 22
                         },
                         "label": {
                             "type": "string",
@@ -165,7 +165,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="get_stamp_status",
-                description="Get detailed information about a specific stamp including TTL, expiration time, utilization, and usability status. Essential for checking if a stamp is still valid for uploads. AGENT GUIDANCE: Present results with expiration time and usability status highlighted. If stamp is near expiration or unusable, emphasize this to the user.",
+                description="Get detailed information about a specific stamp including TTL, expiration time, utilization, and usability status. Use this to check whether a stamp is still valid before calling upload_data.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -180,7 +180,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="list_stamps",
-                description="List all available postage stamps with their details including batch IDs, amounts, depths, TTL, expiration times, and utilization. Shows both local stamps (owned by this node) and network stamps. AGENT GUIDANCE: Present as a table with columns: Batch ID, Expiration Time, Status. Do not categorize or give recommendations. Note that this might return a long list and may be removed in future versions.",
+                description="List all available postage stamps with their details including batch IDs, amounts, depths, TTL, expiration times, and utilization. Useful for finding a usable stamp for upload_data or identifying stamps that need extending.",
                 inputSchema={
                     "type": "object",
                     "properties": {},
@@ -189,7 +189,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="extend_stamp",
-                description="Extend an existing stamp with additional funds to increase its TTL (time-to-live). This extends the expiration date but does NOT increase storage capacity. The stamp must be owned by this node. AGENT GUIDANCE: Show before/after comparison if possible. Note that extension info takes time to propagate through blockchain - suggest user to check stamp status again in ~1 minute to see new expiration time.",
+                description="Extend an existing stamp by adding funds to increase its TTL (time-to-live). This extends the expiration date but does NOT increase storage capacity (depth). Changes take ~1 minute to propagate through the blockchain.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -209,7 +209,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="upload_data",
-                description="Upload data to the Swarm network using a valid postage stamp. Supports files up to 4KB. Validates that the stamp ID exists and is usable before upload. Returns a Swarm reference hash for retrieving the data. AGENT GUIDANCE: Celebrate successful upload and provide retrieval instructions. Show how to copy the reference hash for later data retrieval.",
+                description="Upload data to the Swarm network using a valid postage stamp. Requires a stamp_id from purchase_stamp (wait ~1 min after purchase). Max 4KB per upload. Returns a 64-char hex reference hash — pass it to download_data to retrieve the content later.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -234,7 +234,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="download_data",
-                description="Download data from the Swarm network using a reference hash. Returns the raw data content. For binary data, size and type information is provided instead of content. AGENT GUIDANCE: Present content appropriately - for JSON data, show field names and truncate long fields to one line. For binary data, explain what it is and how to save it.",
+                description="Download data from the Swarm network using a reference hash. The reference hash is returned by upload_data after a successful upload. Returns the decoded content for text/JSON, or size and type metadata for binary data.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -249,7 +249,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="health_check",
-                description="Check gateway and Swarm network connectivity status. Returns gateway URL, response time, and connection status. Useful for troubleshooting connectivity issues. AGENT GUIDANCE: Show simple 'all good' vs 'issues detected' status. If problems found, suggest checking the gateway server at the URL provided.",
+                description="Check gateway and Swarm network connectivity status. Returns gateway URL, response time, and connection status. Call this first to verify the gateway is reachable before purchasing stamps or uploading data.",
                 inputSchema={
                     "type": "object",
                     "properties": {},
@@ -441,7 +441,6 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
             response_text = "📭 No stamps found.\n\n💡 Use the 'purchase_stamp' tool to create your first stamp!"
         else:
             response_text = f"📋 Found {total_count} stamp(s):\n\n"
-            response_text += f"PRESENTATION_HINT: Format as table with columns: Batch ID | Expiration Time | Status\n\n"
 
             # Header for table format
             response_text += f"{'Batch ID':<20} | {'Expiration':<20} | {'Status':<10}\n"
@@ -465,7 +464,6 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
 
                 response_text += f"{display_id:<20} | {str(expiration):<20} | {status:<10}\n"
 
-            response_text += f"\n⚠️  Note: This tool may be removed in future versions due to potentially long lists."
 
         return CallToolResult(
             content=[TextContent(type="text", text=response_text)]
@@ -635,7 +633,6 @@ async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
                 parsed_json = json.loads(result_text)
 
                 response_text = f"📥 Successfully downloaded JSON data from `{clean_reference}`:\n\n"
-                response_text += f"PRESENTATION_HINT: Show field names and truncate long fields to one line\n\n"
 
                 # Show JSON structure with field truncation
                 response_text += "📋 JSON Structure:\n"

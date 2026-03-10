@@ -21,7 +21,9 @@ async def call_tool_directly(server, name: str, arguments: Dict[str, Any]):
     """
     from swarm_provenance_mcp.server import (
         handle_purchase_stamp, handle_get_stamp_status, handle_list_stamps,
-        handle_extend_stamp, handle_upload_data, handle_download_data, handle_health_check
+        handle_extend_stamp, handle_upload_data, handle_download_data,
+        handle_check_stamp_health, handle_get_wallet_info, handle_get_notary_info,
+        handle_health_check
     )
 
     handlers = {
@@ -31,6 +33,9 @@ async def call_tool_directly(server, name: str, arguments: Dict[str, Any]):
         "extend_stamp": handle_extend_stamp,
         "upload_data": handle_upload_data,
         "download_data": handle_download_data,
+        "check_stamp_health": handle_check_stamp_health,
+        "get_wallet_info": handle_get_wallet_info,
+        "get_notary_info": handle_get_notary_info,
         "health_check": handle_health_check
     }
 
@@ -97,6 +102,31 @@ class TestToolExecution:
                 "message": "Upload successful"
             }
             mock_client.download_data.return_value = b'{"test": "data content"}'
+            mock_client.check_stamp_health.return_value = {
+                "stamp_id": TEST_STAMP_ID,
+                "can_upload": True,
+                "errors": [],
+                "warnings": [],
+                "status": {
+                    "exists": True,
+                    "local": True,
+                    "usable": True,
+                    "utilizationPercent": 12.5,
+                    "utilizationStatus": "ok",
+                    "batchTTL": 86400,
+                    "expectedExpiration": "2026-04-10-12-00"
+                }
+            }
+            mock_client.get_wallet_info.return_value = {
+                "walletAddress": "0x1234567890abcdef1234567890abcdef12345678",
+                "bzzBalance": "5000000000000000"
+            }
+            mock_client.get_notary_info.return_value = {
+                "enabled": True,
+                "available": True,
+                "address": "0xabcdef1234567890abcdef1234567890abcdef12",
+                "message": "Notary service is operational"
+            }
             mock_client.health_check.return_value = {
                 "status": "healthy",
                 "gateway_url": "http://localhost:8000",
@@ -199,6 +229,78 @@ class TestToolExecution:
         assert not result.isError
         mock_gateway_client.download_data.assert_called_once_with(TEST_REFERENCE)
 
+    async def test_check_stamp_health_tool(self, server, mock_gateway_client):
+        """Test check_stamp_health tool execution."""
+        result = await call_tool_directly(
+            server, "check_stamp_health", {"stamp_id": TEST_STAMP_ID}
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert not result.isError
+        mock_gateway_client.check_stamp_health.assert_called_once_with(TEST_STAMP_ID)
+
+        content_text = result.content[0].text
+        assert "healthy" in content_text.lower() or "ready" in content_text.lower()
+
+    async def test_check_stamp_health_unhealthy(self, server, mock_gateway_client):
+        """Test check_stamp_health with errors."""
+        mock_gateway_client.check_stamp_health.return_value = {
+            "stamp_id": TEST_STAMP_ID,
+            "can_upload": False,
+            "errors": [{"code": "EXPIRED", "message": "Stamp has expired", "suggestion": "Purchase a new stamp"}],
+            "warnings": [],
+            "status": {"exists": True, "usable": False}
+        }
+
+        result = await call_tool_directly(
+            server, "check_stamp_health", {"stamp_id": TEST_STAMP_ID}
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert not result.isError  # Tool succeeded, stamp is unhealthy
+        content_text = result.content[0].text
+        assert "cannot" in content_text.lower()
+        assert "EXPIRED" in content_text
+
+    async def test_get_wallet_info_tool(self, server, mock_gateway_client):
+        """Test get_wallet_info tool execution."""
+        result = await call_tool_directly(server, "get_wallet_info", {})
+
+        assert isinstance(result, CallToolResult)
+        assert not result.isError
+        mock_gateway_client.get_wallet_info.assert_called_once()
+
+        content_text = result.content[0].text
+        assert "0x1234" in content_text
+        assert "Balance" in content_text
+
+    async def test_get_notary_info_tool(self, server, mock_gateway_client):
+        """Test get_notary_info tool execution."""
+        result = await call_tool_directly(server, "get_notary_info", {})
+
+        assert isinstance(result, CallToolResult)
+        assert not result.isError
+        mock_gateway_client.get_notary_info.assert_called_once()
+
+        content_text = result.content[0].text
+        assert "enabled" in content_text.lower() or "available" in content_text.lower()
+
+    async def test_get_notary_info_disabled(self, server, mock_gateway_client):
+        """Test get_notary_info when notary is disabled."""
+        mock_gateway_client.get_notary_info.return_value = {
+            "enabled": False,
+            "available": False,
+            "address": None,
+            "message": "Notary service is not configured"
+        }
+
+        result = await call_tool_directly(server, "get_notary_info", {})
+
+        assert isinstance(result, CallToolResult)
+        assert not result.isError
+        content_text = result.content[0].text
+        assert "not enabled" in content_text.lower()
+
     async def test_health_check_tool(self, server, mock_gateway_client):
         """Test health_check tool execution."""
         result = await call_tool_directly(server, "health_check", {})
@@ -250,6 +352,9 @@ class TestToolExecution:
             ("extend_stamp", {"stamp_id": TEST_STAMP_ID, "amount": 2000000000}),
             ("upload_data", {"data": "test data", "stamp_id": TEST_STAMP_ID}),
             ("download_data", {"reference": TEST_REFERENCE}),
+            ("check_stamp_health", {"stamp_id": TEST_STAMP_ID}),
+            ("get_wallet_info", {}),
+            ("get_notary_info", {}),
             ("health_check", {})
         ]
 

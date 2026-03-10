@@ -189,6 +189,51 @@ class SwarmGatewayClient:
             "gateway_response": health_data
         }
 
+    def check_stamp_health(self, stamp_id: str) -> Dict[str, Any]:
+        """Check health of a specific stamp for upload readiness.
+
+        Args:
+            stamp_id: The batch ID of the stamp to check
+
+        Returns:
+            Health check with can_upload, errors, warnings, and status
+
+        Raises:
+            RequestException: If the request fails
+        """
+        url = f"{self.base_url}/api/v1/stamps/{stamp_id}/check"
+        response = self.session.get(url, timeout=30)
+        response.raise_for_status()
+        return response.json()
+
+    def get_wallet_info(self) -> Dict[str, Any]:
+        """Get wallet address and BZZ balance.
+
+        Returns:
+            Response containing walletAddress and bzzBalance
+
+        Raises:
+            RequestException: If the request fails
+        """
+        url = f"{self.base_url}/api/v1/wallet"
+        response = self.session.get(url, timeout=30)
+        response.raise_for_status()
+        return response.json()
+
+    def get_notary_info(self) -> Dict[str, Any]:
+        """Get notary service status and configuration.
+
+        Returns:
+            Response containing enabled, available, address, and message
+
+        Raises:
+            RequestException: If the request fails
+        """
+        url = f"{self.base_url}/api/v1/notary/info"
+        response = self.session.get(url, timeout=30)
+        response.raise_for_status()
+        return response.json()
+
     def close(self):
         """Close the HTTP session."""
         self.session.close()

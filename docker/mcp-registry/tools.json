@@ -45,6 +45,23 @@
     }
   },
   {
+    "name": "check_stamp_health",
+    "description": "Diagnose stamp upload readiness with errors, warnings, and suggestions.",
+    "parameters": {
+      "stamp_id": "string (required) — 64-char hex batch ID"
+    }
+  },
+  {
+    "name": "get_wallet_info",
+    "description": "Get gateway node wallet address and BZZ balance (diagnostic tool).",
+    "parameters": {}
+  },
+  {
+    "name": "get_notary_info",
+    "description": "Check whether the notary signing service is available on the gateway.",
+    "parameters": {}
+  },
+  {
     "name": "health_check",
     "description": "Check gateway and Swarm network connectivity status.",
     "parameters": {}

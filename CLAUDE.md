@@ -89,6 +89,12 @@ AI Agents → MCP Server → Gateway Client → swarm_connect Gateway → Swarm 
 - `get_stamp_status` - Retrieve detailed stamp information (includes utilization data)
 - `list_stamps` - List all available stamps
 - `extend_stamp` - Add funds to existing stamps
+- `upload_data` - Upload data to Swarm (max 4KB)
+- `download_data` - Download data from Swarm by reference hash
+- `check_stamp_health` - Diagnose stamp upload readiness with errors/warnings
+- `get_wallet_info` - Node wallet address and BZZ balance (debug, may be removed)
+- `get_notary_info` - Check notary signing service availability
+- `health_check` - Gateway connectivity status
 
 ### Dependencies Architecture
 - **MCP Framework**: Uses `mcp>=1.0.0` for protocol implementation
@@ -147,6 +153,9 @@ This MCP server requires a running `swarm_connect` FastAPI gateway service. The 
 - `POST /api/v1/stamps/` - Purchase stamps
 - `GET /api/v1/stamps/` - List stamps
 - `GET /api/v1/stamps/{id}` - Get stamp details
+- `GET /api/v1/stamps/{id}/check` - Stamp health check
 - `PATCH /api/v1/stamps/{id}/extend` - Extend stamps
 - `POST /api/v1/data/` - Upload data
 - `GET /api/v1/data/{reference}` - Download data
+- `GET /api/v1/wallet` - Wallet info
+- `GET /api/v1/notary/info` - Notary service info

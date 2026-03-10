@@ -114,7 +114,9 @@ class TestToolSynchronization:
 
         expected_tools = {
             'purchase_stamp', 'get_stamp_status', 'list_stamps',
-            'extend_stamp', 'upload_data', 'download_data', 'health_check'
+            'extend_stamp', 'upload_data', 'download_data',
+            'check_stamp_health', 'get_wallet_info', 'get_notary_info',
+            'health_check'
         }
 
         found_tools = set(tools.keys())
@@ -128,11 +130,21 @@ class TestToolSynchronization:
 
         expected_methods = {
             'purchase_stamp', 'get_stamp_details', 'list_stamps',
-            'extend_stamp', 'upload_data', 'download_data', 'health_check'
+            'extend_stamp', 'upload_data', 'download_data',
+            'check_stamp_health', 'get_wallet_info', 'get_notary_info',
+            'health_check'
         }
 
         missing_methods = expected_methods - methods
         assert not missing_methods, f"Gateway methods missing from source: {missing_methods}"
+
+    def test_new_gateway_methods_exist_in_source(self, gateway_client_source_code):
+        """Test that new gateway methods exist in source code."""
+        methods = self.extract_gateway_methods(gateway_client_source_code)
+
+        new_methods = {'check_stamp_health', 'get_wallet_info', 'get_notary_info'}
+        missing = new_methods - methods
+        assert not missing, f"New gateway methods missing from source: {missing}"
 
     def test_tool_handlers_implemented(self, server_source_code):
         """Test that all tools have handler implementations."""
@@ -175,7 +187,9 @@ class TestToolSynchronization:
 
         expected_tools = {
             'purchase_stamp', 'get_stamp_status', 'list_stamps',
-            'extend_stamp', 'upload_data', 'download_data', 'health_check'
+            'extend_stamp', 'upload_data', 'download_data',
+            'check_stamp_health', 'get_wallet_info', 'get_notary_info',
+            'health_check'
         }
 
         missing_tools = expected_tools - tool_names
@@ -187,7 +201,9 @@ class TestToolSynchronization:
 
         expected_methods = {
             'purchase_stamp', 'get_stamp_details', 'list_stamps',
-            'extend_stamp', 'upload_data', 'download_data', 'health_check'
+            'extend_stamp', 'upload_data', 'download_data',
+            'check_stamp_health', 'get_wallet_info', 'get_notary_info',
+            'health_check'
         }
 
         actual_methods = {name for name, _ in inspect.getmembers(client, inspect.ismethod)

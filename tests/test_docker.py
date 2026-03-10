@@ -53,6 +53,9 @@ EXPECTED_TOOLS = [
     "extend_stamp",
     "upload_data",
     "download_data",
+    "check_stamp_health",
+    "get_wallet_info",
+    "get_notary_info",
     "health_check",
 ]
 

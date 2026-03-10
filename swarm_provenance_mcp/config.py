@@ -42,6 +42,13 @@ class Settings(BaseSettings):
         description="Version of the MCP server"
     )
 
+    # Payment Configuration
+    payment_mode: str = Field(
+        default="free",
+        env="PAYMENT_MODE",
+        description="Payment mode for gateway requests (free = rate-limited free tier)"
+    )
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

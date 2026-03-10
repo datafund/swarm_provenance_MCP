@@ -104,6 +104,7 @@ docker compose run --rm swarm-provenance-mcp
 | `SWARM_GATEWAY_URL` | Gateway endpoint URL | `https://provenance-gateway.datafund.io` |
 | `DEFAULT_STAMP_AMOUNT` | Default stamp amount in wei | `2000000000` |
 | `DEFAULT_STAMP_DEPTH` | Default stamp depth: 17 (small), 20 (medium), 22 (large) | `17` |
+| `PAYMENT_MODE` | Gateway payment tier (`free` = 3 write req/min) | `free` |
 
 ## Configuration
 
@@ -112,6 +113,7 @@ Environment variables (set in `.env` file):
 - `SWARM_GATEWAY_URL`: URL of the swarm_connect FastAPI gateway (default: `https://provenance-gateway.datafund.io`)
 - `DEFAULT_STAMP_AMOUNT`: Default amount for new stamps in wei (default: `2000000000`)
 - `DEFAULT_STAMP_DEPTH`: Default depth for new stamps (default: `17`)
+- `PAYMENT_MODE`: Gateway payment tier (default: `free` — rate limited to 3 write requests/minute)
 
 ### Gateway Options
 

@@ -160,6 +160,78 @@ def validate_data_size(data: str) -> None:
         raise ValueError("Data cannot be empty")
 
 
+# All tool names for typo correction
+ALL_TOOL_NAMES = [
+    "purchase_stamp", "get_stamp_status", "list_stamps", "extend_stamp",
+    "upload_data", "download_data", "check_stamp_health",
+    "get_wallet_info", "get_notary_info", "health_check"
+]
+
+
+def _levenshtein_distance(s1: str, s2: str) -> int:
+    """Compute Levenshtein edit distance between two strings."""
+    if len(s1) < len(s2):
+        return _levenshtein_distance(s2, s1)
+    if len(s2) == 0:
+        return len(s1)
+    prev_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        curr_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = prev_row[j + 1] + 1
+            deletions = curr_row[j] + 1
+            substitutions = prev_row[j] + (c1 != c2)
+            curr_row.append(min(insertions, deletions, substitutions))
+        prev_row = curr_row
+    return prev_row[-1]
+
+
+def _suggest_tool_name(name: str) -> str:
+    """Build error message with typo correction suggestions for unknown tool names."""
+    threshold = max(4, len(name) * 2 // 5)
+    scored = [(t, _levenshtein_distance(name, t)) for t in ALL_TOOL_NAMES]
+    close = sorted([(t, d) for t, d in scored if d <= threshold], key=lambda x: x[1])
+    suggestions = [t for t, _ in close[:3]]
+
+    msg = f"Unknown tool: {name}."
+    if suggestions:
+        if len(suggestions) == 1:
+            msg += f" Did you mean: {suggestions[0]}?"
+        else:
+            msg += f" Did you mean one of: {', '.join(suggestions)}?"
+    else:
+        msg += f" Available tools: {', '.join(ALL_TOOL_NAMES)}"
+    return msg
+
+
+def _format_hints(next_tool: str, related: List[str]) -> str:
+    """Format _next and _related hints for appending to tool responses."""
+    lines = f"\n\n_next: {next_tool}"
+    if related:
+        lines += f"\n_related: {', '.join(related)}"
+    return lines
+
+
+def _format_error(message: str, retryable: bool, next_tool: Optional[str] = None) -> str:
+    """Format structured error message with retryable flag and recovery hint."""
+    lines = message
+    lines += f"\n\nretryable: {str(retryable).lower()}"
+    if next_tool:
+        lines += f"\n_next: {next_tool}"
+    return lines
+
+
+def _is_retryable_error(e: Exception) -> bool:
+    """Determine if an exception represents a transient, retryable error."""
+    if isinstance(e, RequestException) and hasattr(e, 'response') and e.response is not None:
+        return e.response.status_code in (408, 429, 502, 503, 504)
+    if isinstance(e, RequestException):
+        # Connection errors are generally retryable
+        error_str = str(e).lower()
+        return any(w in error_str for w in ('timeout', 'connection', 'connect'))
+    return False
+
+
 def create_server() -> Server:
     """Create and configure the MCP server."""
     server = Server(
@@ -357,18 +429,26 @@ def create_server() -> Server:
                     content=[
                         TextContent(
                             type="text",
-                            text=f"Unknown tool: {name}"
+                            text=_format_error(
+                                _suggest_tool_name(name),
+                                retryable=False
+                            )
                         )
                     ],
                     isError=True
                 )
         except Exception as e:
             logger.error(f"Error in tool {name}: {e}", exc_info=True)
+            retryable = _is_retryable_error(e)
             return CallToolResult(
                 content=[
                     TextContent(
                         type="text",
-                        text=f"Error executing {name}: {str(e)}"
+                        text=_format_error(
+                            f"Error executing {name}: {str(e)}",
+                            retryable=retryable,
+                            next_tool="health_check"
+                        )
                     )
                 ],
                 isError=True
@@ -390,7 +470,10 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
 
         if label and len(label) > 100:
             return CallToolResult(
-                content=[TextContent(type="text", text="Error: Label cannot exceed 100 characters")],
+                content=[TextContent(type="text", text=_format_error(
+                    "Error: Label cannot exceed 100 characters",
+                    retryable=False, next_tool="purchase_stamp"
+                ))],
                 isError=True
             )
 
@@ -402,7 +485,9 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
             error_msg = f"❌ Stamp purchase failed - no stamp ID returned!\n\nGateway response: {result}"
             logger.error(f"Purchase failed - missing batchID in response: {result}")
             return CallToolResult(
-                content=[TextContent(type="text", text=error_msg)],
+                content=[TextContent(type="text", text=_format_error(
+                    error_msg, retryable=True, next_tool="health_check"
+                ))],
                 isError=True
             )
 
@@ -415,8 +500,8 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += f"   Label: {label}\n"
         response_text += f"\n✅ Stamp ID: `{batch_id}` (immediately available)\n"
         response_text += f"⏱️  IMPORTANT: Wait ~1 minute before using this stamp!\n"
-        response_text += f"📋 The stamp info must propagate through the blockchain before it can be used for uploads.\n"
-        response_text += f"💡 Save this Stamp ID (without 0x prefix) and check its status in about 1 minute before uploading."
+        response_text += f"📋 The stamp info must propagate through the blockchain before it can be used for uploads."
+        response_text += _format_hints("check_stamp_health", ["get_stamp_status", "upload_data", "list_stamps"])
 
         return CallToolResult(
             content=[TextContent(type="text", text=response_text)]
@@ -426,14 +511,18 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         error_msg = f"Validation error: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=error_msg)],
+            content=[TextContent(type="text", text=_format_error(
+                error_msg, retryable=False, next_tool="purchase_stamp"
+            ))],
             isError=True
         )
     except RequestException as e:
         error_msg = f"Failed to purchase stamp: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=error_msg)],
+            content=[TextContent(type="text", text=_format_error(
+                error_msg, retryable=_is_retryable_error(e), next_tool="health_check"
+            ))],
             isError=True
         )
 
@@ -486,6 +575,12 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         if result.get('label'):
             response_text += f"Label: {result['label']}\n"
 
+        # Contextual hints based on usability
+        if usable is True:
+            response_text += _format_hints("upload_data", ["extend_stamp", "check_stamp_health"])
+        else:
+            response_text += _format_hints("purchase_stamp", ["extend_stamp", "list_stamps"])
+
         return CallToolResult(
             content=[TextContent(type="text", text=response_text)]
         )
@@ -494,14 +589,18 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         error_msg = f"Validation error: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=error_msg)],
+            content=[TextContent(type="text", text=_format_error(
+                error_msg, retryable=False, next_tool="list_stamps"
+            ))],
             isError=True
         )
     except RequestException as e:
         error_msg = f"Failed to get stamp status: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=error_msg)],
+            content=[TextContent(type="text", text=_format_error(
+                error_msg, retryable=_is_retryable_error(e), next_tool="health_check"
+            ))],
             isError=True
         )
 
@@ -513,6 +612,7 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
         stamps = result.get("stamps", [])
         total_count = result.get("total_count", 0)
 
+        has_usable = False
         if total_count == 0:
             response_text = "📭 No stamps found.\n\n💡 Use the 'purchase_stamp' tool to create your first stamp!"
         else:
@@ -527,6 +627,9 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                 expiration = stamp.get('expectedExpiration', 'N/A')
                 usable = stamp.get('usable', 'N/A')
 
+                if usable is True:
+                    has_usable = True
+
                 # Truncate batch ID for table format
                 display_id = batch_id[:16] + "..." if len(str(batch_id)) > 19 else batch_id
 
@@ -540,6 +643,11 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
 
                 response_text += f"{display_id:<20} | {str(expiration):<20} | {status:<10}\n"
 
+        # Contextual hints
+        if has_usable:
+            response_text += _format_hints("upload_data", ["get_stamp_status", "check_stamp_health"])
+        else:
+            response_text += _format_hints("purchase_stamp", ["get_wallet_info"])
 
         return CallToolResult(
             content=[TextContent(type="text", text=response_text)]
@@ -549,7 +657,9 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
         error_msg = f"Failed to list stamps: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=error_msg)],
+            content=[TextContent(type="text", text=_format_error(
+                error_msg, retryable=_is_retryable_error(e), next_tool="health_check"
+            ))],
             isError=True
         )
 
@@ -579,6 +689,7 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"   Status: {result.get('message', 'Extended')}\n\n"
         response_text += f"⏱️  Important: Extension info takes ~1 minute to propagate through the blockchain.\n"
         response_text += f"🔍 Check stamp status again in about 1 minute to see the new expiration time."
+        response_text += _format_hints("check_stamp_health", ["get_stamp_status"])
 
         return CallToolResult(
             content=[TextContent(type="text", text=response_text)]
@@ -588,14 +699,18 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         error_msg = f"Validation error: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=error_msg)],
+            content=[TextContent(type="text", text=_format_error(
+                error_msg, retryable=False, next_tool="list_stamps"
+            ))],
             isError=True
         )
     except RequestException as e:
         error_msg = f"Failed to extend stamp: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=error_msg)],
+            content=[TextContent(type="text", text=_format_error(
+                error_msg, retryable=_is_retryable_error(e), next_tool="health_check"
+            ))],
             isError=True
         )
 
@@ -630,8 +745,11 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
                 return CallToolResult(
                     content=[TextContent(
                         type="text",
-                        text=f"Stamp {clean_stamp_id} exists on this gateway but is not usable for uploads. "
-                             f"Please use a different stamp or create a new one with the 'purchase_stamp' tool."
+                        text=_format_error(
+                            f"Stamp {clean_stamp_id} exists on this gateway but is not usable for uploads. "
+                            f"Please use a different stamp or create a new one.",
+                            retryable=False, next_tool="purchase_stamp"
+                        )
                     )],
                     isError=True
                 )
@@ -667,6 +785,8 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
         if stamp_validation_failed:
             response_text += f"\nNote: {validation_error_msg}"
 
+        response_text += _format_hints("download_data", ["upload_data", "check_stamp_health"])
+
         return CallToolResult(
             content=[TextContent(type="text", text=response_text)]
         )
@@ -675,14 +795,18 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
         error_msg = f"Upload validation error: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=error_msg)],
+            content=[TextContent(type="text", text=_format_error(
+                error_msg, retryable=False, next_tool="check_stamp_health"
+            ))],
             isError=True
         )
     except RequestException as e:
         error_msg = f"Failed to upload data: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=error_msg)],
+            content=[TextContent(type="text", text=_format_error(
+                error_msg, retryable=_is_retryable_error(e), next_tool="health_check"
+            ))],
             isError=True
         )
 
@@ -737,6 +861,8 @@ async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += f"   Type: Binary data\n\n"
             response_text += f"💡 This appears to be binary data (images, documents, etc.). To save it, you would need to write the bytes to a file."
 
+        response_text += _format_hints("upload_data", ["list_stamps"])
+
         return CallToolResult(
             content=[TextContent(type="text", text=response_text)]
         )
@@ -745,20 +871,32 @@ async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
         error_msg = f"Validation error: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=error_msg)],
+            content=[TextContent(type="text", text=_format_error(
+                error_msg, retryable=False
+            ))],
             isError=True
         )
     except RequestException as e:
         error_msg = f"Failed to download data: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=error_msg)],
+            content=[TextContent(type="text", text=_format_error(
+                error_msg, retryable=_is_retryable_error(e), next_tool="health_check"
+            ))],
             isError=True
         )
 
 
 async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
-    """Handle health check requests."""
+    """Handle health check requests with adaptive status.
+
+    Returns a comprehensive status including gateway connectivity, stamp
+    availability, and actionable recommendations for the agent's next step.
+    """
+    ready = False
+    recommendations = []
+    next_tool = "list_stamps"
+
     try:
         result = gateway_client.health_check()
 
@@ -766,20 +904,63 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         gateway_url = result.get('gateway_url', 'N/A')
         response_time = result.get('response_time_ms', 'N/A')
 
-        if status == 'healthy':
-            response_text = f"✅ All systems operational!\n\n"
+        gateway_ok = status == 'healthy'
+
+        if gateway_ok:
+            response_text = f"✅ Gateway operational\n\n"
             response_text += f"🌐 Gateway: {gateway_url}\n"
             if isinstance(response_time, (int, float)):
                 response_text += f"⚡ Response Time: {response_time:.0f}ms\n"
         else:
-            response_text = f"⚠️  Issues detected!\n\n"
+            response_text = f"⚠️  Gateway issues detected\n\n"
             response_text += f"Status: {status}\n"
             response_text += f"Gateway: {gateway_url}\n"
             if isinstance(response_time, (int, float)):
                 response_text += f"Response Time: {response_time:.0f}ms\n"
+            recommendations.append("Gateway not healthy — check connectivity or try again later")
+            next_tool = "health_check"
 
         if result.get('gateway_response'):
-            response_text += f"\n📋 Gateway Response: {result['gateway_response']}"
+            response_text += f"\n📋 Gateway Response: {result['gateway_response']}\n"
+
+        # Adaptive: also check stamp availability
+        stamps_info = ""
+        usable_count = 0
+        total_stamps = 0
+        if gateway_ok:
+            try:
+                stamps_result = gateway_client.list_stamps()
+                stamps = stamps_result.get("stamps", [])
+                total_stamps = len(stamps)
+                usable_count = sum(1 for s in stamps if s.get("usable") is True)
+
+                stamps_info += f"\n📋 Stamps: {usable_count} usable / {total_stamps} total\n"
+
+                if usable_count > 0:
+                    ready = True
+                    next_tool = "upload_data"
+                elif total_stamps > 0:
+                    recommendations.append(f"Found {total_stamps} stamp(s) but none are usable — purchase a new one or wait for propagation")
+                    next_tool = "purchase_stamp"
+                else:
+                    recommendations.append("No stamps found — purchase one before uploading")
+                    next_tool = "purchase_stamp"
+            except RequestException:
+                stamps_info += "\n📋 Stamps: unable to check (gateway error)\n"
+                recommendations.append("Could not check stamps — try list_stamps separately")
+
+        response_text += stamps_info
+
+        # Summary
+        response_text += f"\nready: {str(ready).lower()}"
+
+        if recommendations:
+            response_text += "\n_recommendations:"
+            for rec in recommendations:
+                response_text += f"\n  - {rec}"
+
+        response_text += f"\n\n_next: {next_tool}"
+        response_text += f"\n_related: list_stamps, purchase_stamp, get_wallet_info"
 
         return CallToolResult(
             content=[TextContent(type="text", text=response_text)]
@@ -797,7 +978,9 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
 
         logger.error(f"Health check failed: {str(e)}")
         return CallToolResult(
-            content=[TextContent(type="text", text=error_msg)],
+            content=[TextContent(type="text", text=_format_error(
+                error_msg, retryable=_is_retryable_error(e), next_tool="health_check"
+            ))],
             isError=True
         )
 
@@ -846,18 +1029,29 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
             if status.get('expectedExpiration'):
                 response_text += f"   Expires: {status['expectedExpiration']}\n"
 
+        # Contextual hints based on health
+        if can_upload:
+            response_text += _format_hints("upload_data", ["get_stamp_status", "extend_stamp"])
+        else:
+            response_text += _format_hints("purchase_stamp", ["list_stamps", "extend_stamp"])
+
         return CallToolResult(
             content=[TextContent(type="text", text=response_text)]
         )
 
     except ValueError as e:
         return CallToolResult(
-            content=[TextContent(type="text", text=f"Validation error: {str(e)}")],
+            content=[TextContent(type="text", text=_format_error(
+                f"Validation error: {str(e)}", retryable=False, next_tool="list_stamps"
+            ))],
             isError=True
         )
     except RequestException as e:
         return CallToolResult(
-            content=[TextContent(type="text", text=f"Failed to check stamp health: {str(e)}")],
+            content=[TextContent(type="text", text=_format_error(
+                f"Failed to check stamp health: {str(e)}",
+                retryable=_is_retryable_error(e), next_tool="health_check"
+            ))],
             isError=True
         )
 
@@ -870,6 +1064,7 @@ async def handle_get_wallet_info(arguments: Dict[str, Any]) -> CallToolResult:
         response_text = f"Wallet Information:\n"
         response_text += f"   Address: {result.get('walletAddress', 'N/A')}\n"
         response_text += f"   BZZ Balance: {result.get('bzzBalance', 'N/A')}\n"
+        response_text += _format_hints("purchase_stamp", ["list_stamps"])
 
         return CallToolResult(
             content=[TextContent(type="text", text=response_text)]
@@ -877,7 +1072,10 @@ async def handle_get_wallet_info(arguments: Dict[str, Any]) -> CallToolResult:
 
     except RequestException as e:
         return CallToolResult(
-            content=[TextContent(type="text", text=f"Failed to get wallet info: {str(e)}")],
+            content=[TextContent(type="text", text=_format_error(
+                f"Failed to get wallet info: {str(e)}",
+                retryable=_is_retryable_error(e), next_tool="health_check"
+            ))],
             isError=True
         )
 
@@ -899,6 +1097,7 @@ async def handle_get_notary_info(arguments: Dict[str, Any]) -> CallToolResult:
             response_text = f"Notary service is not enabled on this gateway.\n\n"
 
         response_text += f"   Status: {result.get('message', 'N/A')}\n"
+        response_text += _format_hints("upload_data", ["health_check"])
 
         return CallToolResult(
             content=[TextContent(type="text", text=response_text)]
@@ -906,7 +1105,10 @@ async def handle_get_notary_info(arguments: Dict[str, Any]) -> CallToolResult:
 
     except RequestException as e:
         return CallToolResult(
-            content=[TextContent(type="text", text=f"Failed to get notary info: {str(e)}")],
+            content=[TextContent(type="text", text=_format_error(
+                f"Failed to get notary info: {str(e)}",
+                retryable=_is_retryable_error(e), next_tool="health_check"
+            ))],
             isError=True
         )
 

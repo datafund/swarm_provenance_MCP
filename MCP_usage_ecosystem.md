@@ -154,6 +154,27 @@ Error responses include recovery guidance:
 
 This allows agents to call `health_check` once and immediately know what to do next.
 
+### MCP Prompts (Workflow Templates)
+
+The server registers prompts that agents can invoke via `prompts/list` and `prompts/get` to get step-by-step workflow instructions:
+
+| Prompt | Use case | Arguments |
+|--------|----------|-----------|
+| `provenance-upload` | Full upload workflow: health check → stamp → upload → verify | `data`, `content_type` |
+| `provenance-verify` | Download and inspect existing data by reference | `reference` |
+| `stamp-management` | Review inventory, diagnose issues, extend or purchase | none |
+
+Prompts are higher-level than individual tools — they describe multi-step workflows so agents know the full sequence without relying on per-tool `_next` hints alone.
+
+### Companion Servers
+
+The `health_check` response includes `_companion_servers` showing related servers in the Fair Data Stack:
+
+- **swarm_connect gateway** (required) — the FastAPI gateway this MCP talks to, with live connected/unreachable status
+- **fds-id MCP** (optional) — identity and signing server for cryptographic provenance chain anchoring
+
+This helps agents understand the ecosystem and identify which servers are needed for advanced workflows like signed provenance data.
+
 ## 🔗 Integration Examples
 
 ### **Research Workflow:**

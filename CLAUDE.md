@@ -128,11 +128,13 @@ The `config.py` module uses Pydantic Settings for type-safe configuration with a
 - Proper MCP error responses with structured error information
 - Request timeout handling and retry logic in gateway client
 
-### Agent Guidance (MCP Design Guidelines P0)
-- **Adaptive health_check**: Returns `ready` boolean, `_recommendations`, and contextual `_next` based on stamp availability
+### Agent Guidance (MCP Design Guidelines)
+- **Adaptive health_check**: Returns `ready` boolean, `_recommendations`, `_companion_servers`, and contextual `_next` based on stamp availability
 - **Response hints**: All success responses append `_next: <tool>` and `_related: <tools>` guiding agents to the logical next step
 - **Structured errors**: All error responses include `retryable: true|false` and `_next` recovery hint
 - **Typo correction**: Unknown tool names get Levenshtein-based "Did you mean?" suggestions
+- **MCP Prompts**: 3 workflow prompts (`provenance-upload`, `provenance-verify`, `stamp-management`) registered via `@server.list_prompts()` / `@server.get_prompt()`
+- **Cross-server coordination**: health_check reports companion servers (swarm_connect gateway status, fds-id MCP availability)
 - Helper functions: `_format_hints()`, `_format_error()`, `_is_retryable_error()`, `_suggest_tool_name()`
 
 ### Code Quality

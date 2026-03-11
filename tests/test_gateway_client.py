@@ -183,3 +183,5 @@ class TestSwarmGatewayClient:
             assert request_headers["Content-Type"] == "application/json"
             assert "User-Agent" in request_headers
             assert "swarm-provenance-mcp" in request_headers["User-Agent"]
+            assert "X-Payment-Mode" in request_headers
+            assert request_headers["X-Payment-Mode"] == "free"

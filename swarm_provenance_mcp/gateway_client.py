@@ -24,6 +24,10 @@ class SwarmGatewayClient:
             "User-Agent": f"{settings.mcp_server_name}/{settings.mcp_server_version}"
         })
 
+        # Add payment mode header for x402 gateway access
+        if settings.payment_mode:
+            self.session.headers["X-Payment-Mode"] = settings.payment_mode
+
     def purchase_stamp(
         self,
         amount: int,

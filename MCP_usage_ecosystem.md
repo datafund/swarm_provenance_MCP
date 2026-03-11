@@ -115,6 +115,9 @@ Our Swarm Provenance MCP server currently provides these tools:
 - `extend_stamp` - Add funds to existing stamps
 - `upload_data` - Store data on Swarm network (4KB limit)
 - `download_data` - Retrieve data from Swarm by reference
+- `check_stamp_health` - Diagnose stamp upload readiness with errors/warnings
+- `get_wallet_info` - Node wallet address and BZZ balance (diagnostic)
+- `get_notary_info` - Check notary signing service availability
 - `health_check` - Verify gateway and network connectivity
 
 ## 🔗 Integration Examples

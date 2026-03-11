@@ -111,9 +111,10 @@ AI Agents → MCP Server → Gateway Client → swarm_connect Gateway → Swarm 
 ## Configuration Management
 
 ### Environment Variables
-- `SWARM_GATEWAY_URL`: Gateway endpoint (default: `http://localhost:8001`)
+- `SWARM_GATEWAY_URL`: Gateway endpoint (default: `https://provenance-gateway.datafund.io`)
 - `DEFAULT_STAMP_AMOUNT`: Default stamp amount in wei (default: `2000000000`)
 - `DEFAULT_STAMP_DEPTH`: Default stamp depth (default: `17`)
+- `PAYMENT_MODE`: Gateway payment tier — `free` for rate-limited free tier (default: `free`)
 - `MCP_SERVER_NAME`: Server identification (default: `swarm-provenance-mcp`)
 - `MCP_SERVER_VERSION`: Server version (default: `0.1.0`)
 

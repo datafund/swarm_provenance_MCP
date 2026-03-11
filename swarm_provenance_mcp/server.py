@@ -7,7 +7,6 @@ import re
 from typing import Any, Dict, List, Optional, Sequence
 
 from mcp.server import Server
-from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
 from mcp.types import (
     Tool,
@@ -27,6 +26,40 @@ logger = logging.getLogger(__name__)
 
 # Global gateway client instance
 gateway_client = SwarmGatewayClient()
+
+# Agent-facing instructions sent during MCP initialization handshake
+MCP_INSTRUCTIONS = """
+Swarm Provenance MCP — decentralized storage with cryptographic provenance on the Swarm network.
+
+PAYMENT MODEL:
+The gateway uses x402 payment protocol. Free tier is configured automatically (rate limit: 3 write requests/minute). Read operations are always free and unlimited.
+
+TYPICAL WORKFLOW:
+1. health_check — verify gateway is reachable
+2. list_stamps — find existing usable stamps
+3. If no usable stamp: purchase_stamp, then wait ~1 minute for blockchain propagation
+4. check_stamp_health — verify stamp is ready for uploads
+5. upload_data — store data, get a reference hash back
+6. download_data — retrieve data using the reference hash
+
+KEY CONSTRAINTS:
+- Max upload size: 4KB (4096 bytes) per request
+- After purchase_stamp or extend_stamp, wait ~1 minute before using the stamp
+- Stamp depth controls capacity: 17 (small, ~35KB), 20 (medium, ~500MB), 22 (large, ~6GB)
+- Stamps are rented storage — data expires when the stamp TTL runs out
+- A stamp can be reused for multiple uploads until capacity or TTL is exhausted
+
+TOOL RELATIONSHIPS:
+- purchase_stamp → returns stamp_id → use with upload_data, check_stamp_health, get_stamp_status, extend_stamp
+- upload_data → returns reference hash → use with download_data
+- check_stamp_health gives detailed diagnostics; get_stamp_status gives raw stamp data
+- extend_stamp increases TTL (not capacity)
+
+ERRORS:
+- "Not usable": stamp expired or not yet propagated — wait or purchase new
+- HTTP 404 on stamp: may be newly purchased, wait ~1 minute and retry
+- Size exceeded: data > 4KB, reduce payload before upload
+""".strip()
 
 # Validation patterns
 STAMP_ID_PATTERN = re.compile(r"^[a-fA-F0-9]{64}$")
@@ -129,7 +162,11 @@ def validate_data_size(data: str) -> None:
 
 def create_server() -> Server:
     """Create and configure the MCP server."""
-    server = Server(settings.mcp_server_name)
+    server = Server(
+        settings.mcp_server_name,
+        version=settings.mcp_server_version,
+        instructions=MCP_INSTRUCTIONS
+    )
 
     @server.list_tools()
     async def list_tools() -> List[Tool]:
@@ -890,11 +927,7 @@ async def main():
             await server.run(
                 read_stream,
                 write_stream,
-                InitializationOptions(
-                    server_name=settings.mcp_server_name,
-                    server_version=settings.mcp_server_version,
-                    capabilities={}
-                )
+                server.create_initialization_options()
             )
     except KeyboardInterrupt:
         logger.info("Received interrupt signal")

@@ -103,7 +103,8 @@ When chain_enabled=true and blockchain dependencies are installed, on-chain prov
 These register Swarm hashes in the DataProvenance smart contract on Base Sepolia, creating an immutable on-chain record.
 - chain_health — test RPC connectivity (no wallet needed)
 - chain_balance — check wallet ETH balance with funding guidance when low
-- Additional chain tools (anchor_data, verify_chain, etc.) will be added when enabled.
+- anchor_hash — register a Swarm hash on-chain (costs gas, requires funded wallet)
+- Additional chain tools (verify_chain, record_access, etc.) will be added when enabled.
 The health_check tool reports chain status alongside gateway status.
 
 COMPANION SERVERS:
@@ -233,6 +234,7 @@ ALL_TOOL_NAMES = [
     "health_check",
     "chain_balance",
     "chain_health",
+    "anchor_hash",
 ]
 
 
@@ -531,6 +533,32 @@ def create_server() -> Server:
                             "required": [],
                         },
                     ),
+                    Tool(
+                        name="anchor_hash",
+                        description="Register a Swarm reference hash on the blockchain, creating an immutable provenance record with owner, timestamp, and data type. Costs gas — requires a funded wallet (check with chain_balance). If the hash is already registered, returns the existing record without error.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "swarm_hash": {
+                                    "type": "string",
+                                    "description": "64-character hexadecimal Swarm reference hash to anchor on-chain (without 0x prefix)",
+                                    "pattern": "^[a-fA-F0-9]{64}$",
+                                },
+                                "data_type": {
+                                    "type": "string",
+                                    "description": "Data type/category for the on-chain record (default: 'swarm-provenance')",
+                                    "default": "swarm-provenance",
+                                    "maxLength": 64,
+                                },
+                                "owner": {
+                                    "type": "string",
+                                    "description": "Ethereum address to register as the data owner. If omitted, the wallet address is used. Use this to register data on behalf of another address (requires delegate authorization).",
+                                    "pattern": "^0x[a-fA-F0-9]{40}$",
+                                },
+                            },
+                            "required": ["swarm_hash"],
+                        },
+                    ),
                 ]
             )
 
@@ -565,7 +593,8 @@ def create_server() -> Server:
                 return await handle_chain_balance(arguments)
             elif name == "chain_health":
                 return await handle_chain_health(arguments)
-            # Chain anchoring tools (#49-#56) will be routed here
+            elif name == "anchor_hash":
+                return await handle_anchor_hash(arguments)
             else:
                 return CallToolResult(
                     content=[
@@ -1637,6 +1666,199 @@ async def handle_chain_health(arguments: Dict[str, Any]) -> CallToolResult:
                         error_msg,
                         retryable=is_connection_error,
                         next_tool="health_check",
+                    ),
+                )
+            ],
+            isError=True,
+        )
+
+
+async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
+    """Handle anchor_hash requests — register a Swarm hash on-chain."""
+    if not CHAIN_AVAILABLE:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        "Chain module not available. Install blockchain dependencies: pip install -e .[blockchain]",
+                        retryable=False,
+                    ),
+                )
+            ],
+            isError=True,
+        )
+    if not chain_client:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        "Chain client not initialized. Set PROVENANCE_WALLET_KEY to enable wallet operations.",
+                        retryable=False,
+                        next_tool="chain_health",
+                    ),
+                )
+            ],
+            isError=True,
+        )
+
+    try:
+        swarm_hash = arguments.get("swarm_hash")
+        if not swarm_hash:
+            raise ValueError("swarm_hash is required")
+        clean_hash = validate_and_clean_reference_hash(swarm_hash)
+
+        data_type = arguments.get("data_type", "swarm-provenance")
+        if len(data_type) > 64:
+            raise ValueError("data_type must be 64 characters or fewer")
+
+        owner = arguments.get("owner")
+
+        if owner:
+            result = chain_client.anchor_for(clean_hash, owner, data_type)
+        else:
+            result = chain_client.anchor(clean_hash, data_type)
+
+        response_text = f"⛓️  Hash anchored on-chain\n\n"
+        response_text += f"   Swarm Hash: {result.swarm_hash}\n"
+        response_text += f"   Data Type: {result.data_type}\n"
+        response_text += f"   Owner: {result.owner}\n"
+        response_text += f"   Tx Hash: {result.tx_hash}\n"
+        response_text += f"   Block: {result.block_number:,}\n"
+        response_text += f"   Gas Used: {result.gas_used:,}"
+        if result.explorer_url:
+            response_text += f"\n   Explorer: {result.explorer_url}"
+
+        # Post-tx balance check
+        try:
+            wallet_info = chain_client.balance()
+            guidance = _format_funding_guidance(
+                wallet_info.address, wallet_info.balance_wei, wallet_info.chain
+            )
+            response_text += guidance
+        except Exception:
+            pass  # Non-critical — don't fail the success response
+
+        response_text += _format_hints(
+            "download_data", ["chain_balance", "health_check"]
+        )
+
+        return CallToolResult(content=[TextContent(type="text", text=response_text)])
+
+    except ValueError as e:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        f"Validation error: {str(e)}",
+                        retryable=False,
+                    ),
+                )
+            ],
+            isError=True,
+        )
+    except Exception as e:
+        # Import chain exceptions for targeted handling
+        try:
+            from .chain.exceptions import (
+                DataAlreadyRegisteredError,
+                ChainTransactionError,
+                ChainConnectionError,
+                ChainValidationError,
+                ChainError,
+            )
+        except ImportError:
+            # Shouldn't happen since CHAIN_AVAILABLE is True, but be safe
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(
+                            f"Chain error: {str(e)}", retryable=False
+                        ),
+                    )
+                ],
+                isError=True,
+            )
+
+        if isinstance(e, DataAlreadyRegisteredError):
+            # Not an error — show the existing record
+            from datetime import datetime, timezone
+
+            timestamp_str = "unknown"
+            if e.timestamp:
+                try:
+                    dt = datetime.fromtimestamp(e.timestamp, tz=timezone.utc)
+                    timestamp_str = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+                except (ValueError, OSError):
+                    timestamp_str = str(e.timestamp)
+
+            response_text = f"⛓️  Hash already registered on-chain\n\n"
+            response_text += f"   Swarm Hash: {e.data_hash}\n"
+            response_text += f"   Owner: {e.owner}\n"
+            response_text += f"   Registered: {timestamp_str}\n"
+            response_text += f"   Data Type: {e.data_type}"
+            response_text += _format_hints(
+                "download_data", ["chain_balance", "health_check"]
+            )
+            return CallToolResult(
+                content=[TextContent(type="text", text=response_text)]
+            )
+
+        if isinstance(e, ChainTransactionError):
+            msg = f"Transaction failed: {str(e)}"
+            if e.tx_hash:
+                msg += f"\n   Tx Hash: {e.tx_hash}"
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(
+                            msg, retryable=False, next_tool="chain_balance"
+                        ),
+                    )
+                ],
+                isError=True,
+            )
+
+        if isinstance(e, ChainConnectionError):
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(
+                            f"Chain connection error: {str(e)}",
+                            retryable=True,
+                            next_tool="chain_health",
+                        ),
+                    )
+                ],
+                isError=True,
+            )
+
+        if isinstance(e, ChainValidationError):
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(
+                            f"Chain validation error: {str(e)}",
+                            retryable=False,
+                        ),
+                    )
+                ],
+                isError=True,
+            )
+
+        # Generic ChainError or unexpected Exception
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        f"Chain error: {str(e)}", retryable=False
                     ),
                 )
             ],

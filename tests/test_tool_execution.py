@@ -378,6 +378,344 @@ class TestToolExecution:
                     pytest.fail(f"Tool {tool_name} returned invalid JSON: {content_text}")
 
 
+class TestResponseHints:
+    """Test that tool responses include _next and _related hints."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    @pytest.fixture
+    def mock_gateway_client(self):
+        """Mock gateway client with standard responses."""
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.purchase_stamp.return_value = {
+                "batchID": TEST_STAMP_ID,
+                "message": "Stamp purchased successfully"
+            }
+            mock_client.get_stamp_details.return_value = {
+                "batchID": TEST_STAMP_ID,
+                "amount": "2000000000",
+                "depth": 17,
+                "usable": True,
+                "batchTTL": 123456
+            }
+            mock_client.list_stamps.return_value = {
+                "stamps": [{"batchID": TEST_STAMP_ID, "usable": True}],
+                "total_count": 1
+            }
+            mock_client.extend_stamp.return_value = {
+                "batchID": TEST_STAMP_ID,
+                "message": "Stamp extended"
+            }
+            mock_client.upload_data.return_value = {
+                "reference": TEST_REFERENCE,
+                "message": "Upload successful"
+            }
+            mock_client.download_data.return_value = b'{"test": "data"}'
+            mock_client.check_stamp_health.return_value = {
+                "stamp_id": TEST_STAMP_ID,
+                "can_upload": True,
+                "errors": [],
+                "warnings": [],
+                "status": {"utilizationPercent": 10, "batchTTL": 86400}
+            }
+            mock_client.get_wallet_info.return_value = {
+                "walletAddress": "0x1234",
+                "bzzBalance": "5000"
+            }
+            mock_client.get_notary_info.return_value = {
+                "enabled": True,
+                "available": True,
+                "address": "0xabcdef",
+                "message": "Operational"
+            }
+            mock_client.health_check.return_value = {
+                "status": "healthy",
+                "gateway_url": "http://localhost:8000",
+                "response_time_ms": 15
+            }
+            yield mock_client
+
+    async def test_all_success_responses_have_next_hint(self, server, mock_gateway_client):
+        """Every successful tool response must include a _next hint."""
+        tools_to_test = [
+            ("purchase_stamp", {}),
+            ("get_stamp_status", {"stamp_id": TEST_STAMP_ID}),
+            ("list_stamps", {}),
+            ("extend_stamp", {"stamp_id": TEST_STAMP_ID, "amount": 2000000000}),
+            ("upload_data", {"data": "test", "stamp_id": TEST_STAMP_ID}),
+            ("download_data", {"reference": TEST_REFERENCE}),
+            ("check_stamp_health", {"stamp_id": TEST_STAMP_ID}),
+            ("get_wallet_info", {}),
+            ("get_notary_info", {}),
+            ("health_check", {}),
+        ]
+
+        for tool_name, arguments in tools_to_test:
+            result = await call_tool_directly(server, tool_name, arguments)
+            content_text = result.content[0].text
+            assert "_next:" in content_text, \
+                f"Tool '{tool_name}' success response missing _next hint"
+
+    async def test_purchase_stamp_hints(self, server, mock_gateway_client):
+        """purchase_stamp should suggest check_stamp_health next."""
+        result = await call_tool_directly(server, "purchase_stamp", {})
+        text = result.content[0].text
+        assert "_next: check_stamp_health" in text
+        assert "_related:" in text
+
+    async def test_list_stamps_hints_with_usable(self, server, mock_gateway_client):
+        """list_stamps with usable stamps should suggest upload_data."""
+        result = await call_tool_directly(server, "list_stamps", {})
+        text = result.content[0].text
+        assert "_next: upload_data" in text
+
+    async def test_list_stamps_hints_no_stamps(self, server, mock_gateway_client):
+        """list_stamps with no stamps should suggest purchase_stamp."""
+        mock_gateway_client.list_stamps.return_value = {"stamps": [], "total_count": 0}
+        result = await call_tool_directly(server, "list_stamps", {})
+        text = result.content[0].text
+        assert "_next: purchase_stamp" in text
+
+    async def test_get_stamp_status_hints_usable(self, server, mock_gateway_client):
+        """get_stamp_status for usable stamp should suggest upload_data."""
+        result = await call_tool_directly(
+            server, "get_stamp_status", {"stamp_id": TEST_STAMP_ID}
+        )
+        text = result.content[0].text
+        assert "_next: upload_data" in text
+
+    async def test_get_stamp_status_hints_not_usable(self, server, mock_gateway_client):
+        """get_stamp_status for non-usable stamp should suggest purchase_stamp."""
+        mock_gateway_client.get_stamp_details.return_value = {
+            "batchID": TEST_STAMP_ID, "usable": False, "amount": "0", "depth": 17
+        }
+        result = await call_tool_directly(
+            server, "get_stamp_status", {"stamp_id": TEST_STAMP_ID}
+        )
+        text = result.content[0].text
+        assert "_next: purchase_stamp" in text
+
+    async def test_upload_data_hints(self, server, mock_gateway_client):
+        """upload_data should suggest download_data next."""
+        result = await call_tool_directly(
+            server, "upload_data", {"data": "test", "stamp_id": TEST_STAMP_ID}
+        )
+        text = result.content[0].text
+        assert "_next: download_data" in text
+
+    async def test_check_stamp_health_hints_healthy(self, server, mock_gateway_client):
+        """Healthy stamp should suggest upload_data."""
+        result = await call_tool_directly(
+            server, "check_stamp_health", {"stamp_id": TEST_STAMP_ID}
+        )
+        text = result.content[0].text
+        assert "_next: upload_data" in text
+
+    async def test_check_stamp_health_hints_unhealthy(self, server, mock_gateway_client):
+        """Unhealthy stamp should suggest purchase_stamp."""
+        mock_gateway_client.check_stamp_health.return_value = {
+            "stamp_id": TEST_STAMP_ID,
+            "can_upload": False,
+            "errors": [{"code": "EXPIRED", "message": "Expired"}],
+            "warnings": [],
+            "status": {}
+        }
+        result = await call_tool_directly(
+            server, "check_stamp_health", {"stamp_id": TEST_STAMP_ID}
+        )
+        text = result.content[0].text
+        assert "_next: purchase_stamp" in text
+
+
+class TestStructuredErrors:
+    """Test that error responses include retryable flag and recovery hints."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_validation_error_not_retryable(self, server):
+        """Validation errors should be marked retryable: false."""
+        with patch('swarm_provenance_mcp.server.gateway_client'):
+            result = await call_tool_directly(
+                server, "get_stamp_status", {"stamp_id": "invalid!"}
+            )
+            assert result.isError
+            text = result.content[0].text
+            assert "retryable: false" in text
+
+    async def test_network_error_retryable(self, server):
+        """Network/connection errors should be marked retryable: true."""
+        from requests.exceptions import ConnectionError
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.list_stamps.side_effect = ConnectionError("Connection refused")
+            result = await call_tool_directly(server, "list_stamps", {})
+            assert result.isError
+            text = result.content[0].text
+            assert "retryable: true" in text
+
+    async def test_error_includes_next_hint(self, server):
+        """Error responses should include _next recovery hint."""
+        from requests.exceptions import ConnectionError
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.purchase_stamp.side_effect = ConnectionError("timeout")
+            result = await call_tool_directly(server, "purchase_stamp", {})
+            assert result.isError
+            text = result.content[0].text
+            assert "_next:" in text
+
+    async def test_validation_error_suggests_correct_tool(self, server):
+        """Validation errors should suggest the right recovery tool."""
+        with patch('swarm_provenance_mcp.server.gateway_client'):
+            # Bad stamp ID → should suggest list_stamps to find valid IDs
+            result = await call_tool_directly(
+                server, "get_stamp_status", {"stamp_id": "bad"}
+            )
+            assert result.isError
+            text = result.content[0].text
+            assert "_next: list_stamps" in text
+
+
+class TestTypoCorrection:
+    """Test unknown tool name typo correction with fuzzy matching."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    @pytest.fixture
+    def mock_gateway_client(self):
+        with patch('swarm_provenance_mcp.server.gateway_client'):
+            yield
+
+    async def test_close_typo_suggests_correction(self, server, mock_gateway_client):
+        """Close typos should get 'Did you mean' suggestions."""
+        from swarm_provenance_mcp.server import _suggest_tool_name
+        msg = _suggest_tool_name("purchse_stamp")
+        assert "Did you mean" in msg
+        assert "purchase_stamp" in msg
+
+    async def test_multiple_close_matches(self, server, mock_gateway_client):
+        """When multiple tools are close, suggest all of them."""
+        from swarm_provenance_mcp.server import _suggest_tool_name
+        msg = _suggest_tool_name("list_stamp")
+        assert "Did you mean" in msg
+        assert "list_stamps" in msg
+
+    async def test_no_close_match_lists_all(self, server, mock_gateway_client):
+        """Completely wrong name should list all available tools."""
+        from swarm_provenance_mcp.server import _suggest_tool_name
+        msg = _suggest_tool_name("xyzzy_foobar_baz")
+        assert "Available tools:" in msg
+
+    async def test_unknown_tool_error_includes_suggestion(self, server, mock_gateway_client):
+        """Unknown tool via call_tool should include suggestion and retryable: false."""
+        # call_tool_directly doesn't go through create_server's call_tool wrapper,
+        # so test _suggest_tool_name and _format_error directly
+        from swarm_provenance_mcp.server import _suggest_tool_name, _format_error
+        msg = _format_error(_suggest_tool_name("helth_check"), retryable=False)
+        assert "health_check" in msg
+        assert "retryable: false" in msg
+
+
+class TestAdaptiveHealthCheck:
+    """Test the adaptive health_check response with ready flag and recommendations."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_healthy_with_usable_stamps(self, server):
+        """Healthy gateway + usable stamps → ready: true, _next: upload_data."""
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.health_check.return_value = {
+                "status": "healthy",
+                "gateway_url": "http://localhost:8000",
+                "response_time_ms": 10
+            }
+            mock_client.list_stamps.return_value = {
+                "stamps": [{"batchID": TEST_STAMP_ID, "usable": True}],
+                "total_count": 1
+            }
+            result = await call_tool_directly(server, "health_check", {})
+            text = result.content[0].text
+            assert "ready: true" in text
+            assert "_next: upload_data" in text
+
+    async def test_healthy_no_stamps(self, server):
+        """Healthy gateway + no stamps → ready: false, _next: purchase_stamp."""
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.health_check.return_value = {
+                "status": "healthy",
+                "gateway_url": "http://localhost:8000",
+                "response_time_ms": 10
+            }
+            mock_client.list_stamps.return_value = {"stamps": [], "total_count": 0}
+            result = await call_tool_directly(server, "health_check", {})
+            text = result.content[0].text
+            assert "ready: false" in text
+            assert "_next: purchase_stamp" in text
+            assert "_recommendations:" in text
+
+    async def test_healthy_no_usable_stamps(self, server):
+        """Healthy gateway + stamps but none usable → ready: false, recommends purchase."""
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.health_check.return_value = {
+                "status": "healthy",
+                "gateway_url": "http://localhost:8000",
+                "response_time_ms": 10
+            }
+            mock_client.list_stamps.return_value = {
+                "stamps": [{"batchID": TEST_STAMP_ID, "usable": False}],
+                "total_count": 1
+            }
+            result = await call_tool_directly(server, "health_check", {})
+            text = result.content[0].text
+            assert "ready: false" in text
+            assert "_next: purchase_stamp" in text
+
+    async def test_unhealthy_gateway(self, server):
+        """Unhealthy gateway → ready: false with gateway recommendation."""
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.health_check.return_value = {
+                "status": "unhealthy",
+                "gateway_url": "http://localhost:8000",
+                "response_time_ms": 5000
+            }
+            result = await call_tool_directly(server, "health_check", {})
+            text = result.content[0].text
+            assert "ready: false" in text
+            assert "_recommendations:" in text
+
+    async def test_gateway_connection_failure(self, server):
+        """Connection failure → isError with retryable flag."""
+        from requests.exceptions import ConnectionError
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.health_check.side_effect = ConnectionError("refused")
+            result = await call_tool_directly(server, "health_check", {})
+            assert result.isError
+            text = result.content[0].text
+            assert "retryable: true" in text
+
+    async def test_response_has_related_tools(self, server):
+        """health_check response should list related tools."""
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.health_check.return_value = {
+                "status": "healthy",
+                "gateway_url": "http://localhost:8000",
+                "response_time_ms": 10
+            }
+            mock_client.list_stamps.return_value = {
+                "stamps": [{"batchID": TEST_STAMP_ID, "usable": True}],
+                "total_count": 1
+            }
+            result = await call_tool_directly(server, "health_check", {})
+            text = result.content[0].text
+            assert "_related:" in text
+
+
 class TestToolParameterValidation:
     """Test parameter validation for all tools."""
 

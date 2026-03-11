@@ -223,10 +223,12 @@ def _format_error(message: str, retryable: bool, next_tool: Optional[str] = None
 
 def _is_retryable_error(e: Exception) -> bool:
     """Determine if an exception represents a transient, retryable error."""
+    from requests.exceptions import ConnectionError as ReqConnectionError, Timeout
+    if isinstance(e, (ReqConnectionError, Timeout)):
+        return True
     if isinstance(e, RequestException) and hasattr(e, 'response') and e.response is not None:
         return e.response.status_code in (408, 429, 502, 503, 504)
     if isinstance(e, RequestException):
-        # Connection errors are generally retryable
         error_str = str(e).lower()
         return any(w in error_str for w in ('timeout', 'connection', 'connect'))
     return False

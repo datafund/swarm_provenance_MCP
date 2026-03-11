@@ -291,7 +291,7 @@ Check whether the notary signing service is enabled and available on the gateway
 ```
 
 #### `health_check`
-Check gateway and Swarm network connectivity status.
+Check gateway and Swarm network connectivity status. Returns an adaptive status including stamp availability, a `ready` flag indicating whether uploads can proceed, and recommendations for next steps.
 
 **Parameters:** None
 
@@ -301,6 +301,43 @@ Check gateway and Swarm network connectivity status.
   "name": "health_check",
   "arguments": {}
 }
+```
+
+### Response Format
+
+All tool responses include structured metadata to help agents chain operations efficiently:
+
+#### Success Responses
+
+Every successful response appends workflow hints:
+
+```
+_next: <recommended_tool>        # The logical next tool to call
+_related: <tool1>, <tool2>       # Other relevant tools
+```
+
+Hints are contextual — for example, `list_stamps` suggests `_next: upload_data` when usable stamps exist, but `_next: purchase_stamp` when none are available.
+
+#### Error Responses
+
+Error responses include structured recovery information:
+
+```
+retryable: true|false            # Whether retrying the same call may succeed
+_next: <recovery_tool>           # Tool to call for recovery
+```
+
+- **retryable: true** — transient errors (timeouts, rate limits, 502/503/504). Wait and retry.
+- **retryable: false** — permanent errors (validation failures, unknown tools). Fix input and try a different approach.
+
+#### Adaptive Health Check
+
+The `health_check` tool returns additional fields:
+
+```
+ready: true|false                # Whether the system is ready for uploads
+_recommendations:                # Actionable suggestions (only when issues exist)
+  - No stamps found — purchase one before uploading
 ```
 
 ## Docker

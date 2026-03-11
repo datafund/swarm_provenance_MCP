@@ -4,7 +4,9 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional, Sequence
+from urllib.parse import urlparse
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -99,7 +101,9 @@ ERRORS:
 CHAIN ANCHORING (optional):
 When chain_enabled=true and blockchain dependencies are installed, on-chain provenance tools become available.
 These register Swarm hashes in the DataProvenance smart contract on Base Sepolia, creating an immutable on-chain record.
-Chain tools will be registered as separate tools (anchor_data, verify_chain, etc.) when enabled.
+- chain_health — test RPC connectivity (no wallet needed)
+- chain_balance — check wallet ETH balance with funding guidance when low
+- Additional chain tools (anchor_data, verify_chain, etc.) will be added when enabled.
 The health_check tool reports chain status alongside gateway status.
 
 COMPANION SERVERS:
@@ -134,7 +138,9 @@ def validate_and_clean_stamp_id(stamp_id: str) -> str:
 
     # Validate format
     if not STAMP_ID_PATTERN.match(stamp_id):
-        raise ValueError(f"Invalid stamp ID format. Expected 64-character hexadecimal string (without 0x prefix), got: {stamp_id}")
+        raise ValueError(
+            f"Invalid stamp ID format. Expected 64-character hexadecimal string (without 0x prefix), got: {stamp_id}"
+        )
 
     return stamp_id
 
@@ -160,7 +166,9 @@ def validate_and_clean_reference_hash(reference: str) -> str:
 
     # Validate format
     if not REFERENCE_HASH_PATTERN.match(reference):
-        raise ValueError(f"Invalid reference hash format. Expected 64-character hexadecimal string (without 0x prefix), got: {reference}")
+        raise ValueError(
+            f"Invalid reference hash format. Expected 64-character hexadecimal string (without 0x prefix), got: {reference}"
+        )
 
     return reference
 
@@ -188,7 +196,9 @@ def validate_stamp_depth(depth: int) -> None:
         ValueError: If depth is invalid
     """
     if not (17 <= depth <= 22):
-        raise ValueError(f"Stamp depth must be 17 (small), 20 (medium), or 22 (large), got: {depth}")
+        raise ValueError(
+            f"Stamp depth must be 17 (small), 20 (medium), or 22 (large), got: {depth}"
+        )
 
 
 def validate_data_size(data: str) -> None:
@@ -200,18 +210,29 @@ def validate_data_size(data: str) -> None:
     Raises:
         ValueError: If data size is invalid
     """
-    data_bytes = data.encode('utf-8')
+    data_bytes = data.encode("utf-8")
     if len(data_bytes) > 4096:
-        raise ValueError(f"Data size {len(data_bytes)} bytes exceeds 4KB limit (4096 bytes)")
+        raise ValueError(
+            f"Data size {len(data_bytes)} bytes exceeds 4KB limit (4096 bytes)"
+        )
     if len(data_bytes) == 0:
         raise ValueError("Data cannot be empty")
 
 
 # All tool names for typo correction
 ALL_TOOL_NAMES = [
-    "purchase_stamp", "get_stamp_status", "list_stamps", "extend_stamp",
-    "upload_data", "download_data", "check_stamp_health",
-    "get_wallet_info", "get_notary_info", "health_check"
+    "purchase_stamp",
+    "get_stamp_status",
+    "list_stamps",
+    "extend_stamp",
+    "upload_data",
+    "download_data",
+    "check_stamp_health",
+    "get_wallet_info",
+    "get_notary_info",
+    "health_check",
+    "chain_balance",
+    "chain_health",
 ]
 
 
@@ -259,7 +280,9 @@ def _format_hints(next_tool: str, related: List[str]) -> str:
     return lines
 
 
-def _format_error(message: str, retryable: bool, next_tool: Optional[str] = None) -> str:
+def _format_error(
+    message: str, retryable: bool, next_tool: Optional[str] = None
+) -> str:
     """Format structured error message with retryable flag and recovery hint."""
     lines = message
     lines += f"\n\nretryable: {str(retryable).lower()}"
@@ -271,14 +294,67 @@ def _format_error(message: str, retryable: bool, next_tool: Optional[str] = None
 def _is_retryable_error(e: Exception) -> bool:
     """Determine if an exception represents a transient, retryable error."""
     from requests.exceptions import ConnectionError as ReqConnectionError, Timeout
+
     if isinstance(e, (ReqConnectionError, Timeout)):
         return True
-    if isinstance(e, RequestException) and hasattr(e, 'response') and e.response is not None:
+    if (
+        isinstance(e, RequestException)
+        and hasattr(e, "response")
+        and e.response is not None
+    ):
         return e.response.status_code in (408, 429, 502, 503, 504)
     if isinstance(e, RequestException):
         error_str = str(e).lower()
-        return any(w in error_str for w in ('timeout', 'connection', 'connect'))
+        return any(w in error_str for w in ("timeout", "connection", "connect"))
     return False
+
+
+# Chain balance thresholds and funding URLs
+_MIN_BALANCE_WEI = 10**14  # 0.0001 ETH — cannot reliably transact
+_LOW_BALANCE_WEI = 10**15  # 0.001 ETH — may run out soon
+_FAUCET_URLS = {
+    "base-sepolia": "https://www.alchemy.com/faucets/base-sepolia",
+}
+_BRIDGE_URL = "https://bridge.base.org"
+
+
+def _mask_rpc_url(url: str) -> str:
+    """Extract hostname from RPC URL for display (hide full path/keys)."""
+    try:
+        parsed = urlparse(url)
+        return parsed.hostname or url
+    except Exception:
+        return url
+
+
+def _format_funding_guidance(address: str, balance_wei: int, chain: str) -> str:
+    """Format actionable funding guidance based on wallet balance.
+
+    Returns empty string if balance is healthy, a warning if low,
+    or a critical message with funding instructions if insufficient.
+    """
+    if balance_wei >= _LOW_BALANCE_WEI:
+        return ""
+
+    is_testnet = chain in _FAUCET_URLS
+    balance_eth = balance_wei / 10**18
+
+    if balance_wei < _MIN_BALANCE_WEI:
+        msg = f"\n\n⚠️  CRITICAL: Wallet balance too low for transactions"
+        msg += f"\n   Balance: {balance_eth:.6f} ETH (minimum ~0.0001 ETH needed)"
+        msg += f"\n   Wallet: {address}"
+    else:
+        msg = f"\n\n⚠️  WARNING: Wallet balance is low"
+        msg += f"\n   Balance: {balance_eth:.6f} ETH (may run out soon)"
+        msg += f"\n   Wallet: {address}"
+
+    if is_testnet:
+        faucet_url = _FAUCET_URLS[chain]
+        msg += f"\n   Fund with testnet ETH: {faucet_url}"
+    else:
+        msg += f"\n   Bridge ETH to Base: {_BRIDGE_URL}"
+
+    return msg
 
 
 def create_server() -> Server:
@@ -286,13 +362,13 @@ def create_server() -> Server:
     server = Server(
         settings.mcp_server_name,
         version=settings.mcp_server_version,
-        instructions=MCP_INSTRUCTIONS
+        instructions=MCP_INSTRUCTIONS,
     )
 
     @server.list_tools()
     async def list_tools() -> List[Tool]:
         """List available tools for stamp management."""
-        return [
+        tools = [
             Tool(
                 name="purchase_stamp",
                 description="Purchase a new Swarm postage stamp. Returns a 64-character hex batch ID that can be used with upload_data. A stamp can be reused for multiple uploads until its capacity or TTL is exhausted. After purchase, wait ~1 minute for blockchain propagation before using the stamp.",
@@ -303,23 +379,23 @@ def create_server() -> Server:
                             "type": "integer",
                             "description": f"Amount in wei — controls TTL (time-to-live). Higher amount = longer before the stamp expires (default: {settings.default_stamp_amount})",
                             "default": settings.default_stamp_amount,
-                            "minimum": 1000000
+                            "minimum": 1000000,
                         },
                         "depth": {
                             "type": "integer",
                             "description": f"Depth — controls storage capacity. Three practical sizes: 17 (small, ~35KB), 20 (medium, ~500MB), 22 (large, ~6GB). Capacities are approximate effective volumes with erasure coding. Higher depth costs more (default: {settings.default_stamp_depth})",
                             "default": settings.default_stamp_depth,
                             "minimum": 17,
-                            "maximum": 22
+                            "maximum": 22,
                         },
                         "label": {
                             "type": "string",
                             "description": "Optional human-readable label for easier stamp identification",
-                            "maxLength": 100
-                        }
+                            "maxLength": 100,
+                        },
                     },
-                    "required": []
-                }
+                    "required": [],
+                },
             ),
             Tool(
                 name="get_stamp_status",
@@ -330,20 +406,16 @@ def create_server() -> Server:
                         "stamp_id": {
                             "type": "string",
                             "description": "The 64-character hexadecimal batch ID of the stamp (without 0x prefix). Example: a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789a",
-                            "pattern": "^[a-fA-F0-9]{64}$"
+                            "pattern": "^[a-fA-F0-9]{64}$",
                         }
                     },
-                    "required": ["stamp_id"]
-                }
+                    "required": ["stamp_id"],
+                },
             ),
             Tool(
                 name="list_stamps",
                 description="List all available postage stamps with their details including batch IDs, amounts, depths, TTL, expiration times, and utilization. Useful for finding a usable stamp for upload_data or identifying stamps that need extending.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
+                inputSchema={"type": "object", "properties": {}, "required": []},
             ),
             Tool(
                 name="extend_stamp",
@@ -354,16 +426,16 @@ def create_server() -> Server:
                         "stamp_id": {
                             "type": "string",
                             "description": "The 64-character hexadecimal batch ID of the stamp to extend (without 0x prefix). Example: a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789a",
-                            "pattern": "^[a-fA-F0-9]{64}$"
+                            "pattern": "^[a-fA-F0-9]{64}$",
                         },
                         "amount": {
                             "type": "integer",
                             "description": "Additional amount to add to the stamp in wei. This will extend the stamp's TTL proportionally.",
-                            "minimum": 1000000
-                        }
+                            "minimum": 1000000,
+                        },
                     },
-                    "required": ["stamp_id", "amount"]
-                }
+                    "required": ["stamp_id", "amount"],
+                },
             ),
             Tool(
                 name="upload_data",
@@ -374,21 +446,21 @@ def create_server() -> Server:
                         "data": {
                             "type": "string",
                             "description": "Data content to upload as a string (max 4096 bytes). Can be JSON, text, or any string data.",
-                            "maxLength": 4096
+                            "maxLength": 4096,
                         },
                         "stamp_id": {
                             "type": "string",
                             "description": "64-character hexadecimal batch ID of the postage stamp (without 0x prefix). Example: a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789a",
-                            "pattern": "^[a-fA-F0-9]{64}$"
+                            "pattern": "^[a-fA-F0-9]{64}$",
                         },
                         "content_type": {
                             "type": "string",
                             "description": "MIME type of the content (e.g., application/json, text/plain, image/png)",
-                            "default": "application/json"
-                        }
+                            "default": "application/json",
+                        },
                     },
-                    "required": ["data", "stamp_id"]
-                }
+                    "required": ["data", "stamp_id"],
+                },
             ),
             Tool(
                 name="download_data",
@@ -399,11 +471,11 @@ def create_server() -> Server:
                         "reference": {
                             "type": "string",
                             "description": "64-character hexadecimal Swarm reference hash (without 0x prefix). Example: b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789ab",
-                            "pattern": "^[a-fA-F0-9]{64}$"
+                            "pattern": "^[a-fA-F0-9]{64}$",
                         }
                     },
-                    "required": ["reference"]
-                }
+                    "required": ["reference"],
+                },
             ),
             Tool(
                 name="check_stamp_health",
@@ -414,40 +486,55 @@ def create_server() -> Server:
                         "stamp_id": {
                             "type": "string",
                             "description": "The 64-character hexadecimal batch ID of the stamp (without 0x prefix)",
-                            "pattern": "^[a-fA-F0-9]{64}$"
+                            "pattern": "^[a-fA-F0-9]{64}$",
                         }
                     },
-                    "required": ["stamp_id"]
-                }
+                    "required": ["stamp_id"],
+                },
             ),
             Tool(
                 name="get_wallet_info",
                 description="Get the gateway node's wallet address and BZZ balance. Useful for checking if the node has sufficient funds to purchase stamps. Note: this is a debugging/diagnostic tool and may be removed in future versions.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
+                inputSchema={"type": "object", "properties": {}, "required": []},
             ),
             Tool(
                 name="get_notary_info",
                 description="Check whether the notary signing service is enabled and available on the gateway. When available, uploads can be cryptographically signed for provenance verification.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
+                inputSchema={"type": "object", "properties": {}, "required": []},
             ),
             Tool(
                 name="health_check",
                 description="Check gateway and Swarm network connectivity status. Returns gateway URL, response time, and connection status. Call this first to verify the gateway is reachable before purchasing stamps or uploading data.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
+                inputSchema={"type": "object", "properties": {}, "required": []},
             ),
         ]
+
+        # Conditionally add chain tools when chain is enabled
+        if CHAIN_AVAILABLE and settings.chain_enabled:
+            tools.extend(
+                [
+                    Tool(
+                        name="chain_balance",
+                        description="Check the on-chain wallet ETH balance used for provenance anchoring transactions. Returns wallet address, balance, chain info, and actionable funding guidance when balance is low. No parameters required.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                        },
+                    ),
+                    Tool(
+                        name="chain_health",
+                        description="Test blockchain RPC connectivity for on-chain provenance. Returns connection status, chain name, chain ID, latest block number, RPC response time, and contract address. Does not require a wallet key. Call this to verify chain connectivity before anchoring operations.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                        },
+                    ),
+                ]
+            )
+
+        return tools
 
     @server.call_tool()
     async def call_tool(name: str, arguments: Dict[str, Any]) -> CallToolResult:
@@ -473,6 +560,11 @@ def create_server() -> Server:
                 return await handle_get_notary_info(arguments)
             elif name == "health_check":
                 return await handle_health_check(arguments)
+            # Chain tools
+            elif name == "chain_balance":
+                return await handle_chain_balance(arguments)
+            elif name == "chain_health":
+                return await handle_chain_health(arguments)
             # Chain anchoring tools (#49-#56) will be routed here
             else:
                 return CallToolResult(
@@ -480,12 +572,11 @@ def create_server() -> Server:
                         TextContent(
                             type="text",
                             text=_format_error(
-                                _suggest_tool_name(name),
-                                retryable=False
-                            )
+                                _suggest_tool_name(name), retryable=False
+                            ),
                         )
                     ],
-                    isError=True
+                    isError=True,
                 )
         except Exception as e:
             logger.error(f"Error in tool {name}: {e}", exc_info=True)
@@ -497,11 +588,11 @@ def create_server() -> Server:
                         text=_format_error(
                             f"Error executing {name}: {str(e)}",
                             retryable=retryable,
-                            next_tool="health_check"
-                        )
+                            next_tool="health_check",
+                        ),
                     )
                 ],
-                isError=True
+                isError=True,
             )
 
     # --- MCP Prompts (workflow templates for agents) ---
@@ -517,14 +608,14 @@ def create_server() -> Server:
                     PromptArgument(
                         name="data",
                         description="The data content to upload (text, JSON, etc.)",
-                        required=True
+                        required=True,
                     ),
                     PromptArgument(
                         name="content_type",
                         description="MIME type (default: application/json)",
-                        required=False
+                        required=False,
                     ),
-                ]
+                ],
             ),
             Prompt(
                 name="provenance-verify",
@@ -533,19 +624,21 @@ def create_server() -> Server:
                     PromptArgument(
                         name="reference",
                         description="64-character hex Swarm reference hash to verify",
-                        required=True
+                        required=True,
                     ),
-                ]
+                ],
             ),
             Prompt(
                 name="stamp-management",
                 description="Review and manage stamp inventory — list stamps, check health, extend or purchase as needed.",
-                arguments=[]
+                arguments=[],
             ),
         ]
 
     @server.get_prompt()
-    async def get_prompt(name: str, arguments: Optional[Dict[str, str]] = None) -> GetPromptResult:
+    async def get_prompt(
+        name: str, arguments: Optional[Dict[str, str]] = None
+    ) -> GetPromptResult:
         """Return workflow prompt with step-by-step instructions."""
         args = arguments or {}
 
@@ -571,10 +664,10 @@ def create_server() -> Server:
                                 f"4. Call upload_data with the data and stamp_id\n"
                                 f"5. Call download_data with the returned reference to verify the upload\n"
                                 f"6. Report the reference hash — this is the permanent Swarm address"
-                            )
-                        )
+                            ),
+                        ),
                     )
-                ]
+                ],
             )
 
         elif name == "provenance-verify":
@@ -594,10 +687,10 @@ def create_server() -> Server:
                                 f"2. Inspect the returned content — check structure, fields, and integrity\n"
                                 f"3. Report what was found: content type, size, key fields, "
                                 f"and whether the data appears intact"
-                            )
-                        )
+                            ),
+                        ),
                     )
-                ]
+                ],
             )
 
         elif name == "stamp-management":
@@ -619,10 +712,10 @@ def create_server() -> Server:
                                 "   - Stamps with low TTL → extend_stamp to add time\n"
                                 "   - No usable stamps → purchase_stamp\n"
                                 "5. Summarize the inventory status and recommended actions"
-                            )
-                        )
+                            ),
+                        ),
                     )
-                ]
+                ],
             )
 
         else:
@@ -644,25 +737,36 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
 
         if label and len(label) > 100:
             return CallToolResult(
-                content=[TextContent(type="text", text=_format_error(
-                    "Error: Label cannot exceed 100 characters",
-                    retryable=False, next_tool="purchase_stamp"
-                ))],
-                isError=True
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(
+                            "Error: Label cannot exceed 100 characters",
+                            retryable=False,
+                            next_tool="purchase_stamp",
+                        ),
+                    )
+                ],
+                isError=True,
             )
 
         result = gateway_client.purchase_stamp(amount, depth, label)
 
         # Check if purchase was actually successful
-        batch_id = result.get('batchID')
+        batch_id = result.get("batchID")
         if not batch_id:
             error_msg = f"❌ Stamp purchase failed - no stamp ID returned!\n\nGateway response: {result}"
             logger.error(f"Purchase failed - missing batchID in response: {result}")
             return CallToolResult(
-                content=[TextContent(type="text", text=_format_error(
-                    error_msg, retryable=True, next_tool="health_check"
-                ))],
-                isError=True
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(
+                            error_msg, retryable=True, next_tool="health_check"
+                        ),
+                    )
+                ],
+                isError=True,
             )
 
         response_text = f"🎉 Stamp purchased successfully!\n\n"
@@ -675,29 +779,41 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"\n✅ Stamp ID: `{batch_id}` (immediately available)\n"
         response_text += f"⏱️  IMPORTANT: Wait ~1 minute before using this stamp!\n"
         response_text += f"📋 The stamp info must propagate through the blockchain before it can be used for uploads."
-        response_text += _format_hints("check_stamp_health", ["get_stamp_status", "upload_data", "list_stamps"])
-
-        return CallToolResult(
-            content=[TextContent(type="text", text=response_text)]
+        response_text += _format_hints(
+            "check_stamp_health", ["get_stamp_status", "upload_data", "list_stamps"]
         )
+
+        return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
     except ValueError as e:
         error_msg = f"Validation error: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=_format_error(
-                error_msg, retryable=False, next_tool="purchase_stamp"
-            ))],
-            isError=True
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        error_msg, retryable=False, next_tool="purchase_stamp"
+                    ),
+                )
+            ],
+            isError=True,
         )
     except RequestException as e:
         error_msg = f"Failed to purchase stamp: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=_format_error(
-                error_msg, retryable=_is_retryable_error(e), next_tool="health_check"
-            ))],
-            isError=True
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        error_msg,
+                        retryable=_is_retryable_error(e),
+                        next_tool="health_check",
+                    ),
+                )
+            ],
+            isError=True,
         )
 
 
@@ -720,16 +836,20 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"Block Number: {result.get('blockNumber', 'N/A')}\n"
 
         # Enhanced TTL information
-        batch_ttl = result.get('batchTTL', 'N/A')
-        if batch_ttl != 'N/A':
-            response_text += f"Batch TTL: {batch_ttl:,} seconds ({batch_ttl/86400:.1f} days)\n"
+        batch_ttl = result.get("batchTTL", "N/A")
+        if batch_ttl != "N/A":
+            response_text += (
+                f"Batch TTL: {batch_ttl:,} seconds ({batch_ttl/86400:.1f} days)\n"
+            )
         else:
             response_text += f"Batch TTL: {batch_ttl}\n"
 
-        response_text += f"Expected Expiration: {result.get('expectedExpiration', 'N/A')}\n"
+        response_text += (
+            f"Expected Expiration: {result.get('expectedExpiration', 'N/A')}\n"
+        )
 
         # Enhanced usability information
-        usable = result.get('usable', 'N/A')
+        usable = result.get("usable", "N/A")
         response_text += f"Usable: {usable}"
         if usable is False:
             response_text += " ⚠️  (Cannot be used for uploads)"
@@ -737,8 +857,8 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += " ✅ (Ready for uploads)"
         response_text += "\n"
 
-        utilization = result.get('utilization', 'N/A')
-        if utilization != 'N/A' and isinstance(utilization, (int, float)):
+        utilization = result.get("utilization", "N/A")
+        if utilization != "N/A" and isinstance(utilization, (int, float)):
             response_text += f"Utilization: {utilization}%\n"
         else:
             response_text += f"Utilization: {utilization}\n"
@@ -746,36 +866,50 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"Immutable: {result.get('immutableFlag', 'N/A')}\n"
         response_text += f"Local: {result.get('local', 'N/A')}\n"
 
-        if result.get('label'):
+        if result.get("label"):
             response_text += f"Label: {result['label']}\n"
 
         # Contextual hints based on usability
         if usable is True:
-            response_text += _format_hints("upload_data", ["extend_stamp", "check_stamp_health"])
+            response_text += _format_hints(
+                "upload_data", ["extend_stamp", "check_stamp_health"]
+            )
         else:
-            response_text += _format_hints("purchase_stamp", ["extend_stamp", "list_stamps"])
+            response_text += _format_hints(
+                "purchase_stamp", ["extend_stamp", "list_stamps"]
+            )
 
-        return CallToolResult(
-            content=[TextContent(type="text", text=response_text)]
-        )
+        return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
     except ValueError as e:
         error_msg = f"Validation error: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=_format_error(
-                error_msg, retryable=False, next_tool="list_stamps"
-            ))],
-            isError=True
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        error_msg, retryable=False, next_tool="list_stamps"
+                    ),
+                )
+            ],
+            isError=True,
         )
     except RequestException as e:
         error_msg = f"Failed to get stamp status: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=_format_error(
-                error_msg, retryable=_is_retryable_error(e), next_tool="health_check"
-            ))],
-            isError=True
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        error_msg,
+                        retryable=_is_retryable_error(e),
+                        next_tool="health_check",
+                    ),
+                )
+            ],
+            isError=True,
         )
 
 
@@ -797,15 +931,17 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += f"{'-'*20} | {'-'*20} | {'-'*10}\n"
 
             for stamp in stamps:
-                batch_id = stamp.get('batchID', 'N/A')
-                expiration = stamp.get('expectedExpiration', 'N/A')
-                usable = stamp.get('usable', 'N/A')
+                batch_id = stamp.get("batchID", "N/A")
+                expiration = stamp.get("expectedExpiration", "N/A")
+                usable = stamp.get("usable", "N/A")
 
                 if usable is True:
                     has_usable = True
 
                 # Truncate batch ID for table format
-                display_id = batch_id[:16] + "..." if len(str(batch_id)) > 19 else batch_id
+                display_id = (
+                    batch_id[:16] + "..." if len(str(batch_id)) > 19 else batch_id
+                )
 
                 # Status with emoji
                 if usable is True:
@@ -815,26 +951,35 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                 else:
                     status = "❓ Unknown"
 
-                response_text += f"{display_id:<20} | {str(expiration):<20} | {status:<10}\n"
+                response_text += (
+                    f"{display_id:<20} | {str(expiration):<20} | {status:<10}\n"
+                )
 
         # Contextual hints
         if has_usable:
-            response_text += _format_hints("upload_data", ["get_stamp_status", "check_stamp_health"])
+            response_text += _format_hints(
+                "upload_data", ["get_stamp_status", "check_stamp_health"]
+            )
         else:
             response_text += _format_hints("purchase_stamp", ["get_wallet_info"])
 
-        return CallToolResult(
-            content=[TextContent(type="text", text=response_text)]
-        )
+        return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
     except RequestException as e:
         error_msg = f"Failed to list stamps: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=_format_error(
-                error_msg, retryable=_is_retryable_error(e), next_tool="health_check"
-            ))],
-            isError=True
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        error_msg,
+                        retryable=_is_retryable_error(e),
+                        next_tool="health_check",
+                    ),
+                )
+            ],
+            isError=True,
         )
 
 
@@ -857,7 +1002,7 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
 
         response_text = f"✅ Stamp extended successfully!\n\n"
         response_text += f"📋 Extension Details:\n"
-        batch_id = result.get('batchID', 'N/A')
+        batch_id = result.get("batchID", "N/A")
         response_text += f"   Batch ID: `{batch_id}`\n"
         response_text += f"   Additional Amount: {amount:,} wei\n"
         response_text += f"   Status: {result.get('message', 'Extended')}\n\n"
@@ -865,27 +1010,37 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"🔍 Check stamp status again in about 1 minute to see the new expiration time."
         response_text += _format_hints("check_stamp_health", ["get_stamp_status"])
 
-        return CallToolResult(
-            content=[TextContent(type="text", text=response_text)]
-        )
+        return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
     except ValueError as e:
         error_msg = f"Validation error: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=_format_error(
-                error_msg, retryable=False, next_tool="list_stamps"
-            ))],
-            isError=True
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        error_msg, retryable=False, next_tool="list_stamps"
+                    ),
+                )
+            ],
+            isError=True,
         )
     except RequestException as e:
         error_msg = f"Failed to extend stamp: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=_format_error(
-                error_msg, retryable=_is_retryable_error(e), next_tool="health_check"
-            ))],
-            isError=True
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        error_msg,
+                        retryable=_is_retryable_error(e),
+                        next_tool="health_check",
+                    ),
+                )
+            ],
+            isError=True,
         )
 
 
@@ -917,20 +1072,23 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
             # Verify it's a usable stamp
             if not stamp_details.get("usable", False):
                 return CallToolResult(
-                    content=[TextContent(
-                        type="text",
-                        text=_format_error(
-                            f"Stamp {clean_stamp_id} exists on this gateway but is not usable for uploads. "
-                            f"Please use a different stamp or create a new one.",
-                            retryable=False, next_tool="purchase_stamp"
+                    content=[
+                        TextContent(
+                            type="text",
+                            text=_format_error(
+                                f"Stamp {clean_stamp_id} exists on this gateway but is not usable for uploads. "
+                                f"Please use a different stamp or create a new one.",
+                                retryable=False,
+                                next_tool="purchase_stamp",
+                            ),
                         )
-                    )],
-                    isError=True
+                    ],
+                    isError=True,
                 )
 
         except RequestException as e:
             # If we can't get stamp details, it might be a timing issue with newly purchased stamps
-            if hasattr(e, 'response') and e.response is not None:
+            if hasattr(e, "response") and e.response is not None:
                 if e.response.status_code == 404:
                     # Don't immediately fail - the stamp might be newly purchased
                     # We'll let the upload attempt proceed and let the gateway handle validation
@@ -959,29 +1117,41 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
         if stamp_validation_failed:
             response_text += f"\nNote: {validation_error_msg}"
 
-        response_text += _format_hints("download_data", ["upload_data", "check_stamp_health"])
-
-        return CallToolResult(
-            content=[TextContent(type="text", text=response_text)]
+        response_text += _format_hints(
+            "download_data", ["upload_data", "check_stamp_health"]
         )
+
+        return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
     except ValueError as e:
         error_msg = f"Upload validation error: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=_format_error(
-                error_msg, retryable=False, next_tool="check_stamp_health"
-            ))],
-            isError=True
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        error_msg, retryable=False, next_tool="check_stamp_health"
+                    ),
+                )
+            ],
+            isError=True,
         )
     except RequestException as e:
         error_msg = f"Failed to upload data: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=_format_error(
-                error_msg, retryable=_is_retryable_error(e), next_tool="health_check"
-            ))],
-            isError=True
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        error_msg,
+                        retryable=_is_retryable_error(e),
+                        next_tool="health_check",
+                    ),
+                )
+            ],
+            isError=True,
         )
 
 
@@ -999,11 +1169,12 @@ async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
 
         # Try to decode as text, handle JSON appropriately
         try:
-            result_text = result_bytes.decode('utf-8')
+            result_text = result_bytes.decode("utf-8")
 
             # Try to parse as JSON for better presentation
             try:
                 import json
+
                 parsed_json = json.loads(result_text)
 
                 response_text = f"📥 Successfully downloaded JSON data from `{clean_reference}`:\n\n"
@@ -1013,11 +1184,15 @@ async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
                 for key, value in parsed_json.items():
                     if isinstance(value, str) and len(value) > 50:
                         truncated_value = value[:47] + "..."
-                        response_text += f"   {key}: \"{truncated_value}\"\n"
+                        response_text += f'   {key}: "{truncated_value}"\n'
                     elif isinstance(value, dict):
-                        response_text += f"   {key}: {{...}} (object with {len(value)} fields)\n"
+                        response_text += (
+                            f"   {key}: {{...}} (object with {len(value)} fields)\n"
+                        )
                     elif isinstance(value, list):
-                        response_text += f"   {key}: [...] (array with {len(value)} items)\n"
+                        response_text += (
+                            f"   {key}: [...] (array with {len(value)} items)\n"
+                        )
                     else:
                         response_text += f"   {key}: {value}\n"
 
@@ -1029,7 +1204,9 @@ async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
 
         except UnicodeDecodeError:
             # If not valid UTF-8, show as binary data info
-            response_text = f"📥 Successfully downloaded binary data from `{clean_reference}`\n\n"
+            response_text = (
+                f"📥 Successfully downloaded binary data from `{clean_reference}`\n\n"
+            )
             response_text += f"📊 File Information:\n"
             response_text += f"   Size: {len(result_bytes):,} bytes\n"
             response_text += f"   Type: Binary data\n\n"
@@ -1037,27 +1214,32 @@ async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
 
         response_text += _format_hints("upload_data", ["list_stamps"])
 
-        return CallToolResult(
-            content=[TextContent(type="text", text=response_text)]
-        )
+        return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
     except ValueError as e:
         error_msg = f"Validation error: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=_format_error(
-                error_msg, retryable=False
-            ))],
-            isError=True
+            content=[
+                TextContent(type="text", text=_format_error(error_msg, retryable=False))
+            ],
+            isError=True,
         )
     except RequestException as e:
         error_msg = f"Failed to download data: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
-            content=[TextContent(type="text", text=_format_error(
-                error_msg, retryable=_is_retryable_error(e), next_tool="health_check"
-            ))],
-            isError=True
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        error_msg,
+                        retryable=_is_retryable_error(e),
+                        next_tool="health_check",
+                    ),
+                )
+            ],
+            isError=True,
         )
 
 
@@ -1074,11 +1256,11 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
     try:
         result = gateway_client.health_check()
 
-        status = result.get('status', 'unknown')
-        gateway_url = result.get('gateway_url', 'N/A')
-        response_time = result.get('response_time_ms', 'N/A')
+        status = result.get("status", "unknown")
+        gateway_url = result.get("gateway_url", "N/A")
+        response_time = result.get("response_time_ms", "N/A")
 
-        gateway_ok = status == 'healthy'
+        gateway_ok = status == "healthy"
 
         if gateway_ok:
             response_text = f"✅ Gateway operational\n\n"
@@ -1091,10 +1273,12 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += f"Gateway: {gateway_url}\n"
             if isinstance(response_time, (int, float)):
                 response_text += f"Response Time: {response_time:.0f}ms\n"
-            recommendations.append("Gateway not healthy — check connectivity or try again later")
+            recommendations.append(
+                "Gateway not healthy — check connectivity or try again later"
+            )
             next_tool = "health_check"
 
-        if result.get('gateway_response'):
+        if result.get("gateway_response"):
             response_text += f"\n📋 Gateway Response: {result['gateway_response']}\n"
 
         # Adaptive: also check stamp availability
@@ -1108,20 +1292,28 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 total_stamps = len(stamps)
                 usable_count = sum(1 for s in stamps if s.get("usable") is True)
 
-                stamps_info += f"\n📋 Stamps: {usable_count} usable / {total_stamps} total\n"
+                stamps_info += (
+                    f"\n📋 Stamps: {usable_count} usable / {total_stamps} total\n"
+                )
 
                 if usable_count > 0:
                     ready = True
                     next_tool = "upload_data"
                 elif total_stamps > 0:
-                    recommendations.append(f"Found {total_stamps} stamp(s) but none are usable — purchase a new one or wait for propagation")
+                    recommendations.append(
+                        f"Found {total_stamps} stamp(s) but none are usable — purchase a new one or wait for propagation"
+                    )
                     next_tool = "purchase_stamp"
                 else:
-                    recommendations.append("No stamps found — purchase one before uploading")
+                    recommendations.append(
+                        "No stamps found — purchase one before uploading"
+                    )
                     next_tool = "purchase_stamp"
             except RequestException:
                 stamps_info += "\n📋 Stamps: unable to check (gateway error)\n"
-                recommendations.append("Could not check stamps — try list_stamps separately")
+                recommendations.append(
+                    "Could not check stamps — try list_stamps separately"
+                )
 
         response_text += stamps_info
 
@@ -1142,11 +1334,19 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     response_text += f"\n   Contract: {chain_client.contract_address}"
                     response_text += f"\n   Wallet: {chain_client.address}"
                 except Exception as chain_err:
-                    response_text += f"\n\n⛓️  Chain: {settings.chain_name} (error: {chain_err})"
-                    recommendations.append("Chain anchoring enabled but RPC unreachable")
+                    response_text += (
+                        f"\n\n⛓️  Chain: {settings.chain_name} (error: {chain_err})"
+                    )
+                    recommendations.append(
+                        "Chain anchoring enabled but RPC unreachable"
+                    )
             else:
-                response_text += f"\n\n⛓️  Chain: enabled but dependencies not installed"
-                recommendations.append("Install blockchain deps: pip install -e .[blockchain]")
+                response_text += (
+                    f"\n\n⛓️  Chain: enabled but dependencies not installed"
+                )
+                recommendations.append(
+                    "Install blockchain deps: pip install -e .[blockchain]"
+                )
 
         # Cross-server coordination info
         response_text += f"\n_companion_servers:"
@@ -1156,9 +1356,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"\n\n_next: {next_tool}"
         response_text += f"\n_related: list_stamps, purchase_stamp, get_wallet_info"
 
-        return CallToolResult(
-            content=[TextContent(type="text", text=response_text)]
-        )
+        return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
     except RequestException as e:
         gateway_url = settings.swarm_gateway_url
@@ -1172,10 +1370,17 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
 
         logger.error(f"Health check failed: {str(e)}")
         return CallToolResult(
-            content=[TextContent(type="text", text=_format_error(
-                error_msg, retryable=_is_retryable_error(e), next_tool="health_check"
-            ))],
-            isError=True
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        error_msg,
+                        retryable=_is_retryable_error(e),
+                        next_tool="health_check",
+                    ),
+                )
+            ],
+            isError=True,
         )
 
 
@@ -1189,64 +1394,85 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
         clean_stamp_id = validate_and_clean_stamp_id(stamp_id)
         result = gateway_client.check_stamp_health(clean_stamp_id)
 
-        can_upload = result.get('can_upload', False)
-        errors = result.get('errors', [])
-        warnings = result.get('warnings', [])
-        status = result.get('status', {})
+        can_upload = result.get("can_upload", False)
+        errors = result.get("errors", [])
+        warnings = result.get("warnings", [])
+        status = result.get("status", {})
 
         if can_upload:
             response_text = f"✅ Stamp {clean_stamp_id[:16]}... is healthy and ready for uploads.\n\n"
         else:
-            response_text = f"❌ Stamp {clean_stamp_id[:16]}... cannot be used for uploads.\n\n"
+            response_text = (
+                f"❌ Stamp {clean_stamp_id[:16]}... cannot be used for uploads.\n\n"
+            )
 
         if errors:
             response_text += "Errors:\n"
             for err in errors:
-                response_text += f"   [{err.get('code', '?')}] {err.get('message', '')}\n"
-                if err.get('suggestion'):
+                response_text += (
+                    f"   [{err.get('code', '?')}] {err.get('message', '')}\n"
+                )
+                if err.get("suggestion"):
                     response_text += f"   → {err['suggestion']}\n"
 
         if warnings:
             response_text += "Warnings:\n"
             for warn in warnings:
-                response_text += f"   [{warn.get('code', '?')}] {warn.get('message', '')}\n"
-                if warn.get('suggestion'):
+                response_text += (
+                    f"   [{warn.get('code', '?')}] {warn.get('message', '')}\n"
+                )
+                if warn.get("suggestion"):
                     response_text += f"   → {warn['suggestion']}\n"
 
         if status:
             response_text += f"\nStatus:\n"
-            if status.get('utilizationPercent') is not None:
+            if status.get("utilizationPercent") is not None:
                 response_text += f"   Utilization: {status['utilizationPercent']}% ({status.get('utilizationStatus', 'unknown')})\n"
-            if status.get('batchTTL') is not None:
-                ttl = status['batchTTL']
+            if status.get("batchTTL") is not None:
+                ttl = status["batchTTL"]
                 response_text += f"   TTL: {ttl:,} seconds ({ttl/86400:.1f} days)\n"
-            if status.get('expectedExpiration'):
+            if status.get("expectedExpiration"):
                 response_text += f"   Expires: {status['expectedExpiration']}\n"
 
         # Contextual hints based on health
         if can_upload:
-            response_text += _format_hints("upload_data", ["get_stamp_status", "extend_stamp"])
+            response_text += _format_hints(
+                "upload_data", ["get_stamp_status", "extend_stamp"]
+            )
         else:
-            response_text += _format_hints("purchase_stamp", ["list_stamps", "extend_stamp"])
+            response_text += _format_hints(
+                "purchase_stamp", ["list_stamps", "extend_stamp"]
+            )
 
-        return CallToolResult(
-            content=[TextContent(type="text", text=response_text)]
-        )
+        return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
     except ValueError as e:
         return CallToolResult(
-            content=[TextContent(type="text", text=_format_error(
-                f"Validation error: {str(e)}", retryable=False, next_tool="list_stamps"
-            ))],
-            isError=True
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        f"Validation error: {str(e)}",
+                        retryable=False,
+                        next_tool="list_stamps",
+                    ),
+                )
+            ],
+            isError=True,
         )
     except RequestException as e:
         return CallToolResult(
-            content=[TextContent(type="text", text=_format_error(
-                f"Failed to check stamp health: {str(e)}",
-                retryable=_is_retryable_error(e), next_tool="health_check"
-            ))],
-            isError=True
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        f"Failed to check stamp health: {str(e)}",
+                        retryable=_is_retryable_error(e),
+                        next_tool="health_check",
+                    ),
+                )
+            ],
+            isError=True,
         )
 
 
@@ -1260,17 +1486,161 @@ async def handle_get_wallet_info(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"   BZZ Balance: {result.get('bzzBalance', 'N/A')}\n"
         response_text += _format_hints("purchase_stamp", ["list_stamps"])
 
-        return CallToolResult(
-            content=[TextContent(type="text", text=response_text)]
-        )
+        return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
     except RequestException as e:
         return CallToolResult(
-            content=[TextContent(type="text", text=_format_error(
-                f"Failed to get wallet info: {str(e)}",
-                retryable=_is_retryable_error(e), next_tool="health_check"
-            ))],
-            isError=True
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        f"Failed to get wallet info: {str(e)}",
+                        retryable=_is_retryable_error(e),
+                        next_tool="health_check",
+                    ),
+                )
+            ],
+            isError=True,
+        )
+
+
+async def handle_chain_balance(arguments: Dict[str, Any]) -> CallToolResult:
+    """Handle chain wallet balance requests."""
+    if not CHAIN_AVAILABLE:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        "Chain module not available. Install blockchain dependencies: pip install -e .[blockchain]",
+                        retryable=False,
+                    ),
+                )
+            ],
+            isError=True,
+        )
+    if not chain_client:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        "Chain client not initialized. Set PROVENANCE_WALLET_KEY to enable wallet operations.",
+                        retryable=False,
+                        next_tool="chain_health",
+                    ),
+                )
+            ],
+            isError=True,
+        )
+
+    try:
+        wallet_info = chain_client.balance()
+
+        response_text = f"⛓️  Chain Wallet Balance\n\n"
+        response_text += f"   Wallet: {wallet_info.address}\n"
+        response_text += f"   Balance: {wallet_info.balance_eth} ETH ({wallet_info.balance_wei:,} wei)\n"
+        response_text += f"   Chain: {wallet_info.chain}\n"
+        response_text += f"   Contract: {wallet_info.contract_address}\n"
+        response_text += f"   RPC: {_mask_rpc_url(chain_client._provider.rpc_url)}"
+
+        guidance = _format_funding_guidance(
+            wallet_info.address, wallet_info.balance_wei, wallet_info.chain
+        )
+        response_text += guidance
+        response_text += _format_hints("anchor_hash", ["chain_health", "health_check"])
+
+        return CallToolResult(content=[TextContent(type="text", text=response_text)])
+
+    except Exception as e:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        f"Failed to get chain balance: {str(e)}",
+                        retryable=True,
+                        next_tool="chain_health",
+                    ),
+                )
+            ],
+            isError=True,
+        )
+
+
+async def handle_chain_health(arguments: Dict[str, Any]) -> CallToolResult:
+    """Handle chain RPC health check requests."""
+    if not CHAIN_AVAILABLE:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        "Chain module not available. Install blockchain dependencies: pip install -e .[blockchain]",
+                        retryable=False,
+                    ),
+                )
+            ],
+            isError=True,
+        )
+
+    try:
+        # Use chain_client if available, otherwise create a temporary provider
+        if chain_client:
+            provider = chain_client._provider
+        else:
+            from .chain.provider import ChainProvider
+
+            provider = ChainProvider(
+                chain=settings.chain_name,
+                rpc_url=settings.chain_rpc_url,
+                contract_address=settings.chain_contract_address,
+                explorer_url=settings.chain_explorer_url,
+            )
+
+        start = time.monotonic()
+        provider.health_check()
+        elapsed_ms = (time.monotonic() - start) * 1000
+
+        block_number = provider.get_block_number()
+
+        response_text = f"⛓️  Chain RPC Health\n\n"
+        response_text += f"   Connected: true\n"
+        response_text += f"   Chain: {provider.chain}\n"
+        response_text += f"   Chain ID: {provider.chain_id}\n"
+        response_text += f"   Latest Block: {block_number:,}\n"
+        response_text += f"   RPC Response: {elapsed_ms:.0f}ms\n"
+        response_text += f"   Contract: {provider.contract_address}\n"
+        response_text += f"   RPC: {_mask_rpc_url(provider.rpc_url)}"
+        response_text += _format_hints("chain_balance", ["health_check"])
+
+        return CallToolResult(content=[TextContent(type="text", text=response_text)])
+
+    except Exception as e:
+        # Import ChainConnectionError for better error detection
+        try:
+            from .chain.exceptions import ChainConnectionError
+
+            is_connection_error = isinstance(e, ChainConnectionError)
+        except ImportError:
+            is_connection_error = False
+
+        error_msg = f"⛓️  Chain RPC Health\n\n"
+        error_msg += f"   Connected: false\n"
+        error_msg += f"   Error: {str(e)}"
+
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        error_msg,
+                        retryable=is_connection_error,
+                        next_tool="health_check",
+                    ),
+                )
+            ],
+            isError=True,
         )
 
 
@@ -1279,31 +1649,37 @@ async def handle_get_notary_info(arguments: Dict[str, Any]) -> CallToolResult:
     try:
         result = gateway_client.get_notary_info()
 
-        enabled = result.get('enabled', False)
-        available = result.get('available', False)
+        enabled = result.get("enabled", False)
+        available = result.get("available", False)
 
         if enabled and available:
             response_text = f"✅ Notary service is enabled and available.\n\n"
             response_text += f"   Address: {result.get('address', 'N/A')}\n"
         elif enabled and not available:
-            response_text = f"⚠️  Notary service is enabled but not currently available.\n\n"
+            response_text = (
+                f"⚠️  Notary service is enabled but not currently available.\n\n"
+            )
         else:
             response_text = f"Notary service is not enabled on this gateway.\n\n"
 
         response_text += f"   Status: {result.get('message', 'N/A')}\n"
         response_text += _format_hints("upload_data", ["health_check"])
 
-        return CallToolResult(
-            content=[TextContent(type="text", text=response_text)]
-        )
+        return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
     except RequestException as e:
         return CallToolResult(
-            content=[TextContent(type="text", text=_format_error(
-                f"Failed to get notary info: {str(e)}",
-                retryable=_is_retryable_error(e), next_tool="health_check"
-            ))],
-            isError=True
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        f"Failed to get notary info: {str(e)}",
+                        retryable=_is_retryable_error(e),
+                        next_tool="health_check",
+                    ),
+                )
+            ],
+            isError=True,
         )
 
 
@@ -1318,12 +1694,12 @@ async def main():
 
     try:
         async with stdio_server() as (read_stream, write_stream):
-            logger.info(f"Starting {settings.mcp_server_name} v{settings.mcp_server_version}")
+            logger.info(
+                f"Starting {settings.mcp_server_name} v{settings.mcp_server_version}"
+            )
             logger.info(f"Gateway URL: {settings.swarm_gateway_url}")
             await server.run(
-                read_stream,
-                write_stream,
-                server.create_initialization_options()
+                read_stream, write_stream, server.create_initialization_options()
             )
     except KeyboardInterrupt:
         logger.info("Received interrupt signal")

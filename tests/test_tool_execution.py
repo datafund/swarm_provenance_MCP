@@ -23,7 +23,7 @@ async def call_tool_directly(server, name: str, arguments: Dict[str, Any]):
         handle_purchase_stamp, handle_get_stamp_status, handle_list_stamps,
         handle_extend_stamp, handle_upload_data, handle_download_data,
         handle_check_stamp_health, handle_get_wallet_info, handle_get_notary_info,
-        handle_health_check
+        handle_health_check, handle_chain_balance, handle_chain_health
     )
 
     handlers = {
@@ -36,7 +36,9 @@ async def call_tool_directly(server, name: str, arguments: Dict[str, Any]):
         "check_stamp_health": handle_check_stamp_health,
         "get_wallet_info": handle_get_wallet_info,
         "get_notary_info": handle_get_notary_info,
-        "health_check": handle_health_check
+        "health_check": handle_health_check,
+        "chain_balance": handle_chain_balance,
+        "chain_health": handle_chain_health,
     }
 
     try:
@@ -884,3 +886,362 @@ class TestToolParameterValidation:
             if result.isError:
                 error_text = result.content[0].text.lower()
                 assert "stamp_id" in error_text or "empty" in error_text or "required" in error_text
+
+
+class TestChainBalance:
+    """Test chain_balance tool execution."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    def _mock_wallet_info(self, balance_wei=10**17, chain="base-sepolia"):
+        """Create a mock ChainWalletInfo."""
+        mock_info = MagicMock()
+        mock_info.address = "0x1234567890abcdef1234567890abcdef12345678"
+        mock_info.balance_wei = balance_wei
+        mock_info.balance_eth = f"{balance_wei / 10**18:.6f}"
+        mock_info.chain = chain
+        mock_info.contract_address = "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
+        return mock_info
+
+    async def test_chain_balance_funded(self, server):
+        """Healthy balance should show wallet info without warnings."""
+        mock_client = MagicMock()
+        mock_client.balance.return_value = self._mock_wallet_info(balance_wei=10**17)
+        mock_client._provider = MagicMock()
+        mock_client._provider.rpc_url = "https://sepolia.base.org"
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "chain_balance", {})
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "0x1234" in text
+        assert "ETH" in text
+        assert "base-sepolia" in text
+        assert "CRITICAL" not in text
+        assert "WARNING" not in text
+
+    async def test_chain_balance_low(self, server):
+        """Balance below LOW threshold should show warning."""
+        mock_client = MagicMock()
+        mock_client.balance.return_value = self._mock_wallet_info(balance_wei=5 * 10**14)
+        mock_client._provider = MagicMock()
+        mock_client._provider.rpc_url = "https://sepolia.base.org"
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "chain_balance", {})
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "WARNING" in text
+        assert "low" in text.lower()
+
+    async def test_chain_balance_insufficient(self, server):
+        """Balance below MIN threshold should show critical message with faucet."""
+        mock_client = MagicMock()
+        mock_client.balance.return_value = self._mock_wallet_info(balance_wei=10**12)
+        mock_client._provider = MagicMock()
+        mock_client._provider.rpc_url = "https://sepolia.base.org"
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "chain_balance", {})
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "CRITICAL" in text
+        assert "faucet" in text.lower() or "alchemy" in text.lower()
+
+    async def test_chain_balance_mainnet(self, server):
+        """Mainnet chain should show bridge URL instead of faucet."""
+        mock_client = MagicMock()
+        mock_client.balance.return_value = self._mock_wallet_info(
+            balance_wei=10**12, chain="base"
+        )
+        mock_client._provider = MagicMock()
+        mock_client._provider.rpc_url = "https://mainnet.base.org"
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "chain_balance", {})
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "bridge.base.org" in text
+
+    async def test_chain_balance_not_available(self, server):
+        """CHAIN_AVAILABLE=False should return error."""
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', False):
+            result = await call_tool_directly(server, "chain_balance", {})
+
+        assert result.isError
+        text = result.content[0].text
+        assert "not available" in text.lower() or "not installed" in text.lower()
+
+    async def test_chain_balance_no_client(self, server):
+        """chain_client=None should return error suggesting chain_health."""
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', None):
+            result = await call_tool_directly(server, "chain_balance", {})
+
+        assert result.isError
+        text = result.content[0].text
+        assert "wallet" in text.lower() or "PROVENANCE_WALLET_KEY" in text
+
+    async def test_chain_balance_hints(self, server):
+        """Response should include _next and _related hints."""
+        mock_client = MagicMock()
+        mock_client.balance.return_value = self._mock_wallet_info()
+        mock_client._provider = MagicMock()
+        mock_client._provider.rpc_url = "https://sepolia.base.org"
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "chain_balance", {})
+
+        text = result.content[0].text
+        assert "_next:" in text
+        assert "_related:" in text
+
+    async def test_chain_tools_registered_when_enabled(self, server):
+        """Chain tools should appear in list_tools when chain is enabled."""
+        from mcp.types import ListToolsRequest
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.settings') as mock_settings:
+            mock_settings.chain_enabled = True
+            mock_settings.mcp_server_name = "test"
+            mock_settings.mcp_server_version = "0.1.0"
+            mock_settings.default_stamp_amount = 2000000000
+            mock_settings.default_stamp_depth = 17
+
+            test_server = create_server()
+            # Find the list_tools handler
+            handler = None
+            for h in test_server.request_handlers.values():
+                if hasattr(h, '__name__') and 'list_tools' in str(h):
+                    handler = h
+                    break
+            assert handler is not None
+            result = await handler(ListToolsRequest(method="tools/list"))
+            inner = result.root if hasattr(result, 'root') else result
+            tools = inner.tools if hasattr(inner, 'tools') else inner
+            tool_names = {t.name for t in tools}
+            assert "chain_balance" in tool_names
+            assert "chain_health" in tool_names
+
+
+class TestChainHealth:
+    """Test chain_health tool execution."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_chain_health_connected(self, server):
+        """Successful health check should show connection info."""
+        mock_client = MagicMock()
+        mock_client._provider = MagicMock()
+        mock_client._provider.chain = "base-sepolia"
+        mock_client._provider.chain_id = 84532
+        mock_client._provider.rpc_url = "https://sepolia.base.org"
+        mock_client._provider.contract_address = "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
+        mock_client._provider.health_check.return_value = True
+        mock_client._provider.get_block_number.return_value = 12345678
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "chain_health", {})
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "Connected: true" in text
+        assert "base-sepolia" in text
+        assert "84532" in text
+        assert "12,345,678" in text
+
+    async def test_chain_health_disconnected(self, server):
+        """Connection error should show disconnected status."""
+        mock_client = MagicMock()
+        mock_client._provider = MagicMock()
+        mock_client._provider.health_check.side_effect = Exception("Connection refused")
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "chain_health", {})
+
+        assert result.isError
+        text = result.content[0].text
+        assert "Connected: false" in text
+
+    async def test_chain_health_not_available(self, server):
+        """CHAIN_AVAILABLE=False should return error."""
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', False):
+            result = await call_tool_directly(server, "chain_health", {})
+
+        assert result.isError
+        text = result.content[0].text
+        assert "not available" in text.lower() or "not installed" in text.lower()
+
+    async def test_chain_health_no_wallet(self, server):
+        """chain_client=None should still work by creating a temporary provider."""
+        mock_provider = MagicMock()
+        mock_provider.chain = "base-sepolia"
+        mock_provider.chain_id = 84532
+        mock_provider.rpc_url = "https://sepolia.base.org"
+        mock_provider.contract_address = "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
+        mock_provider.health_check.return_value = True
+        mock_provider.get_block_number.return_value = 99999
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', None), \
+             patch('swarm_provenance_mcp.chain.provider.ChainProvider', return_value=mock_provider):
+            result = await call_tool_directly(server, "chain_health", {})
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "Connected: true" in text
+
+    async def test_chain_health_hints(self, server):
+        """Response should include _next and _related hints."""
+        mock_client = MagicMock()
+        mock_client._provider = MagicMock()
+        mock_client._provider.chain = "base-sepolia"
+        mock_client._provider.chain_id = 84532
+        mock_client._provider.rpc_url = "https://sepolia.base.org"
+        mock_client._provider.contract_address = "0x9a3c"
+        mock_client._provider.health_check.return_value = True
+        mock_client._provider.get_block_number.return_value = 100
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "chain_health", {})
+
+        text = result.content[0].text
+        assert "_next: chain_balance" in text
+        assert "_related:" in text
+
+    async def test_chain_health_rpc_masked(self, server):
+        """RPC URL should show only hostname, not full URL."""
+        mock_client = MagicMock()
+        mock_client._provider = MagicMock()
+        mock_client._provider.chain = "base-sepolia"
+        mock_client._provider.chain_id = 84532
+        mock_client._provider.rpc_url = "https://my-secret-rpc.example.com/v1/key123"
+        mock_client._provider.contract_address = "0x9a3c"
+        mock_client._provider.health_check.return_value = True
+        mock_client._provider.get_block_number.return_value = 100
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "chain_health", {})
+
+        text = result.content[0].text
+        assert "my-secret-rpc.example.com" in text
+        assert "key123" not in text
+
+    async def test_chain_health_provider_creation_fails(self, server):
+        """Failing to create temp provider (e.g. missing contract) should return error."""
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', None), \
+             patch('swarm_provenance_mcp.server.settings') as mock_settings:
+            mock_settings.chain_name = "base"
+            mock_settings.chain_rpc_url = None
+            mock_settings.chain_contract_address = None
+            mock_settings.chain_explorer_url = None
+            # ChainProvider will raise because base has no contract preset
+            result = await call_tool_directly(server, "chain_health", {})
+
+        assert result.isError
+        text = result.content[0].text
+        assert "Connected: false" in text
+
+
+class TestFundingGuidance:
+    """Direct unit tests for _format_funding_guidance helper."""
+
+    def test_healthy_balance_returns_empty(self):
+        """Balance above LOW threshold should return empty string."""
+        from swarm_provenance_mcp.server import _format_funding_guidance, _LOW_BALANCE_WEI
+        result = _format_funding_guidance("0xabc", _LOW_BALANCE_WEI, "base-sepolia")
+        assert result == ""
+
+    def test_well_above_threshold_returns_empty(self):
+        """Large balance should return empty string."""
+        from swarm_provenance_mcp.server import _format_funding_guidance
+        result = _format_funding_guidance("0xabc", 10**18, "base-sepolia")
+        assert result == ""
+
+    def test_low_balance_returns_warning(self):
+        """Balance between MIN and LOW should return WARNING."""
+        from swarm_provenance_mcp.server import (
+            _format_funding_guidance, _MIN_BALANCE_WEI, _LOW_BALANCE_WEI,
+        )
+        balance = (_MIN_BALANCE_WEI + _LOW_BALANCE_WEI) // 2
+        result = _format_funding_guidance("0xabc", balance, "base-sepolia")
+        assert "WARNING" in result
+        assert "CRITICAL" not in result
+        assert "0xabc" in result
+
+    def test_insufficient_balance_returns_critical(self):
+        """Balance below MIN should return CRITICAL."""
+        from swarm_provenance_mcp.server import _format_funding_guidance
+        result = _format_funding_guidance("0xabc", 100, "base-sepolia")
+        assert "CRITICAL" in result
+        assert "0xabc" in result
+
+    def test_zero_balance_returns_critical(self):
+        """Zero balance should return CRITICAL."""
+        from swarm_provenance_mcp.server import _format_funding_guidance
+        result = _format_funding_guidance("0xabc", 0, "base-sepolia")
+        assert "CRITICAL" in result
+
+    def test_testnet_shows_faucet(self):
+        """Testnet chain should include faucet URL."""
+        from swarm_provenance_mcp.server import _format_funding_guidance
+        result = _format_funding_guidance("0xabc", 100, "base-sepolia")
+        assert "faucet" in result.lower() or "alchemy" in result.lower()
+
+    def test_mainnet_shows_bridge(self):
+        """Mainnet chain should include bridge URL."""
+        from swarm_provenance_mcp.server import _format_funding_guidance
+        result = _format_funding_guidance("0xabc", 100, "base")
+        assert "bridge.base.org" in result
+
+    def test_unknown_chain_shows_bridge(self):
+        """Unknown chain (not in faucet list) should show bridge URL."""
+        from swarm_provenance_mcp.server import _format_funding_guidance
+        result = _format_funding_guidance("0xabc", 100, "base-mainnet-custom")
+        assert "bridge.base.org" in result
+
+
+class TestMaskRpcUrl:
+    """Direct unit tests for _mask_rpc_url helper."""
+
+    def test_standard_url(self):
+        from swarm_provenance_mcp.server import _mask_rpc_url
+        assert _mask_rpc_url("https://sepolia.base.org") == "sepolia.base.org"
+
+    def test_url_with_path_and_key(self):
+        from swarm_provenance_mcp.server import _mask_rpc_url
+        result = _mask_rpc_url("https://rpc.example.com/v1/secret-key-123")
+        assert result == "rpc.example.com"
+
+    def test_url_with_port(self):
+        from swarm_provenance_mcp.server import _mask_rpc_url
+        result = _mask_rpc_url("http://localhost:8545")
+        assert result == "localhost"
+
+    def test_empty_string(self):
+        from swarm_provenance_mcp.server import _mask_rpc_url
+        result = _mask_rpc_url("")
+        assert isinstance(result, str)
+
+    def test_garbage_input(self):
+        from swarm_provenance_mcp.server import _mask_rpc_url
+        result = _mask_rpc_url("not-a-url")
+        assert isinstance(result, str)

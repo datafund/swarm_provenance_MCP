@@ -34,6 +34,7 @@ This MCP server is specifically designed for provenance data use cases, leveragi
 - **Data Download**: Download data from Swarm network by reference
 - **Provenance Storage**: Store data with provenance metadata for immutable, verifiable records
 - **Health Monitoring**: Check gateway and Swarm network connectivity
+- **Chain Diagnostics** (optional): Check on-chain wallet balance and RPC connectivity for provenance anchoring
 
 ## Installation
 
@@ -114,6 +115,16 @@ Environment variables (set in `.env` file):
 - `DEFAULT_STAMP_AMOUNT`: Default amount for new stamps in wei (default: `2000000000`)
 - `DEFAULT_STAMP_DEPTH`: Default depth for new stamps (default: `17`)
 - `PAYMENT_MODE`: Gateway payment tier (default: `free` — rate limited to 3 write requests/minute)
+
+#### Chain Anchoring (Optional)
+
+- `CHAIN_ENABLED`: Enable on-chain provenance anchoring (default: `false`)
+- `CHAIN_NAME`: Blockchain network — `base-sepolia` (testnet) or `base` (mainnet) (default: `base-sepolia`)
+- `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x prefix)
+- `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set)
+- `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set)
+
+When chain is enabled with `pip install -e .[blockchain]`, additional tools (`chain_balance`, `chain_health`) become available for checking wallet balance and RPC connectivity.
 
 ### Gateway Options
 
@@ -299,6 +310,32 @@ Check gateway and Swarm network connectivity status. Returns an adaptive status 
 ```json
 {
   "name": "health_check",
+  "arguments": {}
+}
+```
+
+#### `chain_balance` *(optional — requires `CHAIN_ENABLED=true` and blockchain dependencies)*
+Check the on-chain wallet ETH balance used for provenance anchoring. Returns wallet address, balance, chain info, and actionable funding guidance when balance is low.
+
+**Parameters:** None
+
+**Example:**
+```json
+{
+  "name": "chain_balance",
+  "arguments": {}
+}
+```
+
+#### `chain_health` *(optional — requires `CHAIN_ENABLED=true` and blockchain dependencies)*
+Test blockchain RPC connectivity for on-chain provenance. Returns connection status, chain name, chain ID, latest block number, and RPC response time. Does not require a wallet key.
+
+**Parameters:** None
+
+**Example:**
+```json
+{
+  "name": "chain_health",
   "arguments": {}
 }
 ```

@@ -119,6 +119,8 @@ Our Swarm Provenance MCP server currently provides these tools:
 - `get_wallet_info` - Node wallet address and BZZ balance (diagnostic)
 - `get_notary_info` - Check notary signing service availability
 - `health_check` - Verify gateway and network connectivity
+- `chain_balance` - Check on-chain wallet ETH balance with funding guidance *(optional, requires chain enabled)*
+- `chain_health` - Test blockchain RPC connectivity *(optional, requires chain enabled)*
 
 ## 🧭 Agent Workflow Guidance
 

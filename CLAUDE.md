@@ -128,6 +128,13 @@ The `config.py` module uses Pydantic Settings for type-safe configuration with a
 - Proper MCP error responses with structured error information
 - Request timeout handling and retry logic in gateway client
 
+### Agent Guidance (MCP Design Guidelines P0)
+- **Adaptive health_check**: Returns `ready` boolean, `_recommendations`, and contextual `_next` based on stamp availability
+- **Response hints**: All success responses append `_next: <tool>` and `_related: <tools>` guiding agents to the logical next step
+- **Structured errors**: All error responses include `retryable: true|false` and `_next` recovery hint
+- **Typo correction**: Unknown tool names get Levenshtein-based "Did you mean?" suggestions
+- Helper functions: `_format_hints()`, `_format_error()`, `_is_retryable_error()`, `_suggest_tool_name()`
+
 ### Code Quality
 - Black formatting with 88-character line length
 - Ruff linting with comprehensive rule set (ignores specific rules for MCP compatibility)

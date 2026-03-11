@@ -120,6 +120,40 @@ Our Swarm Provenance MCP server currently provides these tools:
 - `get_notary_info` - Check notary signing service availability
 - `health_check` - Verify gateway and network connectivity
 
+## 🧭 Agent Workflow Guidance
+
+The MCP server includes built-in guidance to help AI agents chain operations correctly:
+
+### Response Hints
+
+Every successful tool response includes `_next` and `_related` hints:
+
+```
+_next: upload_data                    # Recommended next tool
+_related: check_stamp_health, list_stamps  # Other relevant tools
+```
+
+Hints are **contextual** — they adapt based on the result:
+- `list_stamps` with usable stamps → `_next: upload_data`
+- `list_stamps` with no stamps → `_next: purchase_stamp`
+- `check_stamp_health` healthy → `_next: upload_data`
+- `check_stamp_health` unhealthy → `_next: purchase_stamp`
+
+### Structured Errors
+
+Error responses include recovery guidance:
+- `retryable: true` — transient errors (timeouts, rate limits), safe to retry
+- `retryable: false` — permanent errors (validation), fix input and try different approach
+- `_next: <tool>` — recovery tool suggestion
+
+### Adaptive Health Check
+
+`health_check` proactively checks both gateway connectivity and stamp availability:
+- `ready: true` — system is fully ready for uploads
+- `ready: false` + `_recommendations` — explains what's needed before uploading
+
+This allows agents to call `health_check` once and immediately know what to do next.
+
 ## 🔗 Integration Examples
 
 ### **Research Workflow:**

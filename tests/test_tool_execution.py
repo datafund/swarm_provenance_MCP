@@ -716,6 +716,130 @@ class TestAdaptiveHealthCheck:
             assert "_related:" in text
 
 
+class TestMCPPrompts:
+    """Test MCP prompt definitions and workflow templates."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_list_prompts_returns_all(self, server):
+        """list_prompts should return all 3 workflow prompts."""
+        handler = None
+        for h in server.request_handlers.values():
+            if hasattr(h, '__name__') and 'list_prompts' in str(h):
+                handler = h
+                break
+
+        assert handler is not None, "list_prompts handler not registered"
+        from mcp.types import ListPromptsRequest
+        result = await handler(ListPromptsRequest(method="prompts/list"))
+        inner = result.root if hasattr(result, 'root') else result
+        prompts = inner.prompts if hasattr(inner, 'prompts') else inner
+
+        prompt_names = {p.name for p in prompts}
+        assert prompt_names == {"provenance-upload", "provenance-verify", "stamp-management"}
+
+    async def test_provenance_upload_prompt_has_arguments(self, server):
+        """provenance-upload prompt should require data argument."""
+        handler = None
+        for h in server.request_handlers.values():
+            if hasattr(h, '__name__') and 'list_prompts' in str(h):
+                handler = h
+                break
+
+        from mcp.types import ListPromptsRequest
+        result = await handler(ListPromptsRequest(method="prompts/list"))
+        inner = result.root if hasattr(result, 'root') else result
+        prompts = inner.prompts if hasattr(inner, 'prompts') else inner
+
+        upload_prompt = next(p for p in prompts if p.name == "provenance-upload")
+        arg_names = [a.name for a in upload_prompt.arguments]
+        assert "data" in arg_names
+        data_arg = next(a for a in upload_prompt.arguments if a.name == "data")
+        assert data_arg.required is True
+
+    async def test_get_prompt_provenance_upload(self, server):
+        """get_prompt for provenance-upload should return step-by-step instructions."""
+        handler = None
+        for h in server.request_handlers.values():
+            if hasattr(h, '__name__') and 'get_prompt' in str(h):
+                handler = h
+                break
+
+        assert handler is not None, "get_prompt handler not registered"
+        from mcp.types import GetPromptRequest
+        result = await handler(GetPromptRequest(
+            method="prompts/get",
+            params={"name": "provenance-upload", "arguments": {"data": "test data"}}
+        ))
+        inner = result.root if hasattr(result, 'root') else result
+        messages = inner.messages
+
+        assert len(messages) >= 1
+        text = messages[0].content.text
+        assert "health_check" in text
+        assert "upload_data" in text
+        assert "download_data" in text
+
+    async def test_get_prompt_stamp_management(self, server):
+        """get_prompt for stamp-management should include stamp review steps."""
+        handler = None
+        for h in server.request_handlers.values():
+            if hasattr(h, '__name__') and 'get_prompt' in str(h):
+                handler = h
+                break
+
+        from mcp.types import GetPromptRequest
+        result = await handler(GetPromptRequest(
+            method="prompts/get",
+            params={"name": "stamp-management"}
+        ))
+        inner = result.root if hasattr(result, 'root') else result
+        text = inner.messages[0].content.text
+        assert "list_stamps" in text
+        assert "check_stamp_health" in text
+
+
+class TestCompanionServers:
+    """Test cross-server coordination info in health_check."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_health_check_includes_companion_servers(self, server):
+        """health_check response should list companion servers."""
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.health_check.return_value = {
+                "status": "healthy",
+                "gateway_url": "http://localhost:8000",
+                "response_time_ms": 10
+            }
+            mock_client.list_stamps.return_value = {
+                "stamps": [{"batchID": TEST_STAMP_ID, "usable": True}],
+                "total_count": 1
+            }
+            result = await call_tool_directly(server, "health_check", {})
+            text = result.content[0].text
+            assert "_companion_servers:" in text
+            assert "swarm_connect" in text
+            assert "fds-id" in text
+
+    async def test_companion_server_status_reflects_gateway(self, server):
+        """Companion server status should reflect actual gateway connectivity."""
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.health_check.return_value = {
+                "status": "healthy",
+                "gateway_url": "http://localhost:8000",
+                "response_time_ms": 10
+            }
+            mock_client.list_stamps.return_value = {"stamps": [], "total_count": 0}
+            result = await call_tool_directly(server, "health_check", {})
+            text = result.content[0].text
+            assert "connected" in text
+
+
 class TestToolParameterValidation:
     """Test parameter validation for all tools."""
 

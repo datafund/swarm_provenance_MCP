@@ -14,6 +14,10 @@ from mcp.types import (
     CallToolRequest,
     CallToolResult,
     ListToolsRequest,
+    Prompt,
+    PromptArgument,
+    PromptMessage,
+    GetPromptResult,
 )
 from requests.exceptions import RequestException
 
@@ -59,6 +63,11 @@ ERRORS:
 - "Not usable": stamp expired or not yet propagated — wait or purchase new
 - HTTP 404 on stamp: may be newly purchased, wait ~1 minute and retry
 - Size exceeded: data > 4KB, reduce payload before upload
+
+COMPANION SERVERS:
+- swarm_connect gateway (required) — the FastAPI gateway this server talks to, handles Bee node communication
+- fds-id MCP (optional) — identity and signing server for cryptographic provenance chain anchoring
+The health_check tool reports gateway connectivity. For full provenance workflows with signed data, an fds-id server is needed but not required for basic storage.
 """.strip()
 
 # Validation patterns
@@ -455,6 +464,130 @@ def create_server() -> Server:
                 ],
                 isError=True
             )
+
+    # --- MCP Prompts (workflow templates for agents) ---
+
+    @server.list_prompts()
+    async def list_prompts() -> List[Prompt]:
+        """List available workflow prompts."""
+        return [
+            Prompt(
+                name="provenance-upload",
+                description="Upload data with provenance to Swarm. Guides through health check, stamp selection/purchase, upload, and verification.",
+                arguments=[
+                    PromptArgument(
+                        name="data",
+                        description="The data content to upload (text, JSON, etc.)",
+                        required=True
+                    ),
+                    PromptArgument(
+                        name="content_type",
+                        description="MIME type (default: application/json)",
+                        required=False
+                    ),
+                ]
+            ),
+            Prompt(
+                name="provenance-verify",
+                description="Verify existing provenance data by downloading and inspecting it from Swarm.",
+                arguments=[
+                    PromptArgument(
+                        name="reference",
+                        description="64-character hex Swarm reference hash to verify",
+                        required=True
+                    ),
+                ]
+            ),
+            Prompt(
+                name="stamp-management",
+                description="Review and manage stamp inventory — list stamps, check health, extend or purchase as needed.",
+                arguments=[]
+            ),
+        ]
+
+    @server.get_prompt()
+    async def get_prompt(name: str, arguments: Optional[Dict[str, str]] = None) -> GetPromptResult:
+        """Return workflow prompt with step-by-step instructions."""
+        args = arguments or {}
+
+        if name == "provenance-upload":
+            data_desc = args.get("data", "<your data here>")
+            content_type = args.get("content_type", "application/json")
+            return GetPromptResult(
+                description="Upload data with provenance to Swarm",
+                messages=[
+                    PromptMessage(
+                        role="user",
+                        content=TextContent(
+                            type="text",
+                            text=(
+                                f"Upload this data to Swarm with provenance:\n\n"
+                                f"Data: {data_desc}\n"
+                                f"Content-Type: {content_type}\n\n"
+                                f"Follow these steps:\n"
+                                f"1. Call health_check to verify the gateway is reachable and check stamp availability\n"
+                                f"2. If ready=true, pick a usable stamp from the health_check response. "
+                                f"Otherwise call purchase_stamp (depth 17 for small data) and wait ~1 minute\n"
+                                f"3. Call check_stamp_health on the chosen stamp to confirm it's ready\n"
+                                f"4. Call upload_data with the data and stamp_id\n"
+                                f"5. Call download_data with the returned reference to verify the upload\n"
+                                f"6. Report the reference hash — this is the permanent Swarm address"
+                            )
+                        )
+                    )
+                ]
+            )
+
+        elif name == "provenance-verify":
+            reference = args.get("reference", "<reference hash>")
+            return GetPromptResult(
+                description="Verify existing provenance data from Swarm",
+                messages=[
+                    PromptMessage(
+                        role="user",
+                        content=TextContent(
+                            type="text",
+                            text=(
+                                f"Verify this provenance data from Swarm:\n\n"
+                                f"Reference: {reference}\n\n"
+                                f"Steps:\n"
+                                f"1. Call download_data with the reference hash\n"
+                                f"2. Inspect the returned content — check structure, fields, and integrity\n"
+                                f"3. Report what was found: content type, size, key fields, "
+                                f"and whether the data appears intact"
+                            )
+                        )
+                    )
+                ]
+            )
+
+        elif name == "stamp-management":
+            return GetPromptResult(
+                description="Review and manage stamp inventory",
+                messages=[
+                    PromptMessage(
+                        role="user",
+                        content=TextContent(
+                            type="text",
+                            text=(
+                                "Review my Swarm stamp inventory and recommend actions:\n\n"
+                                "Steps:\n"
+                                "1. Call list_stamps to get all stamps\n"
+                                "2. For each stamp, check if it's usable, its utilization, and TTL\n"
+                                "3. Call check_stamp_health on any stamp that looks concerning\n"
+                                "4. Recommend actions:\n"
+                                "   - Stamps with high utilization → purchase a new one\n"
+                                "   - Stamps with low TTL → extend_stamp to add time\n"
+                                "   - No usable stamps → purchase_stamp\n"
+                                "5. Summarize the inventory status and recommended actions"
+                            )
+                        )
+                    )
+                ]
+            )
+
+        else:
+            raise ValueError(f"Unknown prompt: {name}")
 
     return server
 
@@ -960,6 +1093,11 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += "\n_recommendations:"
             for rec in recommendations:
                 response_text += f"\n  - {rec}"
+
+        # Cross-server coordination info
+        response_text += f"\n_companion_servers:"
+        response_text += f"\n  - swarm_connect gateway: {gateway_url} (required, {'connected' if gateway_ok else 'unreachable'})"
+        response_text += f"\n  - fds-id MCP: optional (identity/signing for provenance chain anchoring)"
 
         response_text += f"\n\n_next: {next_tool}"
         response_text += f"\n_related: list_stamps, purchase_stamp, get_wallet_info"

@@ -164,6 +164,29 @@ class TestToolSynchronization:
             if not handler_info.get('has_error_handling'):
                 print(f"Warning: Tool '{tool_name}' handler may lack error handling")
 
+    async def test_runtime_prompt_registration(self):
+        """Test that MCP prompts are properly registered at runtime."""
+        from mcp.types import ListPromptsRequest
+
+        server = create_server()
+
+        list_prompts_handler = None
+        for handler_key, handler in server.request_handlers.items():
+            if hasattr(handler, '__name__') and 'list_prompts' in str(handler):
+                list_prompts_handler = handler
+                break
+
+        assert list_prompts_handler is not None, "list_prompts handler not registered"
+
+        result = await list_prompts_handler(ListPromptsRequest(method="prompts/list"))
+        inner = result.root if hasattr(result, 'root') else result
+        prompts = inner.prompts if hasattr(inner, 'prompts') else inner
+        prompt_names = {p.name for p in prompts}
+
+        expected_prompts = {'provenance-upload', 'provenance-verify', 'stamp-management'}
+        missing = expected_prompts - prompt_names
+        assert not missing, f"Prompts not registered at runtime: {missing}"
+
     async def test_runtime_tool_registration(self):
         """Test that tools are properly registered at runtime."""
         from mcp.types import ListToolsRequest

@@ -338,7 +338,20 @@ The `health_check` tool returns additional fields:
 ready: true|false                # Whether the system is ready for uploads
 _recommendations:                # Actionable suggestions (only when issues exist)
   - No stamps found — purchase one before uploading
+_companion_servers:              # Related servers in the ecosystem
+  - swarm_connect gateway: <url> (connected|unreachable)
+  - fds-id MCP: optional (identity/signing for provenance chain anchoring)
 ```
+
+### MCP Prompts
+
+The server provides workflow prompts that agents can invoke via `prompts/list` and `prompts/get`. These give step-by-step instructions for common tasks:
+
+| Prompt | Description | Arguments |
+|--------|-------------|-----------|
+| `provenance-upload` | Upload data to Swarm: health check, stamp selection, upload, verify | `data` (required), `content_type` (optional) |
+| `provenance-verify` | Download and verify existing data by reference | `reference` (required) |
+| `stamp-management` | Review stamp inventory, diagnose issues, recommend actions | none |
 
 ## Docker
 

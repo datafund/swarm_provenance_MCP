@@ -78,11 +78,24 @@ pytest tests/test_docker.py -v -m docker
 - **MCP Server** (`server.py`): Main server implementing Model Context Protocol with tool handlers
 - **Gateway Client** (`gateway_client.py`): HTTP client for communicating with swarm_connect FastAPI gateway
 - **Configuration** (`config.py`): Pydantic-based settings management with environment variable support
+- **Chain Module** (`chain/`): Optional on-chain provenance anchoring via DataProvenance smart contract
 
 ### Communication Flow
 ```
 AI Agents → MCP Server → Gateway Client → swarm_connect Gateway → Swarm Network
+                       → Chain Client  → Base Sepolia RPC → DataProvenance Contract
 ```
+
+### Chain Module (`chain/`)
+Optional module for on-chain provenance. Requires `pip install -e .[blockchain]`.
+- `chain/__init__.py` — Import guard (`CHAIN_AVAILABLE` flag)
+- `chain/client.py` — High-level facade (anchor, verify, transform, access)
+- `chain/provider.py` — Web3 RPC connection management
+- `chain/wallet.py` — Private key loading and transaction signing
+- `chain/contract.py` — DataProvenance contract wrapper (build_*_tx, read methods)
+- `chain/models.py` — Pydantic models (AnchorResult, ChainProvenanceRecord, etc.)
+- `chain/exceptions.py` — Standalone exception hierarchy (ChainError base)
+- `chain/abi/DataProvenance.json` — Contract ABI
 
 ### Available MCP Tools
 - `purchase_stamp` - Create new postage stamps
@@ -117,6 +130,13 @@ AI Agents → MCP Server → Gateway Client → swarm_connect Gateway → Swarm 
 - `PAYMENT_MODE`: Gateway payment tier — `free` for rate-limited free tier (default: `free`)
 - `MCP_SERVER_NAME`: Server identification (default: `swarm-provenance-mcp`)
 - `MCP_SERVER_VERSION`: Server version (default: `0.1.0`)
+- `CHAIN_ENABLED`: Enable on-chain provenance anchoring (default: `false`)
+- `CHAIN_NAME`: Blockchain network (`base-sepolia` or `base`, default: `base-sepolia`)
+- `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x)
+- `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set)
+- `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set)
+- `CHAIN_EXPLORER_URL`: Custom block explorer URL (uses chain preset if not set)
+- `CHAIN_GAS_LIMIT`: Explicit gas limit for chain transactions (skips estimation if set)
 
 ### Settings Management
 The `config.py` module uses Pydantic Settings for type-safe configuration with automatic environment variable loading and validation.

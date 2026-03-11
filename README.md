@@ -407,20 +407,22 @@ Add to your `claude_desktop_config.json`:
 │                 │    │                 │    │   Gateway       │
 │ • Claude        │    │ • Tool handlers │    │                 │
 │ • Other LLMs    │    │ • Gateway client│    │ • Purchase API  │
-│ • Custom agents │    │ • Error handling│    │ • Status API    │
-└─────────────────┘    └─────────────────┘    │ • Extension API │
-                                              └─────────┬───────┘
-                                                        │
-                                              ┌─────────▼───────┐
-                                              │  Swarm Network  │
-                                              │   (Bee Node)    │
-                                              └─────────────────┘
+│ • Custom agents │    │ • Chain client  │    │ • Status API    │
+└─────────────────┘    │ • Error handling│    │ • Extension API │
+                       └────────┬────────┘    └─────────┬───────┘
+                                │                       │
+                       ┌────────▼────────┐    ┌─────────▼───────┐
+                       │  Base Sepolia   │    │  Swarm Network  │
+                       │  (DataProv.     │    │   (Bee Node)    │
+                       │   Contract)     │    └─────────────────┘
+                       └─────────────────┘
 ```
 
 ### Components
 
 - **MCP Server**: Exposes tools via the Model Context Protocol
 - **Gateway Client**: HTTP client for communicating with swarm_connect
+- **Chain Client** (optional): On-chain provenance via DataProvenance smart contract on Base Sepolia
 - **Configuration**: Environment-based settings management
 - **Error Handling**: Comprehensive error handling and logging
 

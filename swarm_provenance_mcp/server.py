@@ -31,6 +31,38 @@ logger = logging.getLogger(__name__)
 # Global gateway client instance
 gateway_client = SwarmGatewayClient()
 
+# Chain client (initialized when chain_enabled=true and dependencies available)
+chain_client = None
+CHAIN_AVAILABLE = False
+
+if settings.chain_enabled:
+    try:
+        from .chain import CHAIN_AVAILABLE as _chain_avail, ChainClient
+
+        CHAIN_AVAILABLE = _chain_avail
+        if CHAIN_AVAILABLE:
+            chain_client = ChainClient(
+                chain=settings.chain_name,
+                rpc_url=settings.chain_rpc_url,
+                contract_address=settings.chain_contract_address,
+                private_key=settings.provenance_wallet_key,
+                explorer_url=settings.chain_explorer_url,
+                gas_limit=settings.chain_gas_limit,
+            )
+            logger.info(
+                "Chain client initialized: chain=%s contract=%s",
+                chain_client.chain,
+                chain_client.contract_address,
+            )
+        else:
+            logger.warning(
+                "Chain enabled but blockchain dependencies not installed. "
+                "Run: pip install -e .[blockchain]"
+            )
+    except Exception as e:
+        logger.warning("Chain client initialization failed: %s", e)
+        CHAIN_AVAILABLE = False
+
 # Agent-facing instructions sent during MCP initialization handshake
 MCP_INSTRUCTIONS = """
 Swarm Provenance MCP — decentralized storage with cryptographic provenance on the Swarm network.
@@ -63,6 +95,12 @@ ERRORS:
 - "Not usable": stamp expired or not yet propagated — wait or purchase new
 - HTTP 404 on stamp: may be newly purchased, wait ~1 minute and retry
 - Size exceeded: data > 4KB, reduce payload before upload
+
+CHAIN ANCHORING (optional):
+When chain_enabled=true and blockchain dependencies are installed, on-chain provenance tools become available.
+These register Swarm hashes in the DataProvenance smart contract on Base Sepolia, creating an immutable on-chain record.
+Chain tools will be registered as separate tools (anchor_data, verify_chain, etc.) when enabled.
+The health_check tool reports chain status alongside gateway status.
 
 COMPANION SERVERS:
 - swarm_connect gateway (required) — the FastAPI gateway this server talks to, handles Bee node communication
@@ -435,6 +473,7 @@ def create_server() -> Server:
                 return await handle_get_notary_info(arguments)
             elif name == "health_check":
                 return await handle_health_check(arguments)
+            # Chain anchoring tools (#49-#56) will be routed here
             else:
                 return CallToolResult(
                     content=[
@@ -1093,6 +1132,21 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += "\n_recommendations:"
             for rec in recommendations:
                 response_text += f"\n  - {rec}"
+
+        # Chain anchoring status
+        if settings.chain_enabled:
+            if CHAIN_AVAILABLE and chain_client:
+                try:
+                    chain_client.health_check()
+                    response_text += f"\n\n⛓️  Chain: {chain_client.chain} (connected)"
+                    response_text += f"\n   Contract: {chain_client.contract_address}"
+                    response_text += f"\n   Wallet: {chain_client.address}"
+                except Exception as chain_err:
+                    response_text += f"\n\n⛓️  Chain: {settings.chain_name} (error: {chain_err})"
+                    recommendations.append("Chain anchoring enabled but RPC unreachable")
+            else:
+                response_text += f"\n\n⛓️  Chain: enabled but dependencies not installed"
+                recommendations.append("Install blockchain deps: pip install -e .[blockchain]")
 
         # Cross-server coordination info
         response_text += f"\n_companion_servers:"

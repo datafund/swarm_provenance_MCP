@@ -25,7 +25,7 @@ async def call_tool_directly(server, name: str, arguments: Dict[str, Any]):
         handle_check_stamp_health, handle_get_wallet_info, handle_get_notary_info,
         handle_health_check, handle_chain_balance, handle_chain_health,
         handle_anchor_hash, handle_verify_hash, handle_get_provenance,
-        handle_record_transform,
+        handle_record_transform, handle_get_provenance_chain,
     )
 
     handlers = {
@@ -45,6 +45,7 @@ async def call_tool_directly(server, name: str, arguments: Dict[str, Any]):
         "verify_hash": handle_verify_hash,
         "get_provenance": handle_get_provenance,
         "record_transform": handle_record_transform,
+        "get_provenance_chain": handle_get_provenance_chain,
     }
 
     try:
@@ -2597,3 +2598,335 @@ class TestRecordTransform:
             tools = inner.tools if hasattr(inner, 'tools') else inner
             tool_names = {t.name for t in tools}
             assert "record_transform" in tool_names
+
+
+class TestGetProvenanceChain:
+    """Test get_provenance_chain tool execution."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    def _mock_record(self, data_hash=TEST_REFERENCE, **overrides):
+        """Create a mock ChainProvenanceRecord."""
+        mock_rec = MagicMock()
+        mock_rec.data_hash = overrides.get("data_hash_val", data_hash)
+        mock_rec.owner = overrides.get(
+            "owner", "0x1234567890abcdef1234567890abcdef12345678"
+        )
+        mock_rec.timestamp = overrides.get("timestamp", 1700000000)
+        mock_rec.data_type = overrides.get("data_type", "swarm-provenance")
+        mock_rec.status = MagicMock()
+        mock_rec.status.value = overrides.get("status_value", 0)
+        mock_rec.status.name = overrides.get("status_name", "ACTIVE")
+        mock_rec.transformations = overrides.get("transformations", [])
+        mock_rec.accessors = overrides.get("accessors", [])
+        return mock_rec
+
+    async def test_chain_single_entry(self, server):
+        """Single-entry chain should show one record."""
+        mock_client = MagicMock()
+        mock_client.get_provenance_chain.return_value = [
+            self._mock_record(),
+        ]
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance_chain", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "Provenance Chain (1 entry)" in text
+        assert "0x1234" in text
+        assert "ACTIVE" in text
+        mock_client.get_provenance_chain.assert_called_once_with(
+            TEST_REFERENCE, max_depth=10
+        )
+
+    async def test_chain_multi_entry(self, server):
+        """Multi-entry chain should show tree with indentation."""
+        mock_t = MagicMock()
+        mock_t.description = "Anonymized PII"
+        mock_t.new_data_hash = TEST_NEW_HASH
+
+        mock_client = MagicMock()
+        mock_client.get_provenance_chain.return_value = [
+            self._mock_record(transformations=[mock_t]),
+            self._mock_record(
+                data_hash=TEST_NEW_HASH,
+                data_hash_val=TEST_NEW_HASH,
+                owner="0xabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+            ),
+        ]
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance_chain", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "Provenance Chain (2 entries)" in text
+        assert "└─" in text  # second entry has tree prefix
+        assert "Anonymized PII" in text
+        assert "0xabcd" in text
+
+    async def test_chain_custom_max_depth(self, server):
+        """Custom max_depth should be passed through."""
+        mock_client = MagicMock()
+        mock_client.get_provenance_chain.return_value = [self._mock_record()]
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance_chain", {
+                "swarm_hash": TEST_REFERENCE,
+                "max_depth": 5,
+            })
+
+        assert not result.isError
+        mock_client.get_provenance_chain.assert_called_once_with(
+            TEST_REFERENCE, max_depth=5
+        )
+
+    async def test_chain_empty(self, server):
+        """Empty chain should show not-found message with anchor suggestion."""
+        mock_client = MagicMock()
+        mock_client.get_provenance_chain.return_value = []
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance_chain", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "No provenance chain found" in text
+        assert "_next: anchor_hash" in text
+
+    async def test_chain_max_depth_too_low(self, server):
+        """max_depth < 1 should return validation error."""
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
+            result = await call_tool_directly(server, "get_provenance_chain", {
+                "swarm_hash": TEST_REFERENCE,
+                "max_depth": 0,
+            })
+
+        assert result.isError
+        text = result.content[0].text
+        assert "max_depth" in text
+
+    async def test_chain_max_depth_too_high(self, server):
+        """max_depth > 50 should return validation error."""
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
+            result = await call_tool_directly(server, "get_provenance_chain", {
+                "swarm_hash": TEST_REFERENCE,
+                "max_depth": 51,
+            })
+
+        assert result.isError
+        text = result.content[0].text
+        assert "max_depth" in text
+
+    async def test_chain_not_available(self, server):
+        """CHAIN_AVAILABLE=False should return error."""
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', False):
+            result = await call_tool_directly(server, "get_provenance_chain", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert result.isError
+        text = result.content[0].text
+        assert "not available" in text.lower() or "not installed" in text.lower()
+
+    async def test_chain_no_wallet(self, server):
+        """get_provenance_chain should work without wallet (chain_client=None)."""
+        mock_provider = MagicMock()
+        mock_provider.web3 = MagicMock()
+        mock_provider.contract_address = "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
+
+        mock_contract = MagicMock()
+        mock_contract.get_data_record.return_value = (
+            bytes.fromhex(TEST_REFERENCE),
+            "0x1234567890abcdef1234567890abcdef12345678",
+            1700000000,
+            "swarm-provenance",
+            [],
+            [],
+            0,
+        )
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', None), \
+             patch('swarm_provenance_mcp.chain.provider.ChainProvider', return_value=mock_provider), \
+             patch('swarm_provenance_mcp.chain.contract.DataProvenanceContract', return_value=mock_contract):
+            result = await call_tool_directly(server, "get_provenance_chain", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "Provenance Chain (1 entry)" in text
+        assert "0x1234" in text
+
+    async def test_chain_no_wallet_not_registered(self, server):
+        """No-wallet path with unregistered hash should return empty chain."""
+        mock_provider = MagicMock()
+        mock_provider.web3 = MagicMock()
+        mock_provider.contract_address = "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
+
+        mock_contract = MagicMock()
+        zero_address = "0x" + "0" * 40
+        mock_contract.get_data_record.return_value = (
+            bytes.fromhex(TEST_REFERENCE),
+            zero_address, 0, "", [], [], 0,
+        )
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', None), \
+             patch('swarm_provenance_mcp.chain.provider.ChainProvider', return_value=mock_provider), \
+             patch('swarm_provenance_mcp.chain.contract.DataProvenanceContract', return_value=mock_contract):
+            result = await call_tool_directly(server, "get_provenance_chain", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "No provenance chain found" in text
+
+    async def test_chain_invalid_hash(self, server):
+        """Invalid hash format should return validation error."""
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
+            result = await call_tool_directly(server, "get_provenance_chain", {
+                "swarm_hash": "bad-hash",
+            })
+
+        assert result.isError
+        text = result.content[0].text
+        assert "retryable: false" in text
+
+    async def test_chain_missing_hash(self, server):
+        """Missing swarm_hash should return validation error."""
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
+            result = await call_tool_directly(server, "get_provenance_chain", {})
+
+        assert result.isError
+
+    async def test_chain_connection_error(self, server):
+        """ChainConnectionError should be retryable."""
+        from swarm_provenance_mcp.chain.exceptions import ChainConnectionError
+
+        mock_client = MagicMock()
+        mock_client.get_provenance_chain.side_effect = ChainConnectionError(
+            "RPC unreachable", rpc_url="https://sepolia.base.org"
+        )
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance_chain", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert result.isError
+        text = result.content[0].text
+        assert "retryable: true" in text
+        assert "_next: chain_health" in text
+
+    async def test_chain_generic_error(self, server):
+        """Generic ChainError should be non-retryable."""
+        from swarm_provenance_mcp.chain.exceptions import ChainError
+
+        mock_client = MagicMock()
+        mock_client.get_provenance_chain.side_effect = ChainError("Unexpected")
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance_chain", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert result.isError
+        text = result.content[0].text
+        assert "retryable: false" in text
+
+    async def test_chain_hints(self, server):
+        """Success response should include correct hints."""
+        mock_client = MagicMock()
+        mock_client.get_provenance_chain.return_value = [self._mock_record()]
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance_chain", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        text = result.content[0].text
+        assert "_next: get_provenance" in text
+        assert "_related:" in text
+        assert "record_transform" in text
+
+    async def test_chain_timestamp_zero(self, server):
+        """Timestamp=0 should display as 'unknown'."""
+        mock_client = MagicMock()
+        mock_client.get_provenance_chain.return_value = [
+            self._mock_record(timestamp=0),
+        ]
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance_chain", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "unknown" in text
+
+    async def test_chain_restricted_status(self, server):
+        """RESTRICTED status should display correctly in chain."""
+        mock_client = MagicMock()
+        mock_client.get_provenance_chain.return_value = [
+            self._mock_record(status_value=1),
+        ]
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance_chain", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "RESTRICTED" in text
+
+    async def test_chain_tool_registered(self, server):
+        """get_provenance_chain should appear in list_tools when chain is enabled."""
+        from mcp.types import ListToolsRequest
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.settings') as mock_settings:
+            mock_settings.chain_enabled = True
+            mock_settings.mcp_server_name = "test"
+            mock_settings.mcp_server_version = "0.1.0"
+            mock_settings.default_stamp_amount = 2000000000
+            mock_settings.default_stamp_depth = 17
+
+            test_server = create_server()
+            handler = None
+            for h in test_server.request_handlers.values():
+                if hasattr(h, '__name__') and 'list_tools' in str(h):
+                    handler = h
+                    break
+            assert handler is not None
+            result = await handler(ListToolsRequest(method="tools/list"))
+            inner = result.root if hasattr(result, 'root') else result
+            tools = inner.tools if hasattr(inner, 'tools') else inner
+            tool_names = {t.name for t in tools}
+            assert "get_provenance_chain" in tool_names

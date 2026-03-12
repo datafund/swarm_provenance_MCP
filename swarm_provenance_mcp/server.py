@@ -107,7 +107,7 @@ These register Swarm hashes in the DataProvenance smart contract on Base Sepolia
 - verify_hash — check if a Swarm hash is registered on-chain (read-only, no gas)
 - get_provenance — retrieve full provenance record: owner, timestamp, data type, status, transformations, accessors (read-only)
 - record_transform — record data transformation linking original to new hash, creating lineage (costs gas; optionally restricts original)
-- Additional chain tools (get_provenance_chain, etc.) will be added when enabled.
+- get_provenance_chain — follow transformation lineage for a hash, building a tree of how data evolved (read-only)
 The health_check tool reports chain status alongside gateway status.
 
 COMPANION SERVERS:
@@ -241,6 +241,7 @@ ALL_TOOL_NAMES = [
     "verify_hash",
     "get_provenance",
     "record_transform",
+    "get_provenance_chain",
 ]
 
 
@@ -625,6 +626,28 @@ def create_server() -> Server:
                             "required": ["original_hash", "new_hash"],
                         },
                     ),
+                    Tool(
+                        name="get_provenance_chain",
+                        description="Follow the transformation lineage for a Swarm hash. Walks through all recorded transformations to show how data evolved — from original to each derived version. Read-only, no gas or wallet key required.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "swarm_hash": {
+                                    "type": "string",
+                                    "description": "64-character hex Swarm reference hash to trace lineage for (without 0x prefix)",
+                                    "pattern": "^[a-fA-F0-9]{64}$",
+                                },
+                                "max_depth": {
+                                    "type": "integer",
+                                    "description": "Maximum depth to traverse (default: 10). Prevents infinite loops in circular references.",
+                                    "default": 10,
+                                    "minimum": 1,
+                                    "maximum": 50,
+                                },
+                            },
+                            "required": ["swarm_hash"],
+                        },
+                    ),
                 ]
             )
 
@@ -667,6 +690,8 @@ def create_server() -> Server:
                 return await handle_get_provenance(arguments)
             elif name == "record_transform":
                 return await handle_record_transform(arguments)
+            elif name == "get_provenance_chain":
+                return await handle_get_provenance_chain(arguments)
             else:
                 return CallToolResult(
                     content=[
@@ -2434,6 +2459,190 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
                     type="text",
                     text=_format_error(
                         f"Chain error: {str(e)}", retryable=False
+                    ),
+                )
+            ],
+            isError=True,
+        )
+
+
+async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResult:
+    """Handle get_provenance_chain requests — traverse transformation lineage.
+
+    Read-only: works without PROVENANCE_WALLET_KEY by creating a temporary
+    provider + contract for direct contract reads (no signing needed).
+    """
+    if not CHAIN_AVAILABLE:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        "Chain module not available. Install blockchain dependencies: pip install -e .[blockchain]",
+                        retryable=False,
+                    ),
+                )
+            ],
+            isError=True,
+        )
+
+    try:
+        swarm_hash = arguments.get("swarm_hash")
+        if not swarm_hash:
+            raise ValueError("swarm_hash is required")
+        clean_hash = validate_and_clean_reference_hash(swarm_hash)
+
+        max_depth = arguments.get("max_depth", 10)
+        if not isinstance(max_depth, int) or max_depth < 1 or max_depth > 50:
+            raise ValueError("max_depth must be an integer between 1 and 50")
+
+        if chain_client:
+            chain_records = chain_client.get_provenance_chain(
+                clean_hash, max_depth=max_depth
+            )
+        else:
+            # Read-only fallback without wallet key
+            from .chain.provider import ChainProvider
+            from .chain.contract import DataProvenanceContract
+            from .chain.exceptions import DataNotRegisteredError
+            from .chain.models import (
+                ChainProvenanceRecord,
+                ChainTransformation,
+                DataStatusEnum,
+            )
+
+            provider = ChainProvider(
+                chain=settings.chain_name,
+                rpc_url=settings.chain_rpc_url,
+                contract_address=settings.chain_contract_address,
+                explorer_url=settings.chain_explorer_url,
+            )
+            contract = DataProvenanceContract(
+                web3=provider.web3,
+                contract_address=provider.contract_address,
+            )
+
+            # Manual traversal mirroring ChainClient.get_provenance_chain
+            chain_records = []
+            visited = set()
+            to_visit = [(clean_hash, 0)]
+            zero_address = "0x" + "0" * 40
+
+            while to_visit:
+                current_hash, depth = to_visit.pop(0)
+                if current_hash in visited or depth > max_depth:
+                    continue
+                visited.add(current_hash)
+
+                try:
+                    raw = contract.get_data_record(current_hash)
+                    if raw[1] == zero_address:
+                        continue
+                    record = ChainProvenanceRecord(
+                        data_hash=(
+                            raw[0].hex()
+                            if isinstance(raw[0], bytes)
+                            else str(raw[0])
+                        ),
+                        owner=raw[1],
+                        timestamp=raw[2],
+                        data_type=raw[3],
+                        status=DataStatusEnum(raw[6]),
+                        accessors=list(raw[5]),
+                        transformations=[
+                            ChainTransformation(description=str(t))
+                            for t in raw[4]
+                        ],
+                    )
+                    chain_records.append(record)
+
+                    for t in record.transformations:
+                        if t.new_data_hash and t.new_data_hash not in visited:
+                            to_visit.append((t.new_data_hash, depth + 1))
+                except Exception:
+                    continue
+
+        if not chain_records:
+            response_text = f"⛓️  No provenance chain found\n\n"
+            response_text += f"   Swarm Hash: {clean_hash}\n"
+            response_text += f"   The hash is not registered on-chain."
+            response_text += _format_hints(
+                "anchor_hash", ["upload_data", "health_check"]
+            )
+            return CallToolResult(
+                content=[TextContent(type="text", text=response_text)]
+            )
+
+        from datetime import datetime, timezone
+
+        response_text = f"⛓️  Provenance Chain ({len(chain_records)} "
+        response_text += f"{'entry' if len(chain_records) == 1 else 'entries'})\n"
+
+        for i, record in enumerate(chain_records):
+            indent = "  " * i
+            prefix = "└─ " if i > 0 else ""
+
+            timestamp_str = "unknown"
+            if record.timestamp:
+                try:
+                    dt = datetime.fromtimestamp(record.timestamp, tz=timezone.utc)
+                    timestamp_str = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+                except (ValueError, OSError):
+                    timestamp_str = str(record.timestamp)
+
+            status_labels = {
+                0: "ACTIVE",
+                1: "RESTRICTED",
+                2: "DELETED",
+            }
+            status_text = status_labels.get(
+                record.status.value, f"UNKNOWN ({record.status.value})"
+            )
+
+            response_text += f"\n{indent}{prefix}{record.data_hash}\n"
+            response_text += f"{indent}   Owner: {record.owner}\n"
+            response_text += f"{indent}   Registered: {timestamp_str}\n"
+            response_text += f"{indent}   Type: {record.data_type}\n"
+            response_text += f"{indent}   Status: {status_text}"
+
+            if record.transformations:
+                for t in record.transformations:
+                    response_text += f"\n{indent}   Transform: {t.description}"
+
+        response_text += _format_hints(
+            "get_provenance", ["download_data", "record_transform"]
+        )
+
+        return CallToolResult(content=[TextContent(type="text", text=response_text)])
+
+    except ValueError as e:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        f"Validation error: {str(e)}", retryable=False
+                    ),
+                )
+            ],
+            isError=True,
+        )
+    except Exception as e:
+        try:
+            from .chain.exceptions import ChainConnectionError
+        except ImportError:
+            ChainConnectionError = None
+
+        is_conn_error = ChainConnectionError and isinstance(e, ChainConnectionError)
+
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        f"Chain error: {str(e)}",
+                        retryable=is_conn_error,
+                        next_tool="chain_health" if is_conn_error else None,
                     ),
                 )
             ],

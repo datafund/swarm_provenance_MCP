@@ -616,6 +616,28 @@ cp .env.example .env
 
 **Alternative (if package is installed)**: You can use `"command": "swarm-provenance-mcp"` instead after running `pip install -e .`
 
+#### With on-chain provenance
+
+To enable blockchain anchoring, add an `"env"` block to the config. You can use this instead of (or alongside) a `.env` file:
+
+```json
+{
+  "mcpServers": {
+    "swarm-provenance": {
+      "command": "/path/to/swarm_provenance_mcp/venv/bin/python",
+      "args": ["-m", "swarm_provenance_mcp.server"],
+      "cwd": "/path/to/swarm_provenance_mcp",
+      "env": {
+        "CHAIN_ENABLED": "true",
+        "PROVENANCE_WALLET_KEY": "0x...your_private_key_here..."
+      }
+    }
+  }
+}
+```
+
+Read-only chain tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `chain_health`) work without `PROVENANCE_WALLET_KEY`. Write tools (`anchor_hash`, `record_transform`) and `chain_balance` require a funded wallet — see [Chain Anchoring](#chain-anchoring-optional) for details.
+
 #### Docker-based
 
 Use Docker for a zero-install experience — no Python, venv, or pip required:
@@ -635,9 +657,60 @@ Use Docker for a zero-install experience — no Python, venv, or pip required:
 }
 ```
 
+To enable chain anchoring with Docker, add the chain env vars:
+
+```json
+{
+  "mcpServers": {
+    "swarm-provenance": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-e", "SWARM_GATEWAY_URL=https://provenance-gateway.datafund.io",
+        "-e", "CHAIN_ENABLED=true",
+        "-e", "PROVENANCE_WALLET_KEY=0x...your_private_key_here...",
+        "ghcr.io/datafund/swarm-provenance-mcp"
+      ]
+    }
+  }
+}
+```
+
 > **Docker Desktop MCP Toolkit**: If you use Docker Desktop with MCP Toolkit support, the server can be discovered automatically from the Docker MCP catalog.
 
-4. **Restart Claude Desktop** and test with: "List all available Swarm stamps"
+4. **Restart Claude Desktop** and verify the connection.
+
+### Getting Started
+
+After setup, try these prompts in Claude Desktop to verify everything works:
+
+**Check connectivity:**
+> "Run a health check on the Swarm gateway"
+
+Expected: a status showing `healthy`, gateway URL, and response time. If chain is enabled, you'll also see RPC connectivity and wallet balance info.
+
+**List stamps:**
+> "List all available Swarm stamps"
+
+Expected: a list of postage stamps with batch IDs, or a message that no stamps exist yet (with a suggestion to purchase one).
+
+**Full upload workflow:**
+> "Upload the text 'Hello Swarm!' to the Swarm network"
+
+Claude will walk through: purchasing a stamp, waiting for it to propagate, uploading the data, and returning the Swarm reference hash.
+
+**Verify on-chain (if chain enabled):**
+> "Anchor the uploaded hash on-chain and verify it"
+
+Claude will register the hash on the blockchain and confirm the provenance record.
+
+### Troubleshooting Setup
+
+If Claude Desktop doesn't show the Swarm tools:
+1. Check the config file path is correct for your OS
+2. Verify the `command` path points to the Python executable inside your venv
+3. Check Claude Desktop logs: **Help > Show Logs** (look for MCP connection errors)
+4. Test manually: run `swarm-provenance-mcp` in your terminal — it should start without errors and wait for MCP input
 
 ## Development
 

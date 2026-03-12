@@ -65,24 +65,33 @@ if settings.chain_enabled:
         # chain_client stays None but CHAIN_AVAILABLE remains True —
         # read-only tools (verify_hash, get_provenance, etc.) work
         # without a wallet via temporary provider+contract fallback.
-        logger.warning("Chain client initialization failed: %s", e)
+        err_msg = str(e).lower()
+        if "wallet" in err_msg or "private key" in err_msg:
+            logger.info(
+                "Chain: enabled (%s) — read-only mode (no wallet configured)",
+                settings.chain_name,
+            )
+        else:
+            logger.warning("Chain client init failed: %s", e)
 
 # Agent-facing instructions sent during MCP initialization handshake
 MCP_INSTRUCTIONS = """
 Swarm Provenance MCP — decentralized storage with cryptographic provenance on the Swarm network.
 
 PAYMENT MODEL:
-The gateway uses x402 payment protocol. Free tier is configured automatically (rate limit: 3 write requests/minute). Read operations are always free and unlimited.
+This server uses the free tier by default (rate limit: 3 write requests/minute, reads unlimited). Paid x402 support is not yet integrated.
 
 TYPICAL WORKFLOW:
 1. health_check — verify gateway is reachable
-2. list_stamps — find existing usable stamps
-3. If no usable stamp: purchase_stamp, then wait ~1 minute for blockchain propagation
+2. purchase_stamp — create your own stamp (or use one you previously purchased)
+3. Wait ~1 minute for blockchain propagation
 4. check_stamp_health — verify stamp is ready for uploads
 5. upload_data — store data, get a reference hash back
 6. download_data — retrieve data using the reference hash
 
 KEY CONSTRAINTS:
+- Always use stamps YOU purchased via purchase_stamp. Do not use arbitrary stamps from list_stamps — they may belong to other users and will fail on upload.
+- list_stamps shows all network-visible stamps, not just yours. Track your stamp IDs from purchase_stamp responses.
 - Max upload size: 4KB (4096 bytes) per request
 - After purchase_stamp or extend_stamp, wait ~1 minute before using the stamp
 - Stamp depth controls capacity: 17 (small, ~35KB), 20 (medium, ~500MB), 22 (large, ~6GB)
@@ -785,11 +794,11 @@ def create_server() -> Server:
                                 f"Data: {data_desc}\n"
                                 f"Content-Type: {content_type}\n\n"
                                 f"Follow these steps:\n"
-                                f"1. Call health_check to verify the gateway is reachable and check stamp availability\n"
-                                f"2. If ready=true, pick a usable stamp from the health_check response. "
-                                f"Otherwise call purchase_stamp (depth 17 for small data) and wait ~1 minute\n"
-                                f"3. Call check_stamp_health on the chosen stamp to confirm it's ready\n"
-                                f"4. Call upload_data with the data and stamp_id\n"
+                                f"1. Call health_check to verify the gateway is reachable\n"
+                                f"2. Call purchase_stamp (depth 17 for small data) to get your own stamp, then wait ~1 minute for propagation. "
+                                f"Do not pick stamps from list_stamps — they may belong to other users.\n"
+                                f"3. Call check_stamp_health on your stamp to confirm it's ready\n"
+                                f"4. Call upload_data with the data and your stamp_id\n"
                                 f"5. Call download_data with the returned reference to verify the upload\n"
                                 f"6. Report the reference hash — this is the permanent Swarm address"
                             ),
@@ -831,9 +840,11 @@ def create_server() -> Server:
                             type="text",
                             text=(
                                 "Review my Swarm stamp inventory and recommend actions:\n\n"
+                                "Note: list_stamps shows all network-visible stamps, not just yours. "
+                                "Only manage stamps you purchased via purchase_stamp.\n\n"
                                 "Steps:\n"
-                                "1. Call list_stamps to get all stamps\n"
-                                "2. For each stamp, check if it's usable, its utilization, and TTL\n"
+                                "1. Call list_stamps to see all stamps\n"
+                                "2. For stamps you own, check if usable, utilization, and TTL\n"
                                 "3. Call check_stamp_health on any stamp that looks concerning\n"
                                 "4. Recommend actions:\n"
                                 "   - Stamps with high utilization → purchase a new one\n"
@@ -1053,10 +1064,7 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
             response_text = "📭 No stamps found.\n\n💡 Use the 'purchase_stamp' tool to create your first stamp!"
         else:
             response_text = f"📋 Found {total_count} stamp(s):\n\n"
-
-            # Header for table format
-            response_text += f"{'Batch ID':<20} | {'Expiration':<20} | {'Status':<10}\n"
-            response_text += f"{'-'*20} | {'-'*20} | {'-'*10}\n"
+            response_text += "⚠️  Note: This list includes all network-visible stamps. For uploads, use stamps you purchased via purchase_stamp.\n\n"
 
             for stamp in stamps:
                 batch_id = stamp.get("batchID", "N/A")
@@ -1066,11 +1074,6 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                 if usable is True:
                     has_usable = True
 
-                # Truncate batch ID for table format
-                display_id = (
-                    batch_id[:16] + "..." if len(str(batch_id)) > 19 else batch_id
-                )
-
                 # Status with emoji
                 if usable is True:
                     status = "✅ Usable"
@@ -1079,9 +1082,8 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                 else:
                     status = "❓ Unknown"
 
-                response_text += (
-                    f"{display_id:<20} | {str(expiration):<20} | {status:<10}\n"
-                )
+                response_text += f"Batch ID: {batch_id}\n"
+                response_text += f"  Expiration: {expiration} | Status: {status}\n\n"
 
         # Contextual hints
         if has_usable:
@@ -1406,8 +1408,15 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
             )
             next_tool = "health_check"
 
-        if result.get("gateway_response"):
-            response_text += f"\n📋 Gateway Response: {result['gateway_response']}\n"
+        # Parse payment / free-tier info from gateway response
+        gw_resp = result.get("gateway_response") or {}
+        x402 = gw_resp.get("x402") or {}
+        free_tier = x402.get("free_tier") or {}
+        rate_limit = free_tier.get("rate_limit_per_minute")
+        if rate_limit:
+            response_text += f"\n💰 Payment: free tier ({rate_limit} write req/min, reads unlimited)\n"
+        elif x402:
+            response_text += "\n💰 Payment: x402 enabled\n"
 
         # Adaptive: also check stamp availability
         stamps_info = ""
@@ -1653,7 +1662,9 @@ async def handle_chain_balance(arguments: Dict[str, Any]) -> CallToolResult:
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "Chain client not initialized. Set PROVENANCE_WALLET_KEY to enable wallet operations.",
+                        "chain_balance requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                        "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
+                        "work without a wallet.",
                         retryable=False,
                         next_tool="chain_health",
                     ),
@@ -1793,7 +1804,9 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "Chain client not initialized. Set PROVENANCE_WALLET_KEY to enable wallet operations.",
+                        "anchor_hash requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                        "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
+                        "work without a wallet.",
                         retryable=False,
                         next_tool="chain_health",
                     ),
@@ -1874,9 +1887,7 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
                 content=[
                     TextContent(
                         type="text",
-                        text=_format_error(
-                            f"Chain error: {str(e)}", retryable=False
-                        ),
+                        text=_format_error(f"Chain error: {str(e)}", retryable=False),
                     )
                 ],
                 isError=True,
@@ -1957,9 +1968,7 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
             content=[
                 TextContent(
                     type="text",
-                    text=_format_error(
-                        f"Chain error: {str(e)}", retryable=False
-                    ),
+                    text=_format_error(f"Chain error: {str(e)}", retryable=False),
                 )
             ],
             isError=True,
@@ -2075,9 +2084,7 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
             content=[
                 TextContent(
                     type="text",
-                    text=_format_error(
-                        f"Validation error: {str(e)}", retryable=False
-                    ),
+                    text=_format_error(f"Validation error: {str(e)}", retryable=False),
                 )
             ],
             isError=True,
@@ -2162,9 +2169,7 @@ async def handle_get_provenance(arguments: Dict[str, Any]) -> CallToolResult:
                     data_hash=clean_hash,
                 )
             record = ChainProvenanceRecord(
-                data_hash=(
-                    raw[0].hex() if isinstance(raw[0], bytes) else str(raw[0])
-                ),
+                data_hash=(raw[0].hex() if isinstance(raw[0], bytes) else str(raw[0])),
                 owner=raw[1],
                 timestamp=raw[2],
                 data_type=raw[3],
@@ -2211,9 +2216,7 @@ async def handle_get_provenance(arguments: Dict[str, Any]) -> CallToolResult:
             for addr in record.accessors:
                 response_text += f"\n     - {addr}"
 
-        response_text += _format_hints(
-            "download_data", ["verify_hash", "anchor_hash"]
-        )
+        response_text += _format_hints("download_data", ["verify_hash", "anchor_hash"])
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
@@ -2222,9 +2225,7 @@ async def handle_get_provenance(arguments: Dict[str, Any]) -> CallToolResult:
             content=[
                 TextContent(
                     type="text",
-                    text=_format_error(
-                        f"Validation error: {str(e)}", retryable=False
-                    ),
+                    text=_format_error(f"Validation error: {str(e)}", retryable=False),
                 )
             ],
             isError=True,
@@ -2294,7 +2295,9 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "Chain client not initialized. Set PROVENANCE_WALLET_KEY to enable wallet operations.",
+                        "record_transform requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                        "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
+                        "work without a wallet.",
                         retryable=False,
                         next_tool="chain_health",
                     ),
@@ -2389,9 +2392,7 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
                 content=[
                     TextContent(
                         type="text",
-                        text=_format_error(
-                            f"Chain error: {str(e)}", retryable=False
-                        ),
+                        text=_format_error(f"Chain error: {str(e)}", retryable=False),
                     )
                 ],
                 isError=True,
@@ -2459,9 +2460,7 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
             content=[
                 TextContent(
                     type="text",
-                    text=_format_error(
-                        f"Chain error: {str(e)}", retryable=False
-                    ),
+                    text=_format_error(f"Chain error: {str(e)}", retryable=False),
                 )
             ],
             isError=True,
@@ -2542,9 +2541,7 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
                         continue
                     record = ChainProvenanceRecord(
                         data_hash=(
-                            raw[0].hex()
-                            if isinstance(raw[0], bytes)
-                            else str(raw[0])
+                            raw[0].hex() if isinstance(raw[0], bytes) else str(raw[0])
                         ),
                         owner=raw[1],
                         timestamp=raw[2],
@@ -2552,8 +2549,7 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
                         status=DataStatusEnum(raw[6]),
                         accessors=list(raw[5]),
                         transformations=[
-                            ChainTransformation(description=str(t))
-                            for t in raw[4]
+                            ChainTransformation(description=str(t)) for t in raw[4]
                         ],
                     )
                     chain_records.append(record)
@@ -2622,9 +2618,7 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
             content=[
                 TextContent(
                     type="text",
-                    text=_format_error(
-                        f"Validation error: {str(e)}", retryable=False
-                    ),
+                    text=_format_error(f"Validation error: {str(e)}", retryable=False),
                 )
             ],
             isError=True,
@@ -2706,6 +2700,11 @@ async def main():
                 f"Starting {settings.mcp_server_name} v{settings.mcp_server_version}"
             )
             logger.info(f"Gateway URL: {settings.swarm_gateway_url}")
+            if settings.chain_enabled:
+                if chain_client:
+                    logger.info("Chain: %s (wallet connected)", chain_client.chain)
+                elif CHAIN_AVAILABLE:
+                    logger.info("Chain: %s (read-only, no wallet)", settings.chain_name)
             await server.run(
                 read_stream, write_stream, server.create_initialization_options()
             )

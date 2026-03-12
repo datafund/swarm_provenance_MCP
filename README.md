@@ -40,7 +40,7 @@ This MCP server is specifically designed for provenance data use cases, leveragi
 
 ### Prerequisites
 
-- Python 3.8 or higher (use `python3` command)
+- Python 3.10 or higher (use `python3` command)
 - Internet connection (uses public gateway by default)
 - Optional: Self-hosted `swarm_connect` gateway service (see Gateway Options below)
 
@@ -54,7 +54,7 @@ cd swarm_provenance_mcp
 
 2. Create and activate a virtual environment:
 ```bash
-python -m venv venv
+python3 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
@@ -590,6 +590,8 @@ ruff check swarm_provenance_mcp/
   - `requests>=2.31.0`: HTTP client for gateway communication
   - `pydantic>=2.0.0`: Data validation and settings
   - `python-dotenv>=1.0.0`: Environment configuration
+  - `web3>=6.0.0`: Ethereum blockchain interaction for on-chain provenance
+  - `eth-account>=0.10.0`: Wallet and transaction signing for chain anchoring
 
 - **Development Dependencies**:
   - `pytest`: Testing framework

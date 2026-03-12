@@ -1477,10 +1477,14 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     recommendations.append(
                         "Chain anchoring enabled but RPC unreachable"
                     )
-            else:
+            elif CHAIN_AVAILABLE:
+                # Dependencies present but no wallet → read-only mode
                 response_text += (
-                    f"\n\n⛓️  Chain: enabled but dependencies not available"
+                    f"\n\n⛓️  Chain: {settings.chain_name} "
+                    f"(read-only, no wallet — set PROVENANCE_WALLET_KEY for write tools)"
                 )
+            else:
+                response_text += "\n\n⛓️  Chain: enabled but dependencies not available"
                 recommendations.append(
                     "Reinstall with: pip install -e . (web3/eth-account should be included)"
                 )

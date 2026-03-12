@@ -84,16 +84,19 @@ This server uses the free tier by default (rate limit: 3 write requests/minute, 
 TYPICAL WORKFLOW:
 1. health_check — verify gateway is reachable
 2. purchase_stamp — create your own stamp (or use one you previously purchased)
-3. Wait ~1 minute for blockchain propagation
-4. check_stamp_health — verify stamp is ready for uploads
-5. upload_data — store data, get a reference hash back
-6. download_data — retrieve data using the reference hash
+3. The stamp may be available immediately (from the gateway's stamp pool) or may need
+   up to 2 minutes to propagate on the blockchain (if the pool was empty and a fresh
+   stamp was minted). Use check_stamp_health to poll — it returns can_upload: true
+   when the stamp is ready.
+4. upload_data — store data, get a reference hash back
+5. download_data — retrieve data using the reference hash
 
 KEY CONSTRAINTS:
 - Always use stamps YOU purchased via purchase_stamp. Do not use arbitrary stamps from list_stamps — they may belong to other users and will fail on upload.
 - list_stamps shows all network-visible stamps, not just yours. Track your stamp IDs from purchase_stamp responses.
 - Max upload size: 4KB (4096 bytes) per request
-- After purchase_stamp or extend_stamp, wait ~1 minute before using the stamp
+- After purchase_stamp, the stamp may be instantly usable (pool) or take up to 2 minutes (fresh mint). Poll with check_stamp_health every 10-15 seconds until can_upload is true.
+- After extend_stamp, wait up to 2 minutes for the extension to propagate.
 - Stamp depth controls capacity: 17 (small, ~35KB), 20 (medium, ~500MB), 22 (large, ~6GB)
 - Stamps are rented storage — data expires when the stamp TTL runs out
 - A stamp can be reused for multiple uploads until capacity or TTL is exhausted
@@ -105,8 +108,7 @@ TOOL RELATIONSHIPS:
 - extend_stamp increases TTL (not capacity)
 
 ERRORS:
-- "Not usable": stamp expired or not yet propagated — wait or purchase new
-- HTTP 404 on stamp: may be newly purchased, wait ~1 minute and retry
+- "Not usable" / "NOT_FOUND": stamp not yet propagated — poll check_stamp_health every 15s (up to 2 min)
 - Size exceeded: data > 4KB, reduce payload before upload
 
 CHAIN ANCHORING (optional):
@@ -391,7 +393,7 @@ def create_server() -> Server:
         tools = [
             Tool(
                 name="purchase_stamp",
-                description="Purchase a new Swarm postage stamp. Returns a 64-character hex batch ID that can be used with upload_data. A stamp can be reused for multiple uploads until its capacity or TTL is exhausted. After purchase, wait ~1 minute for blockchain propagation before using the stamp.",
+                description="Purchase a new Swarm postage stamp. Returns a 64-character hex batch ID. A stamp can be reused for multiple uploads until its capacity or TTL is exhausted. May be ready instantly (pool) or take up to 2 minutes (fresh mint). Use check_stamp_health to confirm readiness.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -439,7 +441,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="extend_stamp",
-                description="Extend an existing stamp by adding funds to increase its TTL (time-to-live). This extends the expiration date but does NOT increase storage capacity (depth). Changes take ~1 minute to propagate through the blockchain.",
+                description="Extend an existing stamp by adding funds to increase its TTL (time-to-live). This extends the expiration date but does NOT increase storage capacity (depth). Changes take up to 2 minutes to propagate through the blockchain.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -459,7 +461,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="upload_data",
-                description="Upload data to the Swarm network using a valid postage stamp. Requires a stamp_id from purchase_stamp (wait ~1 min after purchase). Max 4KB per upload. Returns a 64-char hex reference hash — pass it to download_data to retrieve the content later.",
+                description="Upload data to the Swarm network using a valid postage stamp. Requires a stamp_id from purchase_stamp — confirm stamp is ready with check_stamp_health before uploading. Max 4KB per upload. Returns a 64-char hex reference hash — pass it to download_data to retrieve the content later.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -795,9 +797,9 @@ def create_server() -> Server:
                                 f"Content-Type: {content_type}\n\n"
                                 f"Follow these steps:\n"
                                 f"1. Call health_check to verify the gateway is reachable\n"
-                                f"2. Call purchase_stamp (depth 17 for small data) to get your own stamp, then wait ~1 minute for propagation. "
+                                f"2. Call purchase_stamp (depth 17 for small data) to get your own stamp. "
                                 f"Do not pick stamps from list_stamps — they may belong to other users.\n"
-                                f"3. Call check_stamp_health on your stamp to confirm it's ready\n"
+                                f"3. Poll check_stamp_health every 15 seconds until ready (up to 2 minutes)\n"
                                 f"4. Call upload_data with the data and your stamp_id\n"
                                 f"5. Call download_data with the returned reference to verify the upload\n"
                                 f"6. Report the reference hash — this is the permanent Swarm address"
@@ -915,9 +917,12 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"   Depth: {depth}\n"
         if label:
             response_text += f"   Label: {label}\n"
-        response_text += f"\n✅ Stamp ID: `{batch_id}` (immediately available)\n"
-        response_text += f"⏱️  IMPORTANT: Wait ~1 minute before using this stamp!\n"
-        response_text += f"📋 The stamp info must propagate through the blockchain before it can be used for uploads."
+        response_text += f"\n✅ Stamp ID: `{batch_id}`\n"
+        response_text += f"⏱️  Your stamp may be ready immediately (from the gateway pool) or may need\n"
+        response_text += f"   up to 2 minutes to propagate on the blockchain.\n"
+        response_text += (
+            f"   → Use check_stamp_health to confirm it's ready before uploading."
+        )
         response_text += _format_hints(
             "check_stamp_health", ["get_stamp_status", "upload_data", "list_stamps"]
         )
@@ -1136,8 +1141,8 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"   Batch ID: `{batch_id}`\n"
         response_text += f"   Additional Amount: {amount:,} wei\n"
         response_text += f"   Status: {result.get('message', 'Extended')}\n\n"
-        response_text += f"⏱️  Important: Extension info takes ~1 minute to propagate through the blockchain.\n"
-        response_text += f"🔍 Check stamp status again in about 1 minute to see the new expiration time."
+        response_text += f"⏱️  Important: Extension takes up to 2 minutes to propagate through the blockchain.\n"
+        response_text += f"🔍 Check stamp status again in about 2 minutes to see the new expiration time."
         response_text += _format_hints("check_stamp_health", ["get_stamp_status"])
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
@@ -1206,10 +1211,11 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
                         TextContent(
                             type="text",
                             text=_format_error(
-                                f"Stamp {clean_stamp_id} exists on this gateway but is not usable for uploads. "
-                                f"Please use a different stamp or create a new one.",
-                                retryable=False,
-                                next_tool="purchase_stamp",
+                                f"Stamp {clean_stamp_id} is not yet usable. If recently purchased, "
+                                f"it may still be propagating (up to 2 minutes). "
+                                f"Use check_stamp_health to poll until ready.",
+                                retryable=True,
+                                next_tool="check_stamp_health",
                             ),
                         )
                     ],
@@ -1438,7 +1444,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     next_tool = "upload_data"
                 elif total_stamps > 0:
                     recommendations.append(
-                        f"Found {total_stamps} stamp(s) but none are usable — purchase a new one or wait for propagation"
+                        f"Found {total_stamps} stamp(s) but none are usable — poll check_stamp_health, stamps take up to 2 minutes to propagate"
                     )
                     next_tool = "purchase_stamp"
                 else:
@@ -1581,9 +1587,24 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
                 "upload_data", ["get_stamp_status", "extend_stamp"]
             )
         else:
-            response_text += _format_hints(
-                "purchase_stamp", ["list_stamps", "extend_stamp"]
+            # Detect propagation scenario: NOT_FOUND or NOT_USABLE with 0% utilization
+            error_codes = {e.get("code", "") for e in errors}
+            util_pct = (status.get("utilizationPercent") or 0) if status else 0
+            is_propagating = ("NOT_FOUND" in error_codes) or (
+                "NOT_USABLE" in error_codes and util_pct == 0
             )
+            if is_propagating:
+                response_text += (
+                    "\n💡 If recently purchased, the stamp is propagating on the blockchain. "
+                    "This typically takes up to 2 minutes. Retry check_stamp_health in 15 seconds."
+                )
+                response_text += _format_hints(
+                    "check_stamp_health", ["list_stamps", "extend_stamp"]
+                )
+            else:
+                response_text += _format_hints(
+                    "purchase_stamp", ["list_stamps", "extend_stamp"]
+                )
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
 

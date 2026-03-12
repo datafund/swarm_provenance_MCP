@@ -2515,6 +2515,45 @@ class TestRecordTransform:
         assert "_related:" in text
         assert "download_data" in text
 
+    async def test_transform_balance_check_failure_silent(self, server):
+        """Balance check failure after transform should not break success."""
+        mock_client = MagicMock()
+        mock_client.transform.return_value = self._mock_transform_result()
+        mock_client.balance.side_effect = Exception("RPC down")
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "record_transform", {
+                "original_hash": TEST_REFERENCE,
+                "new_hash": TEST_NEW_HASH,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "Transformation recorded" in text
+
+    async def test_transform_no_explorer_url(self, server):
+        """When explorer_url is None, Explorer line should not appear."""
+        mock_client = MagicMock()
+        mock_res = self._mock_transform_result()
+        mock_res.explorer_url = None
+        mock_client.transform.return_value = mock_res
+        mock_client.balance.return_value = MagicMock(
+            address="0x1234", balance_wei=10**18, chain="base-sepolia"
+        )
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "record_transform", {
+                "original_hash": TEST_REFERENCE,
+                "new_hash": TEST_NEW_HASH,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "Transformation recorded" in text
+        assert "Explorer:" not in text
+
     async def test_transform_low_balance_warning(self, server):
         """Low balance after transform should append funding guidance."""
         mock_client = MagicMock()

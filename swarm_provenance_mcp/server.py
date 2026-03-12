@@ -62,8 +62,10 @@ if settings.chain_enabled:
                 "Run: pip install -e .[blockchain]"
             )
     except Exception as e:
+        # chain_client stays None but CHAIN_AVAILABLE remains True —
+        # read-only tools (verify_hash, get_provenance, etc.) work
+        # without a wallet via temporary provider+contract fallback.
         logger.warning("Chain client initialization failed: %s", e)
-        CHAIN_AVAILABLE = False
 
 # Agent-facing instructions sent during MCP initialization handshake
 MCP_INSTRUCTIONS = """

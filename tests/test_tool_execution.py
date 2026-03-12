@@ -24,7 +24,7 @@ async def call_tool_directly(server, name: str, arguments: Dict[str, Any]):
         handle_extend_stamp, handle_upload_data, handle_download_data,
         handle_check_stamp_health, handle_get_wallet_info, handle_get_notary_info,
         handle_health_check, handle_chain_balance, handle_chain_health,
-        handle_anchor_hash, handle_verify_hash,
+        handle_anchor_hash, handle_verify_hash, handle_get_provenance,
     )
 
     handlers = {
@@ -42,6 +42,7 @@ async def call_tool_directly(server, name: str, arguments: Dict[str, Any]):
         "chain_health": handle_chain_health,
         "anchor_hash": handle_anchor_hash,
         "verify_hash": handle_verify_hash,
+        "get_provenance": handle_get_provenance,
     }
 
     try:
@@ -1832,3 +1833,321 @@ class TestVerifyHash:
             tools = inner.tools if hasattr(inner, 'tools') else inner
             tool_names = {t.name for t in tools}
             assert "verify_hash" in tool_names
+
+
+class TestGetProvenance:
+    """Test get_provenance tool execution."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    def _mock_record(self, **overrides):
+        """Create a mock ChainProvenanceRecord."""
+        mock_rec = MagicMock()
+        mock_rec.owner = overrides.get(
+            "owner", "0x1234567890abcdef1234567890abcdef12345678"
+        )
+        mock_rec.timestamp = overrides.get("timestamp", 1700000000)
+        mock_rec.data_type = overrides.get("data_type", "swarm-provenance")
+        mock_rec.status = MagicMock()
+        mock_rec.status.value = overrides.get("status_value", 0)
+        mock_rec.status.name = overrides.get("status_name", "ACTIVE")
+        mock_rec.transformations = overrides.get("transformations", [])
+        mock_rec.accessors = overrides.get("accessors", [])
+        return mock_rec
+
+    async def test_get_provenance_success(self, server):
+        """Registered hash should return full provenance record."""
+        mock_client = MagicMock()
+        mock_client.get.return_value = self._mock_record()
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "Provenance Record" in text
+        assert TEST_REFERENCE in text
+        assert "0x1234" in text
+        assert "2023" in text  # timestamp 1700000000
+        assert "swarm-provenance" in text
+        assert "ACTIVE" in text
+        mock_client.get.assert_called_once_with(TEST_REFERENCE)
+
+    async def test_get_provenance_with_transformations(self, server):
+        """Record with transformations should list them."""
+        mock_t1 = MagicMock()
+        mock_t1.description = "Anonymized personal data"
+        mock_t2 = MagicMock()
+        mock_t2.description = "Compressed to gzip"
+        mock_client = MagicMock()
+        mock_client.get.return_value = self._mock_record(
+            transformations=[mock_t1, mock_t2],
+        )
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "Transformations (2)" in text
+        assert "Anonymized personal data" in text
+        assert "Compressed to gzip" in text
+
+    async def test_get_provenance_with_accessors(self, server):
+        """Record with accessors should list them."""
+        accessors = [
+            "0xaaaa567890abcdef1234567890abcdef12345678",
+            "0xbbbb567890abcdef1234567890abcdef12345678",
+        ]
+        mock_client = MagicMock()
+        mock_client.get.return_value = self._mock_record(accessors=accessors)
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "Accessors (2)" in text
+        assert "0xaaaa" in text
+        assert "0xbbbb" in text
+
+    async def test_get_provenance_not_registered(self, server):
+        """Unregistered hash should return NOT isError with suggestion."""
+        from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
+
+        mock_client = MagicMock()
+        mock_client.get.side_effect = DataNotRegisteredError(
+            "Not registered", data_hash=TEST_REFERENCE,
+        )
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "NOT registered" in text
+        assert "_next: anchor_hash" in text
+
+    async def test_get_provenance_restricted_status(self, server):
+        """RESTRICTED status should display correct label."""
+        mock_client = MagicMock()
+        mock_client.get.return_value = self._mock_record(status_value=1)
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "RESTRICTED" in text
+
+    async def test_get_provenance_deleted_status(self, server):
+        """DELETED status should display correct label."""
+        mock_client = MagicMock()
+        mock_client.get.return_value = self._mock_record(status_value=2)
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "DELETED" in text
+
+    async def test_get_provenance_timestamp_zero(self, server):
+        """Timestamp=0 should display as 'unknown'."""
+        mock_client = MagicMock()
+        mock_client.get.return_value = self._mock_record(timestamp=0)
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "unknown" in text
+
+    async def test_get_provenance_not_available(self, server):
+        """CHAIN_AVAILABLE=False should return error."""
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', False):
+            result = await call_tool_directly(server, "get_provenance", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert result.isError
+        text = result.content[0].text
+        assert "not available" in text.lower() or "not installed" in text.lower()
+
+    async def test_get_provenance_no_wallet(self, server):
+        """get_provenance should work without wallet (chain_client=None)."""
+        mock_provider = MagicMock()
+        mock_provider.web3 = MagicMock()
+        mock_provider.contract_address = "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
+
+        mock_contract = MagicMock()
+        mock_contract.get_data_record.return_value = (
+            bytes.fromhex(TEST_REFERENCE),
+            "0x1234567890abcdef1234567890abcdef12345678",
+            1700000000,
+            "swarm-provenance",
+            [],
+            [],
+            0,
+        )
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', None), \
+             patch('swarm_provenance_mcp.chain.provider.ChainProvider', return_value=mock_provider), \
+             patch('swarm_provenance_mcp.chain.contract.DataProvenanceContract', return_value=mock_contract):
+            result = await call_tool_directly(server, "get_provenance", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "Provenance Record" in text
+        assert "0x1234" in text
+
+    async def test_get_provenance_no_wallet_not_registered(self, server):
+        """get_provenance without wallet should handle unregistered hash."""
+        mock_provider = MagicMock()
+        mock_provider.web3 = MagicMock()
+        mock_provider.contract_address = "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
+
+        mock_contract = MagicMock()
+        zero_address = "0x" + "0" * 40
+        mock_contract.get_data_record.return_value = (
+            bytes.fromhex(TEST_REFERENCE),
+            zero_address, 0, "", [], [], 0,
+        )
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', None), \
+             patch('swarm_provenance_mcp.chain.provider.ChainProvider', return_value=mock_provider), \
+             patch('swarm_provenance_mcp.chain.contract.DataProvenanceContract', return_value=mock_contract):
+            result = await call_tool_directly(server, "get_provenance", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "NOT registered" in text
+        assert "_next: anchor_hash" in text
+
+    async def test_get_provenance_invalid_hash(self, server):
+        """Invalid hash format should return validation error."""
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
+            result = await call_tool_directly(server, "get_provenance", {
+                "swarm_hash": "not-valid",
+            })
+
+        assert result.isError
+        text = result.content[0].text
+        assert "retryable: false" in text
+
+    async def test_get_provenance_missing_hash(self, server):
+        """Missing swarm_hash should return validation error."""
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
+            result = await call_tool_directly(server, "get_provenance", {})
+
+        assert result.isError
+
+    async def test_get_provenance_connection_error(self, server):
+        """ChainConnectionError should be retryable."""
+        from swarm_provenance_mcp.chain.exceptions import ChainConnectionError
+
+        mock_client = MagicMock()
+        mock_client.get.side_effect = ChainConnectionError(
+            "RPC unreachable", rpc_url="https://sepolia.base.org"
+        )
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert result.isError
+        text = result.content[0].text
+        assert "retryable: true" in text
+        assert "_next: chain_health" in text
+
+    async def test_get_provenance_generic_chain_error(self, server):
+        """Generic ChainError should be non-retryable."""
+        from swarm_provenance_mcp.chain.exceptions import ChainError
+
+        mock_client = MagicMock()
+        mock_client.get.side_effect = ChainError("Something unexpected")
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert result.isError
+        text = result.content[0].text
+        assert "retryable: false" in text
+
+    async def test_get_provenance_hints(self, server):
+        """Success response should include correct hints."""
+        mock_client = MagicMock()
+        mock_client.get.return_value = self._mock_record()
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        text = result.content[0].text
+        assert "_next: download_data" in text
+        assert "_related:" in text
+        assert "verify_hash" in text
+
+    async def test_get_provenance_tool_registered(self, server):
+        """get_provenance should appear in list_tools when chain is enabled."""
+        from mcp.types import ListToolsRequest
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.settings') as mock_settings:
+            mock_settings.chain_enabled = True
+            mock_settings.mcp_server_name = "test"
+            mock_settings.mcp_server_version = "0.1.0"
+            mock_settings.default_stamp_amount = 2000000000
+            mock_settings.default_stamp_depth = 17
+
+            test_server = create_server()
+            handler = None
+            for h in test_server.request_handlers.values():
+                if hasattr(h, '__name__') and 'list_tools' in str(h):
+                    handler = h
+                    break
+            assert handler is not None
+            result = await handler(ListToolsRequest(method="tools/list"))
+            inner = result.root if hasattr(result, 'root') else result
+            tools = inner.tools if hasattr(inner, 'tools') else inner
+            tool_names = {t.name for t in tools}
+            assert "get_provenance" in tool_names

@@ -25,8 +25,7 @@ def _import_web3():
             _Web3 = Web3
         except ImportError as e:
             raise ChainConfigurationError(
-                "web3 not available. "
-                "Reinstall with: pip install -e ."
+                "web3 not available. " "Reinstall with: pip install -e ."
             ) from e
     return _Web3
 

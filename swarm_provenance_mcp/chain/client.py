@@ -210,7 +210,24 @@ class ChainClient:
             data_type=data_type,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        try:
+            receipt = self._send_transaction(tx)
+        except ChainTransactionError as e:
+            # Detect "already registered" revert that the pre-check missed
+            # (can happen when public RPC serves stale reads)
+            if "already registered" in str(e).lower():
+                try:
+                    record = self.get(swarm_hash)
+                    raise DataAlreadyRegisteredError(
+                        f"Data hash {swarm_hash} is already registered on-chain",
+                        data_hash=swarm_hash,
+                        owner=record.owner,
+                        timestamp=record.timestamp,
+                        data_type=record.data_type,
+                    ) from e
+                except DataNotRegisteredError:
+                    pass  # Still not visible — re-raise original
+            raise
 
         return AnchorResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -693,12 +710,9 @@ class ChainClient:
         """
         Get the provenance chain for a data hash.
 
-        Retrieves the record for the given hash. If transformations have
-        new_data_hash links, follows them to build a lineage chain.
-
-        Note: The current contract returns transformation descriptions only
-        (no new_data_hash links), so the chain will typically contain just
-        the queried record. Supply hashes directly to follow known lineages.
+        Retrieves the record for the given hash, then queries
+        DataTransformed events to discover linked hashes and follows
+        them to build a lineage chain.
 
         Args:
             swarm_hash: Starting Swarm reference hash.
@@ -729,15 +743,41 @@ class ChainClient:
 
             try:
                 record = self.get(current_hash)
-                chain.append(record)
-
-                # Follow transformation links if new_data_hash is available
-                for t in record.transformations:
-                    if t.new_data_hash and t.new_data_hash not in visited:
-                        to_visit.append((t.new_data_hash, current_depth + 1))
             except DataNotRegisteredError:
                 logger.debug("Hash %s not registered, skipping", current_hash)
                 continue
+
+            # Enrich transformations with new_data_hash from events
+            try:
+                events = self._contract.get_transformations_from(current_hash)
+                enriched = []
+                for orig_bytes, new_bytes, desc in events:
+                    new_hash = (
+                        new_bytes.hex()
+                        if isinstance(new_bytes, bytes)
+                        else str(new_bytes)
+                    )
+                    enriched.append(
+                        ChainTransformation(
+                            description=desc,
+                            new_data_hash=new_hash,
+                        )
+                    )
+                    if new_hash not in visited:
+                        to_visit.append((new_hash, current_depth + 1))
+                if enriched:
+                    record.transformations = enriched
+            except Exception:
+                logger.debug(
+                    "Could not query events for %s, using record data",
+                    current_hash,
+                )
+                # Fall back to record.transformations (description-only)
+                for t in record.transformations:
+                    if t.new_data_hash and t.new_data_hash not in visited:
+                        to_visit.append((t.new_data_hash, current_depth + 1))
+
+            chain.append(record)
 
         logger.debug("Chain length: %d", len(chain))
 

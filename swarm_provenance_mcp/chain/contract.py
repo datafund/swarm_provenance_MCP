@@ -575,6 +575,42 @@ class DataProvenanceContract:
             self._web3.to_checksum_address(delegate),
         ).call()
 
+    # --- Event queries ---
+
+    def get_transformations_from(
+        self,
+        data_hash: str,
+        lookback_blocks: int = 5_000,
+    ) -> List[Tuple[bytes, bytes, str]]:
+        """
+        Query DataTransformed events where data_hash is the original.
+
+        Args:
+            data_hash: 64-char hex hash.
+            lookback_blocks: How many blocks to scan backwards from latest.
+                Default 50,000 (~28h on Base at 2s/block). Public RPCs
+                reject very large ranges.
+
+        Returns:
+            List of (originalDataHash, newDataHash, description) tuples.
+        """
+        hash_bytes = _normalize_hash(data_hash)
+        latest = self._web3.eth.block_number
+        from_block = max(0, latest - lookback_blocks)
+        events = self._contract.events.DataTransformed.get_logs(
+            argument_filters={"originalDataHash": hash_bytes},
+            from_block=from_block,
+            to_block=latest,
+        )
+        results = []
+        for evt in events:
+            results.append((
+                evt.args.originalDataHash,
+                evt.args.newDataHash,
+                evt.args.transformation,
+            ))
+        return results
+
     # --- Gas estimation ---
 
     def estimate_gas(self, tx: dict) -> int:

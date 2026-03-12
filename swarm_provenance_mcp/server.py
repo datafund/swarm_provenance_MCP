@@ -340,6 +340,29 @@ _FAUCET_URLS = {
 _BRIDGE_URL = "https://bridge.base.org"
 
 
+def _is_insufficient_funds_error(e: Exception) -> bool:
+    """Check if an exception indicates insufficient wallet funds."""
+    err_str = str(e).lower()
+    return "insufficient funds" in err_str or "insufficient balance" in err_str
+
+
+def _format_insufficient_funds_error(tool_name: str, chain_client_ref) -> str:
+    """Format a user-friendly error when a transaction fails due to empty wallet."""
+    msg = f"⚠️  {tool_name} failed — wallet has insufficient funds for gas.\n"
+    if chain_client_ref:
+        msg += f"\n   Wallet: {chain_client_ref.address}"
+        chain = chain_client_ref.chain
+    else:
+        chain = settings.chain_name
+    faucet = _FAUCET_URLS.get(chain)
+    if faucet:
+        msg += f"\n   Fund with testnet ETH: {faucet}"
+    else:
+        msg += f"\n   Bridge ETH to Base: {_BRIDGE_URL}"
+    msg += "\n\n   Run chain_balance to check your current balance."
+    return msg
+
+
 def _mask_rpc_url(url: str) -> str:
     """Extract hostname from RPC URL for display (hide full path/keys)."""
     try:
@@ -1476,6 +1499,22 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     response_text += f"\n\n⛓️  Chain: {chain_client.chain} (connected)"
                     response_text += f"\n   Contract: {chain_client.contract_address}"
                     response_text += f"\n   Wallet: {chain_client.address}"
+                    # Proactive balance check — warn if wallet can't transact
+                    try:
+                        wallet_info = chain_client.balance()
+                        guidance = _format_funding_guidance(
+                            wallet_info.address,
+                            wallet_info.balance_wei,
+                            wallet_info.chain,
+                        )
+                        if guidance:
+                            response_text += guidance
+                            recommendations.append(
+                                "Wallet balance too low for write operations — "
+                                "fund it before using anchor_hash or record_transform"
+                            )
+                    except Exception:
+                        pass  # Non-critical — don't fail health_check
                 except Exception as chain_err:
                     response_text += (
                         f"\n\n⛓️  Chain: {settings.chain_name} (error: {chain_err})"
@@ -1944,9 +1983,12 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
             )
 
         if isinstance(e, ChainTransactionError):
-            msg = f"Transaction failed: {str(e)}"
-            if e.tx_hash:
-                msg += f"\n   Tx Hash: {e.tx_hash}"
+            if _is_insufficient_funds_error(e):
+                msg = _format_insufficient_funds_error("anchor_hash", chain_client)
+            else:
+                msg = f"Transaction failed: {str(e)}"
+                if e.tx_hash:
+                    msg += f"\n   Tx Hash: {e.tx_hash}"
             return CallToolResult(
                 content=[
                     TextContent(
@@ -1982,6 +2024,21 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
                         text=_format_error(
                             f"Chain validation error: {str(e)}",
                             retryable=False,
+                        ),
+                    )
+                ],
+                isError=True,
+            )
+
+        # Catch-all: still check for insufficient funds in generic errors
+        if _is_insufficient_funds_error(e):
+            msg = _format_insufficient_funds_error("anchor_hash", chain_client)
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(
+                            msg, retryable=False, next_tool="chain_balance"
                         ),
                     )
                 ],
@@ -2436,9 +2493,14 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
             )
 
         if isinstance(e, ChainTransactionError):
-            msg = f"Transaction failed: {str(e)}"
-            if e.tx_hash:
-                msg += f"\n   Tx Hash: {e.tx_hash}"
+            if _is_insufficient_funds_error(e):
+                msg = _format_insufficient_funds_error(
+                    "record_transform", chain_client
+                )
+            else:
+                msg = f"Transaction failed: {str(e)}"
+                if e.tx_hash:
+                    msg += f"\n   Tx Hash: {e.tx_hash}"
             return CallToolResult(
                 content=[
                     TextContent(
@@ -2474,6 +2536,23 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
                         text=_format_error(
                             f"Chain validation error: {str(e)}",
                             retryable=False,
+                        ),
+                    )
+                ],
+                isError=True,
+            )
+
+        # Catch-all: still check for insufficient funds in generic errors
+        if _is_insufficient_funds_error(e):
+            msg = _format_insufficient_funds_error(
+                "record_transform", chain_client
+            )
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(
+                            msg, retryable=False, next_tool="chain_balance"
                         ),
                     )
                 ],
@@ -2577,11 +2656,34 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
                             ChainTransformation(description=str(t)) for t in raw[4]
                         ],
                     )
-                    chain_records.append(record)
 
-                    for t in record.transformations:
-                        if t.new_data_hash and t.new_data_hash not in visited:
-                            to_visit.append((t.new_data_hash, depth + 1))
+                    # Enrich transformations with new_data_hash from events
+                    try:
+                        events = contract.get_transformations_from(current_hash)
+                        if events:
+                            enriched = []
+                            for orig_bytes, new_bytes, desc in events:
+                                new_hash = (
+                                    new_bytes.hex()
+                                    if isinstance(new_bytes, bytes)
+                                    else str(new_bytes)
+                                )
+                                enriched.append(
+                                    ChainTransformation(
+                                        description=desc,
+                                        new_data_hash=new_hash,
+                                    )
+                                )
+                                if new_hash not in visited:
+                                    to_visit.append((new_hash, depth + 1))
+                            record.transformations = enriched
+                    except Exception:
+                        # Fall back to record.transformations (description-only)
+                        for t in record.transformations:
+                            if t.new_data_hash and t.new_data_hash not in visited:
+                                to_visit.append((t.new_data_hash, depth + 1))
+
+                    chain_records.append(record)
                 except Exception:
                     continue
 

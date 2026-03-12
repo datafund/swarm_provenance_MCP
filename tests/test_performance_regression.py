@@ -40,7 +40,8 @@ class TestPerformanceBaselines:
             'health_check': {'status': 'healthy', 'response_time_ms': 10}
         }
 
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client, \
+             patch('swarm_provenance_mcp.server.chain_client', None):
             mock_client.purchase_stamp.return_value = mock_responses['purchase_stamp']
             mock_client.list_stamps.return_value = mock_responses['list_stamps']
             mock_client.health_check.return_value = mock_responses['health_check']
@@ -97,7 +98,8 @@ class TestConcurrencyAndLoad:
         from swarm_provenance_mcp.server import handle_health_check
 
         # Mock to avoid network calls
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client, \
+             patch('swarm_provenance_mcp.server.chain_client', None):
             mock_client.health_check.return_value = {
                 'status': 'healthy',
                 'response_time_ms': 10

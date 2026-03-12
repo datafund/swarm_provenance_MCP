@@ -29,6 +29,8 @@ dependencies = [
     "requests>=2.31.0",
     "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
+    "web3>=6.0.0",
+    "eth-account>=0.10.0",
 ]
 
 [project.optional-dependencies]
@@ -62,6 +64,9 @@ swarm-provenance-mcp = "swarm_provenance_mcp.server:main_sync"
 where = ["."]
 include = ["swarm_provenance_mcp*"]
 
+[tool.setuptools.package-data]
+"swarm_provenance_mcp.chain" = ["abi/*.json"]
+
 [tool.black]
 line-length = 88
 target-version = ['py310']
@@ -87,6 +92,7 @@ markers = [
     "regression: marks tests as regression tests",
     "smoke: marks tests as smoke tests for quick validation",
     "docker: marks tests requiring a running Docker daemon",
+    "blockchain: marks tests exercising blockchain/chain code paths",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:pydantic.*",

@@ -119,6 +119,13 @@ Our Swarm Provenance MCP server currently provides these tools:
 - `get_wallet_info` - Node wallet address and BZZ balance (diagnostic)
 - `get_notary_info` - Check notary signing service availability
 - `health_check` - Verify gateway and network connectivity
+- `chain_balance` - Check on-chain wallet ETH balance with funding guidance *(requires `CHAIN_ENABLED=true` + wallet key)*
+- `chain_health` - Test blockchain RPC connectivity *(requires `CHAIN_ENABLED=true`)*
+- `anchor_hash` - Register Swarm hash on-chain *(requires `CHAIN_ENABLED=true` + wallet key, costs gas)*
+- `verify_hash` - Check if hash is registered on-chain *(requires `CHAIN_ENABLED=true`, read-only)*
+- `get_provenance` - Retrieve full on-chain provenance record *(requires `CHAIN_ENABLED=true`, read-only)*
+- `record_transform` - Record data transformation linking original to new hash *(requires `CHAIN_ENABLED=true` + wallet key, costs gas)*
+- `get_provenance_chain` - Follow transformation lineage tree *(requires `CHAIN_ENABLED=true`, read-only)*
 
 ## 🧭 Agent Workflow Guidance
 

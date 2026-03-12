@@ -34,12 +34,13 @@ This MCP server is specifically designed for provenance data use cases, leveragi
 - **Data Download**: Download data from Swarm network by reference
 - **Provenance Storage**: Store data with provenance metadata for immutable, verifiable records
 - **Health Monitoring**: Check gateway and Swarm network connectivity
+- **Chain Diagnostics** (optional): Check on-chain wallet balance and RPC connectivity for provenance anchoring
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.8 or higher (use `python3` command)
+- Python 3.10 or higher (use `python3` command)
 - Internet connection (uses public gateway by default)
 - Optional: Self-hosted `swarm_connect` gateway service (see Gateway Options below)
 
@@ -53,7 +54,7 @@ cd swarm_provenance_mcp
 
 2. Create and activate a virtual environment:
 ```bash
-python -m venv venv
+python3 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
@@ -114,6 +115,16 @@ Environment variables (set in `.env` file):
 - `DEFAULT_STAMP_AMOUNT`: Default amount for new stamps in wei (default: `2000000000`)
 - `DEFAULT_STAMP_DEPTH`: Default depth for new stamps (default: `17`)
 - `PAYMENT_MODE`: Gateway payment tier (default: `free` — rate limited to 3 write requests/minute)
+
+#### Chain Anchoring (Optional)
+
+- `CHAIN_ENABLED`: Enable on-chain provenance anchoring (default: `false`)
+- `CHAIN_NAME`: Blockchain network — `base-sepolia` (testnet) or `base` (mainnet) (default: `base-sepolia`)
+- `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x prefix)
+- `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set)
+- `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set)
+
+When chain is enabled, additional tools become available: `chain_balance`, `chain_health`, `anchor_hash`, `verify_hash`, `get_provenance`, `record_transform`, `get_provenance_chain`. Blockchain dependencies (web3, eth-account) are included in the default install. Read-only tools work without a wallet key; write tools require `PROVENANCE_WALLET_KEY` with a funded wallet.
 
 ### Gateway Options
 
@@ -303,6 +314,32 @@ Check gateway and Swarm network connectivity status. Returns an adaptive status 
 }
 ```
 
+#### `chain_balance` *(optional — requires `CHAIN_ENABLED=true` and blockchain dependencies)*
+Check the on-chain wallet ETH balance used for provenance anchoring. Returns wallet address, balance, chain info, and actionable funding guidance when balance is low.
+
+**Parameters:** None
+
+**Example:**
+```json
+{
+  "name": "chain_balance",
+  "arguments": {}
+}
+```
+
+#### `chain_health` *(optional — requires `CHAIN_ENABLED=true` and blockchain dependencies)*
+Test blockchain RPC connectivity for on-chain provenance. Returns connection status, chain name, chain ID, latest block number, and RPC response time. Does not require a wallet key.
+
+**Parameters:** None
+
+**Example:**
+```json
+{
+  "name": "chain_health",
+  "arguments": {}
+}
+```
+
 ### Response Format
 
 All tool responses include structured metadata to help agents chain operations efficiently:
@@ -407,20 +444,22 @@ Add to your `claude_desktop_config.json`:
 │                 │    │                 │    │   Gateway       │
 │ • Claude        │    │ • Tool handlers │    │                 │
 │ • Other LLMs    │    │ • Gateway client│    │ • Purchase API  │
-│ • Custom agents │    │ • Error handling│    │ • Status API    │
-└─────────────────┘    └─────────────────┘    │ • Extension API │
-                                              └─────────┬───────┘
-                                                        │
-                                              ┌─────────▼───────┐
-                                              │  Swarm Network  │
-                                              │   (Bee Node)    │
-                                              └─────────────────┘
+│ • Custom agents │    │ • Chain client  │    │ • Status API    │
+└─────────────────┘    │ • Error handling│    │ • Extension API │
+                       └────────┬────────┘    └─────────┬───────┘
+                                │                       │
+                       ┌────────▼────────┐    ┌─────────▼───────┐
+                       │  Base Sepolia   │    │  Swarm Network  │
+                       │  (DataProv.     │    │   (Bee Node)    │
+                       │   Contract)     │    └─────────────────┘
+                       └─────────────────┘
 ```
 
 ### Components
 
 - **MCP Server**: Exposes tools via the Model Context Protocol
 - **Gateway Client**: HTTP client for communicating with swarm_connect
+- **Chain Client** (optional): On-chain provenance via DataProvenance smart contract on Base Sepolia
 - **Configuration**: Environment-based settings management
 - **Error Handling**: Comprehensive error handling and logging
 
@@ -551,6 +590,8 @@ ruff check swarm_provenance_mcp/
   - `requests>=2.31.0`: HTTP client for gateway communication
   - `pydantic>=2.0.0`: Data validation and settings
   - `python-dotenv>=1.0.0`: Environment configuration
+  - `web3>=6.0.0`: Ethereum blockchain interaction for on-chain provenance
+  - `eth-account>=0.10.0`: Wallet and transaction signing for chain anchoring
 
 - **Development Dependencies**:
   - `pytest`: Testing framework

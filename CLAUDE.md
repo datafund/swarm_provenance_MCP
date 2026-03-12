@@ -78,13 +78,28 @@ pytest tests/test_docker.py -v -m docker
 - **MCP Server** (`server.py`): Main server implementing Model Context Protocol with tool handlers
 - **Gateway Client** (`gateway_client.py`): HTTP client for communicating with swarm_connect FastAPI gateway
 - **Configuration** (`config.py`): Pydantic-based settings management with environment variable support
+- **Chain Module** (`chain/`): Optional on-chain provenance anchoring via DataProvenance smart contract
 
 ### Communication Flow
 ```
 AI Agents → MCP Server → Gateway Client → swarm_connect Gateway → Swarm Network
+                       → Chain Client  → Base Sepolia RPC → DataProvenance Contract
 ```
 
+### Chain Module (`chain/`)
+On-chain provenance module. Dependencies (web3, eth-account) included in default install. Enable with `CHAIN_ENABLED=true`.
+- `chain/__init__.py` — Import guard (`CHAIN_AVAILABLE` flag)
+- `chain/client.py` — High-level facade (anchor, verify, transform, access)
+- `chain/provider.py` — Web3 RPC connection management
+- `chain/wallet.py` — Private key loading and transaction signing
+- `chain/contract.py` — DataProvenance contract wrapper (build_*_tx, read methods)
+- `chain/models.py` — Pydantic models (AnchorResult, ChainProvenanceRecord, etc.)
+- `chain/exceptions.py` — Standalone exception hierarchy (ChainError base)
+- `chain/abi/DataProvenance.json` — Contract ABI
+
 ### Available MCP Tools
+
+#### Swarm Gateway Tools
 - `purchase_stamp` - Create new postage stamps
 - `get_stamp_status` - Retrieve detailed stamp information (includes utilization data)
 - `list_stamps` - List all available stamps
@@ -96,6 +111,20 @@ AI Agents → MCP Server → Gateway Client → swarm_connect Gateway → Swarm 
 - `get_notary_info` - Check notary signing service availability
 - `health_check` - Gateway connectivity status
 
+#### Chain Tools (requires `CHAIN_ENABLED=true`)
+
+| Tool | Wallet Key | Gas | Description |
+|------|-----------|-----|-------------|
+| `chain_health` | not needed | no | Test RPC connectivity |
+| `chain_balance` | **required** | no | Check wallet ETH balance with funding guidance |
+| `verify_hash` | not needed | no | Check if hash is registered on-chain |
+| `get_provenance` | not needed | no | Retrieve full on-chain provenance record |
+| `get_provenance_chain` | not needed | no | Follow transformation lineage tree |
+| `anchor_hash` | **required** | **yes** | Register Swarm hash on-chain |
+| `record_transform` | **required** | **yes** | Record data transformation, link original → new hash |
+
+Blockchain dependencies (web3, eth-account) are included in the default install. Set `CHAIN_ENABLED=true` to activate chain tools. Read-only tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `chain_health`) work without `PROVENANCE_WALLET_KEY` by creating a temporary provider + contract for direct contract reads. Write tools (`anchor_hash`, `record_transform`) and `chain_balance` require a funded wallet. Default RPC is `https://sepolia.base.org` (public, no API key needed); override with `CHAIN_RPC_URL`.
+
 ### Dependencies Architecture
 - **MCP Framework**: Uses `mcp>=1.0.0` for protocol implementation
 - **HTTP Client**: Uses `requests>=2.31.0` for gateway communication
@@ -103,10 +132,12 @@ AI Agents → MCP Server → Gateway Client → swarm_connect Gateway → Swarm 
 - **Configuration**: Uses `python-dotenv>=1.0.0` for environment management
 
 ### Testing Strategy
-- **Unit Tests**: Mock-based testing of gateway client in `test_gateway_client.py`
-- **Integration Tests**: End-to-end MCP tool testing in `test_integration.py`
+- **Gateway Client Tests** (`test_gateway_client.py`): Mock-based testing of HTTP client
+- **Tool Execution Tests** (`test_tool_execution.py`): Handler-level tests for all MCP tools including chain tools, with mocked chain_client/CHAIN_AVAILABLE
+- **Tool Definition Tests** (`test_tool_definitions.py`): Validates tool schemas, required parameters, and registration consistency
+- **Integration Tests** (`test_integration.py`): End-to-end MCP tool testing
 - **Async Support**: Uses `pytest-asyncio` for async test execution
-- **Mocking**: Uses `pytest-mock` for external dependency mocking
+- **Mocking**: Uses `pytest-mock` and `unittest.mock` for external dependency mocking
 
 ## Configuration Management
 
@@ -117,6 +148,13 @@ AI Agents → MCP Server → Gateway Client → swarm_connect Gateway → Swarm 
 - `PAYMENT_MODE`: Gateway payment tier — `free` for rate-limited free tier (default: `free`)
 - `MCP_SERVER_NAME`: Server identification (default: `swarm-provenance-mcp`)
 - `MCP_SERVER_VERSION`: Server version (default: `0.1.0`)
+- `CHAIN_ENABLED`: Enable on-chain provenance anchoring (default: `false`)
+- `CHAIN_NAME`: Blockchain network (`base-sepolia` or `base`, default: `base-sepolia`)
+- `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x)
+- `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set)
+- `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set)
+- `CHAIN_EXPLORER_URL`: Custom block explorer URL (uses chain preset if not set)
+- `CHAIN_GAS_LIMIT`: Explicit gas limit for chain transactions (skips estimation if set)
 
 ### Settings Management
 The `config.py` module uses Pydantic Settings for type-safe configuration with automatic environment variable loading and validation.

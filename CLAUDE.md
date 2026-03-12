@@ -111,6 +111,7 @@ Optional module for on-chain provenance. Requires `pip install -e .[blockchain]`
 - `chain_balance` - On-chain wallet ETH balance with funding guidance (optional, chain enabled)
 - `chain_health` - Blockchain RPC connectivity test (optional, chain enabled)
 - `anchor_hash` - Register Swarm hash on-chain for provenance (optional, chain enabled, costs gas)
+- `verify_hash` - Check if Swarm hash is registered on-chain (optional, chain enabled, read-only)
 
 ### Dependencies Architecture
 - **MCP Framework**: Uses `mcp>=1.0.0` for protocol implementation

@@ -104,7 +104,8 @@ These register Swarm hashes in the DataProvenance smart contract on Base Sepolia
 - chain_health — test RPC connectivity (no wallet needed)
 - chain_balance — check wallet ETH balance with funding guidance when low
 - anchor_hash — register a Swarm hash on-chain (costs gas, requires funded wallet)
-- Additional chain tools (verify_chain, record_access, etc.) will be added when enabled.
+- verify_hash — check if a Swarm hash is registered on-chain (read-only, no gas)
+- Additional chain tools (get_provenance, record_transform, etc.) will be added when enabled.
 The health_check tool reports chain status alongside gateway status.
 
 COMPANION SERVERS:
@@ -235,6 +236,7 @@ ALL_TOOL_NAMES = [
     "chain_balance",
     "chain_health",
     "anchor_hash",
+    "verify_hash",
 ]
 
 
@@ -559,6 +561,21 @@ def create_server() -> Server:
                             "required": ["swarm_hash"],
                         },
                     ),
+                    Tool(
+                        name="verify_hash",
+                        description="Check whether a Swarm reference hash is registered on the blockchain. Returns verified status with basic provenance info (owner, timestamp, data type) if found. Read-only — no gas or wallet key required.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "swarm_hash": {
+                                    "type": "string",
+                                    "description": "64-character hexadecimal Swarm reference hash to verify (without 0x prefix)",
+                                    "pattern": "^[a-fA-F0-9]{64}$",
+                                },
+                            },
+                            "required": ["swarm_hash"],
+                        },
+                    ),
                 ]
             )
 
@@ -595,6 +612,8 @@ def create_server() -> Server:
                 return await handle_chain_health(arguments)
             elif name == "anchor_hash":
                 return await handle_anchor_hash(arguments)
+            elif name == "verify_hash":
+                return await handle_verify_hash(arguments)
             else:
                 return CallToolResult(
                     content=[
@@ -1859,6 +1878,141 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
                     type="text",
                     text=_format_error(
                         f"Chain error: {str(e)}", retryable=False
+                    ),
+                )
+            ],
+            isError=True,
+        )
+
+
+async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
+    """Handle verify_hash requests — check if a Swarm hash is registered on-chain."""
+    if not CHAIN_AVAILABLE:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        "Chain module not available. Install blockchain dependencies: pip install -e .[blockchain]",
+                        retryable=False,
+                    ),
+                )
+            ],
+            isError=True,
+        )
+
+    try:
+        swarm_hash = arguments.get("swarm_hash")
+        if not swarm_hash:
+            raise ValueError("swarm_hash is required")
+        clean_hash = validate_and_clean_reference_hash(swarm_hash)
+
+        # Use chain_client if available, otherwise create temporary provider + contract
+        if chain_client:
+            is_registered = chain_client.verify(clean_hash)
+            if is_registered:
+                record = chain_client.get(clean_hash)
+            else:
+                record = None
+        else:
+            from .chain.provider import ChainProvider
+            from .chain.contract import DataProvenanceContract
+            from .chain.exceptions import DataNotRegisteredError
+
+            provider = ChainProvider(
+                chain=settings.chain_name,
+                rpc_url=settings.chain_rpc_url,
+                contract_address=settings.chain_contract_address,
+                explorer_url=settings.chain_explorer_url,
+            )
+            contract = DataProvenanceContract(
+                web3=provider.web3,
+                contract_address=provider.contract_address,
+            )
+            raw = contract.get_data_record(clean_hash)
+            zero_address = "0x" + "0" * 40
+            if raw[1] == zero_address:
+                is_registered = False
+                record = None
+            else:
+                is_registered = True
+                from .chain.models import (
+                    ChainProvenanceRecord,
+                    ChainTransformation,
+                    DataStatusEnum,
+                )
+
+                record = ChainProvenanceRecord(
+                    data_hash=(
+                        raw[0].hex() if isinstance(raw[0], bytes) else str(raw[0])
+                    ),
+                    owner=raw[1],
+                    timestamp=raw[2],
+                    data_type=raw[3],
+                    status=DataStatusEnum(raw[6]),
+                    accessors=list(raw[5]),
+                    transformations=[
+                        ChainTransformation(description=str(t)) for t in raw[4]
+                    ],
+                )
+
+        if is_registered and record:
+            from datetime import datetime, timezone
+
+            timestamp_str = "unknown"
+            if record.timestamp:
+                try:
+                    dt = datetime.fromtimestamp(record.timestamp, tz=timezone.utc)
+                    timestamp_str = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+                except (ValueError, OSError):
+                    timestamp_str = str(record.timestamp)
+
+            response_text = f"⛓️  Verified — hash IS registered on-chain\n\n"
+            response_text += f"   Swarm Hash: {clean_hash}\n"
+            response_text += f"   Owner: {record.owner}\n"
+            response_text += f"   Registered: {timestamp_str}\n"
+            response_text += f"   Data Type: {record.data_type}\n"
+            response_text += f"   Status: {record.status.name}"
+            response_text += _format_hints(
+                "download_data", ["anchor_hash", "health_check"]
+            )
+        else:
+            response_text = f"⛓️  Not found — hash is NOT registered on-chain\n\n"
+            response_text += f"   Swarm Hash: {clean_hash}"
+            response_text += _format_hints(
+                "anchor_hash", ["upload_data", "health_check"]
+            )
+
+        return CallToolResult(content=[TextContent(type="text", text=response_text)])
+
+    except ValueError as e:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        f"Validation error: {str(e)}", retryable=False
+                    ),
+                )
+            ],
+            isError=True,
+        )
+    except Exception as e:
+        try:
+            from .chain.exceptions import ChainConnectionError
+        except ImportError:
+            ChainConnectionError = None
+
+        is_conn_error = ChainConnectionError and isinstance(e, ChainConnectionError)
+
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        f"Chain error: {str(e)}",
+                        retryable=is_conn_error,
+                        next_tool="chain_health" if is_conn_error else None,
                     ),
                 )
             ],

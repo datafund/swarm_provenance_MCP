@@ -24,7 +24,7 @@ async def call_tool_directly(server, name: str, arguments: Dict[str, Any]):
         handle_extend_stamp, handle_upload_data, handle_download_data,
         handle_check_stamp_health, handle_get_wallet_info, handle_get_notary_info,
         handle_health_check, handle_chain_balance, handle_chain_health,
-        handle_anchor_hash,
+        handle_anchor_hash, handle_verify_hash,
     )
 
     handlers = {
@@ -41,6 +41,7 @@ async def call_tool_directly(server, name: str, arguments: Dict[str, Any]):
         "chain_balance": handle_chain_balance,
         "chain_health": handle_chain_health,
         "anchor_hash": handle_anchor_hash,
+        "verify_hash": handle_verify_hash,
     }
 
     try:
@@ -1540,3 +1541,219 @@ class TestAnchorHash:
             tools = inner.tools if hasattr(inner, 'tools') else inner
             tool_names = {t.name for t in tools}
             assert "anchor_hash" in tool_names
+
+
+class TestVerifyHash:
+    """Test verify_hash tool execution."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    def _mock_record(self):
+        """Create a mock ChainProvenanceRecord."""
+        mock_rec = MagicMock()
+        mock_rec.owner = "0x1234567890abcdef1234567890abcdef12345678"
+        mock_rec.timestamp = 1700000000
+        mock_rec.data_type = "swarm-provenance"
+        mock_rec.status = MagicMock()
+        mock_rec.status.name = "ACTIVE"
+        return mock_rec
+
+    async def test_verify_registered(self, server):
+        """Registered hash should show provenance info."""
+        mock_client = MagicMock()
+        mock_client.verify.return_value = True
+        mock_client.get.return_value = self._mock_record()
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "verify_hash", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "IS registered" in text
+        assert TEST_REFERENCE in text
+        assert "0x1234" in text
+        assert "2023" in text  # timestamp 1700000000
+        assert "ACTIVE" in text
+        mock_client.verify.assert_called_once_with(TEST_REFERENCE)
+
+    async def test_verify_not_registered(self, server):
+        """Unregistered hash should show not-found message."""
+        mock_client = MagicMock()
+        mock_client.verify.return_value = False
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "verify_hash", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "NOT registered" in text
+        assert "_next: anchor_hash" in text
+
+    async def test_verify_registered_hints(self, server):
+        """Registered hash should suggest download_data next."""
+        mock_client = MagicMock()
+        mock_client.verify.return_value = True
+        mock_client.get.return_value = self._mock_record()
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "verify_hash", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        text = result.content[0].text
+        assert "_next: download_data" in text
+        assert "_related:" in text
+
+    async def test_verify_not_registered_hints(self, server):
+        """Unregistered hash should suggest anchor_hash next."""
+        mock_client = MagicMock()
+        mock_client.verify.return_value = False
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "verify_hash", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        text = result.content[0].text
+        assert "_next: anchor_hash" in text
+
+    async def test_verify_not_available(self, server):
+        """CHAIN_AVAILABLE=False should return error."""
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', False):
+            result = await call_tool_directly(server, "verify_hash", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert result.isError
+        text = result.content[0].text
+        assert "not available" in text.lower() or "not installed" in text.lower()
+
+    async def test_verify_no_wallet(self, server):
+        """verify_hash should work without wallet key (chain_client=None)."""
+        mock_provider = MagicMock()
+        mock_provider.web3 = MagicMock()
+        mock_provider.contract_address = "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
+
+        mock_contract = MagicMock()
+        zero_address = "0x" + "0" * 40
+        mock_contract.get_data_record.return_value = (
+            bytes.fromhex(TEST_REFERENCE),
+            zero_address, 0, "", [], [], 0,
+        )
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', None), \
+             patch('swarm_provenance_mcp.chain.provider.ChainProvider', return_value=mock_provider), \
+             patch('swarm_provenance_mcp.chain.contract.DataProvenanceContract', return_value=mock_contract):
+            result = await call_tool_directly(server, "verify_hash", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "NOT registered" in text
+
+    async def test_verify_no_wallet_registered(self, server):
+        """verify_hash without wallet should show record when found."""
+        mock_provider = MagicMock()
+        mock_provider.web3 = MagicMock()
+        mock_provider.contract_address = "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
+
+        mock_contract = MagicMock()
+        mock_contract.get_data_record.return_value = (
+            bytes.fromhex(TEST_REFERENCE),
+            "0x1234567890abcdef1234567890abcdef12345678",
+            1700000000,
+            "swarm-provenance",
+            [],
+            [],
+            0,
+        )
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', None), \
+             patch('swarm_provenance_mcp.chain.provider.ChainProvider', return_value=mock_provider), \
+             patch('swarm_provenance_mcp.chain.contract.DataProvenanceContract', return_value=mock_contract):
+            result = await call_tool_directly(server, "verify_hash", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "IS registered" in text
+        assert "0x1234" in text
+
+    async def test_verify_invalid_hash(self, server):
+        """Invalid hash format should return validation error."""
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
+            result = await call_tool_directly(server, "verify_hash", {
+                "swarm_hash": "bad-hash",
+            })
+
+        assert result.isError
+        text = result.content[0].text
+        assert "retryable: false" in text
+
+    async def test_verify_missing_hash(self, server):
+        """Missing swarm_hash should return validation error."""
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
+            result = await call_tool_directly(server, "verify_hash", {})
+
+        assert result.isError
+
+    async def test_verify_connection_error(self, server):
+        """ChainConnectionError should be retryable."""
+        from swarm_provenance_mcp.chain.exceptions import ChainConnectionError
+
+        mock_client = MagicMock()
+        mock_client.verify.side_effect = ChainConnectionError(
+            "RPC unreachable", rpc_url="https://sepolia.base.org"
+        )
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "verify_hash", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert result.isError
+        text = result.content[0].text
+        assert "retryable: true" in text
+        assert "_next: chain_health" in text
+
+    async def test_verify_tool_registered(self, server):
+        """verify_hash should appear in list_tools when chain is enabled."""
+        from mcp.types import ListToolsRequest
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.settings') as mock_settings:
+            mock_settings.chain_enabled = True
+            mock_settings.mcp_server_name = "test"
+            mock_settings.mcp_server_version = "0.1.0"
+            mock_settings.default_stamp_amount = 2000000000
+            mock_settings.default_stamp_depth = 17
+
+            test_server = create_server()
+            handler = None
+            for h in test_server.request_handlers.values():
+                if hasattr(h, '__name__') and 'list_tools' in str(h):
+                    handler = h
+                    break
+            assert handler is not None
+            result = await handler(ListToolsRequest(method="tools/list"))
+            inner = result.root if hasattr(result, 'root') else result
+            tools = inner.tools if hasattr(inner, 'tools') else inner
+            tool_names = {t.name for t in tools}
+            assert "verify_hash" in tool_names

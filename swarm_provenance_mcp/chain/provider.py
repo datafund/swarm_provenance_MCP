@@ -4,7 +4,7 @@ Chain provider for connecting to EVM-compatible networks.
 Manages Web3 connections to Base Sepolia (testnet) and Base (mainnet)
 for interacting with the DataProvenance smart contract.
 
-Requires optional dependencies: pip install -e .[blockchain]
+Dependencies (web3, eth-account) are included in the default install.
 """
 
 from typing import Optional
@@ -25,8 +25,8 @@ def _import_web3():
             _Web3 = Web3
         except ImportError as e:
             raise ChainConfigurationError(
-                "Blockchain dependencies not installed. "
-                "Run: pip install -e .[blockchain]"
+                "web3 not available. "
+                "Reinstall with: pip install -e ."
             ) from e
     return _Web3
 

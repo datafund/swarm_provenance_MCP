@@ -4,7 +4,7 @@ Chain wallet for signing transactions.
 Manages private key loading, address derivation, transaction signing,
 and ETH balance queries for on-chain operations.
 
-Requires optional dependencies: pip install -e .[blockchain]
+Dependencies (web3, eth-account) are included in the default install.
 """
 
 import os
@@ -26,8 +26,8 @@ def _import_eth_account():
             _Account = Account
         except ImportError as e:
             raise ChainConfigurationError(
-                "Blockchain dependencies not installed. "
-                "Run: pip install -e .[blockchain]"
+                "eth-account not available. "
+                "Reinstall with: pip install -e ."
             ) from e
     return _Account
 

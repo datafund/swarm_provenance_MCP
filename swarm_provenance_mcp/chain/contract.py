@@ -4,7 +4,7 @@ DataProvenance smart contract wrapper.
 Provides typed Python methods for all DataProvenance contract functions.
 Build methods return transaction dicts; read methods call directly.
 
-Requires optional dependencies: pip install -e .[blockchain]
+Dependencies (web3, eth-account) are included in the default install.
 """
 
 import json

@@ -5,7 +5,7 @@ Provides a facade over ChainProvider, ChainWallet, and DataProvenanceContract
 that mirrors the gateway_client.py pattern: simple method calls that handle
 gas estimation, signing, broadcasting, and receipt parsing.
 
-Requires optional dependencies: pip install -e .[blockchain]
+Dependencies (web3, eth-account) are included in the default install.
 """
 
 import logging

@@ -58,8 +58,8 @@ if settings.chain_enabled:
             )
         else:
             logger.warning(
-                "Chain enabled but blockchain dependencies not installed. "
-                "Run: pip install -e .[blockchain]"
+                "Chain enabled but blockchain dependencies not available. "
+                "Reinstall with: pip install -e ."
             )
     except Exception as e:
         # chain_client stays None but CHAIN_AVAILABLE remains True —
@@ -101,7 +101,7 @@ ERRORS:
 - Size exceeded: data > 4KB, reduce payload before upload
 
 CHAIN ANCHORING (optional):
-When chain_enabled=true and blockchain dependencies are installed, on-chain provenance tools become available.
+When chain_enabled=true, on-chain provenance tools become available (blockchain dependencies are included in the default install).
 These register Swarm hashes in the DataProvenance smart contract on Base Sepolia, creating an immutable on-chain record.
 - chain_health — test RPC connectivity (no wallet needed)
 - chain_balance — check wallet ETH balance with funding guidance when low
@@ -1470,10 +1470,10 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     )
             else:
                 response_text += (
-                    f"\n\n⛓️  Chain: enabled but dependencies not installed"
+                    f"\n\n⛓️  Chain: enabled but dependencies not available"
                 )
                 recommendations.append(
-                    "Install blockchain deps: pip install -e .[blockchain]"
+                    "Reinstall with: pip install -e . (web3/eth-account should be included)"
                 )
 
         # Cross-server coordination info
@@ -1640,7 +1640,7 @@ async def handle_chain_balance(arguments: Dict[str, Any]) -> CallToolResult:
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "Chain module not available. Install blockchain dependencies: pip install -e .[blockchain]",
+                        "Chain module not available. Reinstall with: pip install -e . (web3/eth-account should be included)",
                         retryable=False,
                     ),
                 )
@@ -1704,7 +1704,7 @@ async def handle_chain_health(arguments: Dict[str, Any]) -> CallToolResult:
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "Chain module not available. Install blockchain dependencies: pip install -e .[blockchain]",
+                        "Chain module not available. Reinstall with: pip install -e . (web3/eth-account should be included)",
                         retryable=False,
                     ),
                 )
@@ -1780,7 +1780,7 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "Chain module not available. Install blockchain dependencies: pip install -e .[blockchain]",
+                        "Chain module not available. Reinstall with: pip install -e . (web3/eth-account should be included)",
                         retryable=False,
                     ),
                 )
@@ -1978,7 +1978,7 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "Chain module not available. Install blockchain dependencies: pip install -e .[blockchain]",
+                        "Chain module not available. Reinstall with: pip install -e . (web3/eth-account should be included)",
                         retryable=False,
                     ),
                 )
@@ -2117,7 +2117,7 @@ async def handle_get_provenance(arguments: Dict[str, Any]) -> CallToolResult:
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "Chain module not available. Install blockchain dependencies: pip install -e .[blockchain]",
+                        "Chain module not available. Reinstall with: pip install -e . (web3/eth-account should be included)",
                         retryable=False,
                     ),
                 )
@@ -2281,7 +2281,7 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "Chain module not available. Install blockchain dependencies: pip install -e .[blockchain]",
+                        "Chain module not available. Reinstall with: pip install -e . (web3/eth-account should be included)",
                         retryable=False,
                     ),
                 )
@@ -2480,7 +2480,7 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "Chain module not available. Install blockchain dependencies: pip install -e .[blockchain]",
+                        "Chain module not available. Reinstall with: pip install -e . (web3/eth-account should be included)",
                         retryable=False,
                     ),
                 )

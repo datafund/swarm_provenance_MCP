@@ -124,7 +124,7 @@ Environment variables (set in `.env` file):
 - `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set)
 - `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set)
 
-When chain is enabled with `pip install -e .[blockchain]`, additional tools (`chain_balance`, `chain_health`) become available for checking wallet balance and RPC connectivity.
+When chain is enabled, additional tools become available: `chain_balance`, `chain_health`, `anchor_hash`, `verify_hash`, `get_provenance`, `record_transform`, `get_provenance_chain`. Blockchain dependencies (web3, eth-account) are included in the default install. Read-only tools work without a wallet key; write tools require `PROVENANCE_WALLET_KEY` with a funded wallet.
 
 ### Gateway Options
 

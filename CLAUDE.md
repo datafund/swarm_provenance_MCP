@@ -87,7 +87,7 @@ AI Agents → MCP Server → Gateway Client → swarm_connect Gateway → Swarm 
 ```
 
 ### Chain Module (`chain/`)
-Optional module for on-chain provenance. Requires `pip install -e .[blockchain]`.
+On-chain provenance module. Dependencies (web3, eth-account) included in default install. Enable with `CHAIN_ENABLED=true`.
 - `chain/__init__.py` — Import guard (`CHAIN_AVAILABLE` flag)
 - `chain/client.py` — High-level facade (anchor, verify, transform, access)
 - `chain/provider.py` — Web3 RPC connection management
@@ -111,7 +111,7 @@ Optional module for on-chain provenance. Requires `pip install -e .[blockchain]`
 - `get_notary_info` - Check notary signing service availability
 - `health_check` - Gateway connectivity status
 
-#### Chain Tools (optional, requires `CHAIN_ENABLED=true` + `pip install -e .[blockchain]`)
+#### Chain Tools (requires `CHAIN_ENABLED=true`)
 
 | Tool | Wallet Key | Gas | Description |
 |------|-----------|-----|-------------|
@@ -123,7 +123,7 @@ Optional module for on-chain provenance. Requires `pip install -e .[blockchain]`
 | `anchor_hash` | **required** | **yes** | Register Swarm hash on-chain |
 | `record_transform` | **required** | **yes** | Record data transformation, link original → new hash |
 
-Read-only tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `chain_health`) work without `PROVENANCE_WALLET_KEY` by creating a temporary provider + contract for direct contract reads. Write tools (`anchor_hash`, `record_transform`) and `chain_balance` require a funded wallet.
+Blockchain dependencies (web3, eth-account) are included in the default install. Set `CHAIN_ENABLED=true` to activate chain tools. Read-only tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `chain_health`) work without `PROVENANCE_WALLET_KEY` by creating a temporary provider + contract for direct contract reads. Write tools (`anchor_hash`, `record_transform`) and `chain_balance` require a funded wallet. Default RPC is `https://sepolia.base.org` (public, no API key needed); override with `CHAIN_RPC_URL`.
 
 ### Dependencies Architecture
 - **MCP Framework**: Uses `mcp>=1.0.0` for protocol implementation

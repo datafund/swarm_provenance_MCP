@@ -1500,6 +1500,62 @@ class TestAnchorHash:
         assert "anchored" in text.lower()
         assert "_next: download_data" in text
 
+    async def test_anchor_for_owner_with_data_type(self, server):
+        """Owner + custom data_type should both be passed through."""
+        delegate_owner = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+        mock_client = MagicMock()
+        mock_client.anchor_for.return_value = self._mock_anchor_result(
+            owner=delegate_owner, data_type="document"
+        )
+        mock_client.balance.return_value = self._mock_wallet_info()
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "anchor_hash", {
+                "swarm_hash": TEST_REFERENCE,
+                "owner": delegate_owner,
+                "data_type": "document",
+            })
+
+        assert not result.isError
+        mock_client.anchor_for.assert_called_once_with(
+            TEST_REFERENCE, delegate_owner, "document"
+        )
+
+    async def test_anchor_generic_chain_error(self, server):
+        """Generic ChainError (not a specific subtype) should be caught."""
+        from swarm_provenance_mcp.chain.exceptions import ChainError
+
+        mock_client = MagicMock()
+        mock_client.anchor.side_effect = ChainError("Something unexpected")
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "anchor_hash", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert result.isError
+        text = result.content[0].text
+        assert "retryable: false" in text
+
+    async def test_anchor_low_balance_after_tx(self, server):
+        """Post-tx balance warning should appear when balance is low."""
+        mock_client = MagicMock()
+        mock_client.anchor.return_value = self._mock_anchor_result()
+        mock_client.balance.return_value = self._mock_wallet_info(balance_wei=5 * 10**14)
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "anchor_hash", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "anchored" in text.lower()
+        assert "WARNING" in text
+
     async def test_anchor_hints(self, server):
         """Response should include _next and _related hints."""
         mock_client = MagicMock()
@@ -1580,6 +1636,25 @@ class TestVerifyHash:
         assert "2023" in text  # timestamp 1700000000
         assert "ACTIVE" in text
         mock_client.verify.assert_called_once_with(TEST_REFERENCE)
+
+    async def test_verify_registered_timestamp_zero(self, server):
+        """Timestamp=0 (epoch) should display as 'unknown' since it's falsy."""
+        mock_client = MagicMock()
+        mock_client.verify.return_value = True
+        mock_rec = self._mock_record()
+        mock_rec.timestamp = 0
+        mock_client.get.return_value = mock_rec
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "verify_hash", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "IS registered" in text
+        assert "unknown" in text
 
     async def test_verify_not_registered(self, server):
         """Unregistered hash should show not-found message."""

@@ -1972,6 +1972,21 @@ class TestGetProvenance:
         text = result.content[0].text
         assert "DELETED" in text
 
+    async def test_get_provenance_unknown_status(self, server):
+        """Status value outside 0-2 should display as UNKNOWN with value."""
+        mock_client = MagicMock()
+        mock_client.get.return_value = self._mock_record(status_value=99)
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "UNKNOWN (99)" in text
+
     async def test_get_provenance_timestamp_zero(self, server):
         """Timestamp=0 should display as 'unknown'."""
         mock_client = MagicMock()

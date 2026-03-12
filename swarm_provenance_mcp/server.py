@@ -1822,7 +1822,8 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
             )
 
         if isinstance(e, DataAlreadyRegisteredError):
-            # Not an error — show the existing record
+            # Intentionally NOT isError — idempotent anchoring: if the hash is
+            # already on-chain the agent should see the existing record and proceed.
             from datetime import datetime, timezone
 
             timestamp_str = "unknown"
@@ -1905,7 +1906,11 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
 
 
 async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
-    """Handle verify_hash requests — check if a Swarm hash is registered on-chain."""
+    """Handle verify_hash requests — check if a Swarm hash is registered on-chain.
+
+    Read-only: works without PROVENANCE_WALLET_KEY by creating a temporary
+    provider + contract for direct contract reads (no signing needed).
+    """
     if not CHAIN_AVAILABLE:
         return CallToolResult(
             content=[
@@ -2040,7 +2045,11 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
 
 
 async def handle_get_provenance(arguments: Dict[str, Any]) -> CallToolResult:
-    """Handle get_provenance requests — retrieve full on-chain provenance record."""
+    """Handle get_provenance requests — retrieve full on-chain provenance record.
+
+    Read-only: works without PROVENANCE_WALLET_KEY by creating a temporary
+    provider + contract for direct contract reads (no signing needed).
+    """
     if not CHAIN_AVAILABLE:
         return CallToolResult(
             content=[
@@ -2170,6 +2179,8 @@ async def handle_get_provenance(arguments: Dict[str, Any]) -> CallToolResult:
             ChainConnectionError = None
 
         if DataNotRegisteredError and isinstance(e, DataNotRegisteredError):
+            # Intentionally NOT isError — "not found" is a valid query result,
+            # not a failure. Guide the agent toward anchor_hash instead.
             response_text = f"⛓️  Not found — hash is NOT registered on-chain\n\n"
             response_text += f"   Swarm Hash: {clean_hash}"
             response_text += _format_hints(

@@ -29,9 +29,16 @@ async def _get_tools_from_server(server):
 
 @pytest.fixture
 async def tool_list():
-    """Get the list of tools from the MCP server."""
-    server = create_server()
-    return await _get_tools_from_server(server)
+    """Get the list of tools from the MCP server (with chain tools enabled)."""
+    with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+         patch('swarm_provenance_mcp.server.settings') as mock_settings:
+        mock_settings.chain_enabled = True
+        mock_settings.mcp_server_name = "test"
+        mock_settings.mcp_server_version = "0.1.0"
+        mock_settings.default_stamp_amount = 2000000000
+        mock_settings.default_stamp_depth = 17
+        server = create_server()
+        return await _get_tools_from_server(server)
 
 
 class TestToolDefinitions:
@@ -64,7 +71,12 @@ class TestToolDefinitions:
             'check_stamp_health',
             'get_wallet_info',
             'get_notary_info',
-            'health_check'
+            'health_check',
+            'chain_balance',
+            'chain_health',
+            'anchor_hash',
+            'verify_hash',
+            'get_provenance',
         }
 
         actual_tools = {tool.name for tool in tool_list}
@@ -127,7 +139,12 @@ class TestToolDefinitions:
             'check_stamp_health': ['stamp_id'],
             'get_wallet_info': [],
             'get_notary_info': [],
-            'health_check': []
+            'health_check': [],
+            'chain_balance': [],
+            'chain_health': [],
+            'anchor_hash': ['swarm_hash'],
+            'verify_hash': ['swarm_hash'],
+            'get_provenance': ['swarm_hash'],
         }
 
         for tool in tool_list:

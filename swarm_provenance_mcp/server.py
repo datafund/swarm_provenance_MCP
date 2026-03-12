@@ -106,7 +106,8 @@ These register Swarm hashes in the DataProvenance smart contract on Base Sepolia
 - anchor_hash — register a Swarm hash on-chain (costs gas, requires funded wallet)
 - verify_hash — check if a Swarm hash is registered on-chain (read-only, no gas)
 - get_provenance — retrieve full provenance record: owner, timestamp, data type, status, transformations, accessors (read-only)
-- Additional chain tools (record_transform, get_provenance_chain, etc.) will be added when enabled.
+- record_transform — record data transformation linking original to new hash, creating lineage (costs gas; optionally restricts original)
+- Additional chain tools (get_provenance_chain, etc.) will be added when enabled.
 The health_check tool reports chain status alongside gateway status.
 
 COMPANION SERVERS:
@@ -239,6 +240,7 @@ ALL_TOOL_NAMES = [
     "anchor_hash",
     "verify_hash",
     "get_provenance",
+    "record_transform",
 ]
 
 
@@ -593,6 +595,36 @@ def create_server() -> Server:
                             "required": ["swarm_hash"],
                         },
                     ),
+                    Tool(
+                        name="record_transform",
+                        description="Record a data transformation on-chain, linking the original data to its transformed version. Creates a verifiable lineage trail. The original hash must already be anchored. Optionally restricts access to the original data after transformation. Costs gas.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "original_hash": {
+                                    "type": "string",
+                                    "description": "64-character hex Swarm reference of the original data (must be already anchored)",
+                                    "pattern": "^[a-fA-F0-9]{64}$",
+                                },
+                                "new_hash": {
+                                    "type": "string",
+                                    "description": "64-character hex Swarm reference of the transformed data",
+                                    "pattern": "^[a-fA-F0-9]{64}$",
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "Description of the transformation (e.g., 'Anonymized PII', 'Filtered for region EU'). Max 256 characters.",
+                                    "maxLength": 256,
+                                },
+                                "restrict_original": {
+                                    "type": "boolean",
+                                    "description": "If true, set the original data status to RESTRICTED after recording the transformation. Useful when the original contains sensitive data that should no longer be accessed directly.",
+                                    "default": False,
+                                },
+                            },
+                            "required": ["original_hash", "new_hash"],
+                        },
+                    ),
                 ]
             )
 
@@ -633,6 +665,8 @@ def create_server() -> Server:
                 return await handle_verify_hash(arguments)
             elif name == "get_provenance":
                 return await handle_get_provenance(arguments)
+            elif name == "record_transform":
+                return await handle_record_transform(arguments)
             else:
                 return CallToolResult(
                     content=[
@@ -2200,6 +2234,206 @@ async def handle_get_provenance(arguments: Dict[str, Any]) -> CallToolResult:
                         f"Chain error: {str(e)}",
                         retryable=is_conn_error,
                         next_tool="chain_health" if is_conn_error else None,
+                    ),
+                )
+            ],
+            isError=True,
+        )
+
+
+async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
+    """Handle record_transform requests — record a data transformation on-chain.
+
+    Write operation: requires PROVENANCE_WALLET_KEY and gas. Links an original
+    Swarm hash to a transformed version, creating verifiable data lineage.
+    Optionally restricts the original data after transformation.
+    """
+    if not CHAIN_AVAILABLE:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        "Chain module not available. Install blockchain dependencies: pip install -e .[blockchain]",
+                        retryable=False,
+                    ),
+                )
+            ],
+            isError=True,
+        )
+    if not chain_client:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        "Chain client not initialized. Set PROVENANCE_WALLET_KEY to enable wallet operations.",
+                        retryable=False,
+                        next_tool="chain_health",
+                    ),
+                )
+            ],
+            isError=True,
+        )
+
+    try:
+        original_hash = arguments.get("original_hash")
+        if not original_hash:
+            raise ValueError("original_hash is required")
+        clean_original = validate_and_clean_reference_hash(original_hash)
+
+        new_hash = arguments.get("new_hash")
+        if not new_hash:
+            raise ValueError("new_hash is required")
+        clean_new = validate_and_clean_reference_hash(new_hash)
+
+        if clean_original == clean_new:
+            raise ValueError("original_hash and new_hash must be different")
+
+        description = arguments.get("description", "")
+        if len(description) > 256:
+            raise ValueError("description must be 256 characters or fewer")
+
+        restrict_original = arguments.get("restrict_original", False)
+
+        result = chain_client.transform(clean_original, clean_new, description)
+
+        response_text = f"⛓️  Transformation recorded on-chain\n\n"
+        response_text += f"   Original: {result.original_hash}\n"
+        response_text += f"   Transformed: {result.new_hash}\n"
+        if description:
+            response_text += f"   Description: {description}\n"
+        response_text += f"   Tx Hash: {result.tx_hash}\n"
+        response_text += f"   Block: {result.block_number:,}\n"
+        response_text += f"   Gas Used: {result.gas_used:,}"
+        if result.explorer_url:
+            response_text += f"\n   Explorer: {result.explorer_url}"
+
+        # Optionally restrict the original data after transformation
+        if restrict_original:
+            try:
+                chain_client.set_status(clean_original, 1)  # 1 = RESTRICTED
+                response_text += f"\n\n   ⚠️  Original data status set to RESTRICTED"
+            except Exception as restrict_err:
+                response_text += (
+                    f"\n\n   ⚠️  Transform succeeded but failed to restrict original: "
+                    f"{str(restrict_err)}"
+                )
+
+        # Post-tx balance check
+        try:
+            wallet_info = chain_client.balance()
+            guidance = _format_funding_guidance(
+                wallet_info.address, wallet_info.balance_wei, wallet_info.chain
+            )
+            response_text += guidance
+        except Exception:
+            pass  # Non-critical — don't fail the success response
+
+        response_text += _format_hints(
+            "get_provenance", ["download_data", "chain_balance"]
+        )
+
+        return CallToolResult(content=[TextContent(type="text", text=response_text)])
+
+    except ValueError as e:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        f"Validation error: {str(e)}",
+                        retryable=False,
+                    ),
+                )
+            ],
+            isError=True,
+        )
+    except Exception as e:
+        try:
+            from .chain.exceptions import (
+                DataNotRegisteredError,
+                ChainTransactionError,
+                ChainConnectionError,
+                ChainValidationError,
+            )
+        except ImportError:
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(
+                            f"Chain error: {str(e)}", retryable=False
+                        ),
+                    )
+                ],
+                isError=True,
+            )
+
+        if isinstance(e, DataNotRegisteredError):
+            # Intentionally NOT isError — guide the agent to anchor first.
+            response_text = f"⛓️  Original hash is not registered on-chain\n\n"
+            response_text += f"   The original data must be anchored before recording a transformation.\n"
+            response_text += f"   Hash: {e.data_hash}"
+            response_text += _format_hints(
+                "anchor_hash", ["upload_data", "health_check"]
+            )
+            return CallToolResult(
+                content=[TextContent(type="text", text=response_text)]
+            )
+
+        if isinstance(e, ChainTransactionError):
+            msg = f"Transaction failed: {str(e)}"
+            if e.tx_hash:
+                msg += f"\n   Tx Hash: {e.tx_hash}"
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(
+                            msg, retryable=False, next_tool="chain_balance"
+                        ),
+                    )
+                ],
+                isError=True,
+            )
+
+        if isinstance(e, ChainConnectionError):
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(
+                            f"Chain connection error: {str(e)}",
+                            retryable=True,
+                            next_tool="chain_health",
+                        ),
+                    )
+                ],
+                isError=True,
+            )
+
+        if isinstance(e, ChainValidationError):
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(
+                            f"Chain validation error: {str(e)}",
+                            retryable=False,
+                        ),
+                    )
+                ],
+                isError=True,
+            )
+
+        # Generic ChainError or unexpected Exception
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        f"Chain error: {str(e)}", retryable=False
                     ),
                 )
             ],

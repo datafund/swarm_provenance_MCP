@@ -113,6 +113,7 @@ Optional module for on-chain provenance. Requires `pip install -e .[blockchain]`
 - `anchor_hash` - Register Swarm hash on-chain for provenance (optional, chain enabled, costs gas)
 - `verify_hash` - Check if Swarm hash is registered on-chain (optional, chain enabled, read-only)
 - `get_provenance` - Retrieve full on-chain provenance record (optional, chain enabled, read-only)
+- `record_transform` - Record data transformation linking original to new hash (optional, chain enabled, costs gas)
 
 ### Dependencies Architecture
 - **MCP Framework**: Uses `mcp>=1.0.0` for protocol implementation

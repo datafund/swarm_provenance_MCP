@@ -77,6 +77,7 @@ class TestToolDefinitions:
             'anchor_hash',
             'verify_hash',
             'get_provenance',
+            'record_transform',
         }
 
         actual_tools = {tool.name for tool in tool_list}
@@ -145,6 +146,7 @@ class TestToolDefinitions:
             'anchor_hash': ['swarm_hash'],
             'verify_hash': ['swarm_hash'],
             'get_provenance': ['swarm_hash'],
+            'record_transform': ['original_hash', 'new_hash'],
         }
 
         for tool in tool_list:

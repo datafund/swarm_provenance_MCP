@@ -619,6 +619,17 @@ class TestTypoCorrection:
         msg = _suggest_tool_name("xyzzy_foobar_baz")
         assert "Available tools:" in msg
 
+    async def test_chain_tool_typo_suggests_correction(self, server, mock_gateway_client):
+        """Chain tool typos should also get 'Did you mean' suggestions."""
+        from swarm_provenance_mcp.server import _suggest_tool_name
+        msg = _suggest_tool_name("anchor_has")
+        assert "Did you mean" in msg
+        assert "anchor_hash" in msg
+
+        msg = _suggest_tool_name("get_provnance")
+        assert "Did you mean" in msg
+        assert "get_provenance" in msg
+
     async def test_unknown_tool_error_includes_suggestion(self, server, mock_gateway_client):
         """Unknown tool via call_tool should include suggestion and retryable: false."""
         # call_tool_directly doesn't go through create_server's call_tool wrapper,
@@ -1013,6 +1024,20 @@ class TestChainBalance:
         text = result.content[0].text
         assert "_next:" in text
         assert "_related:" in text
+
+    async def test_chain_balance_connection_error(self, server):
+        """balance() raising an exception should be retryable with chain_health hint."""
+        mock_client = MagicMock()
+        mock_client.balance.side_effect = Exception("RPC connection refused")
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "chain_balance", {})
+
+        assert result.isError
+        text = result.content[0].text
+        assert "retryable: true" in text
+        assert "_next: chain_health" in text
 
     async def test_chain_tools_registered_when_enabled(self, server):
         """Chain tools should appear in list_tools when chain is enabled."""

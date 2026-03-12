@@ -24,6 +24,10 @@ env:
     default: "2000000000"
     required: false
   DEFAULT_STAMP_DEPTH:
-    description: Default postage stamp depth (16-24)
+    description: "Default postage stamp depth: 17 (small), 20 (medium), 22 (large)"
     default: "17"
+    required: false
+  PAYMENT_MODE:
+    description: "Gateway payment tier (free = rate-limited free tier, 3 write req/min)"
+    default: "free"
     required: false

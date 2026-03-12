@@ -57,7 +57,9 @@ class TestMCPToolSchemaCompliance:
         # Test that handler functions exist and are callable
         from swarm_provenance_mcp.server import (
             handle_purchase_stamp, handle_get_stamp_status, handle_list_stamps,
-            handle_extend_stamp, handle_upload_data, handle_download_data, handle_health_check
+            handle_extend_stamp, handle_upload_data, handle_download_data,
+            handle_check_stamp_health, handle_get_wallet_info, handle_get_notary_info,
+            handle_health_check
         )
 
         handlers = {
@@ -67,6 +69,9 @@ class TestMCPToolSchemaCompliance:
             'extend_stamp': handle_extend_stamp,
             'upload_data': handle_upload_data,
             'download_data': handle_download_data,
+            'check_stamp_health': handle_check_stamp_health,
+            'get_wallet_info': handle_get_wallet_info,
+            'get_notary_info': handle_get_notary_info,
             'health_check': handle_health_check,
         }
 
@@ -150,6 +155,9 @@ class TestGatewayClientSchemaCompliance:
             'extend_stamp': ['stamp_id', 'amount'],
             'upload_data': ['data', 'stamp_id', 'content_type'],
             'download_data': ['reference'],
+            'check_stamp_health': ['stamp_id'],
+            'get_wallet_info': [],
+            'get_notary_info': [],
             'health_check': [],
         }
 
@@ -171,7 +179,9 @@ class TestGatewayClientSchemaCompliance:
         client = SwarmGatewayClient()
         critical_methods = [
             'purchase_stamp', 'get_stamp_details', 'list_stamps',
-            'extend_stamp', 'upload_data', 'download_data', 'health_check'
+            'extend_stamp', 'upload_data', 'download_data',
+            'check_stamp_health', 'get_wallet_info', 'get_notary_info',
+            'health_check'
         ]
 
         for method_name in critical_methods:

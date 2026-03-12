@@ -115,7 +115,67 @@ Our Swarm Provenance MCP server currently provides these tools:
 - `extend_stamp` - Add funds to existing stamps
 - `upload_data` - Store data on Swarm network (4KB limit)
 - `download_data` - Retrieve data from Swarm by reference
+- `check_stamp_health` - Diagnose stamp upload readiness with errors/warnings
+- `get_wallet_info` - Node wallet address and BZZ balance (diagnostic)
+- `get_notary_info` - Check notary signing service availability
 - `health_check` - Verify gateway and network connectivity
+- `chain_balance` - Check on-chain wallet ETH balance with funding guidance *(optional, requires chain enabled)*
+- `chain_health` - Test blockchain RPC connectivity *(optional, requires chain enabled)*
+
+## 🧭 Agent Workflow Guidance
+
+The MCP server includes built-in guidance to help AI agents chain operations correctly:
+
+### Response Hints
+
+Every successful tool response includes `_next` and `_related` hints:
+
+```
+_next: upload_data                    # Recommended next tool
+_related: check_stamp_health, list_stamps  # Other relevant tools
+```
+
+Hints are **contextual** — they adapt based on the result:
+- `list_stamps` with usable stamps → `_next: upload_data`
+- `list_stamps` with no stamps → `_next: purchase_stamp`
+- `check_stamp_health` healthy → `_next: upload_data`
+- `check_stamp_health` unhealthy → `_next: purchase_stamp`
+
+### Structured Errors
+
+Error responses include recovery guidance:
+- `retryable: true` — transient errors (timeouts, rate limits), safe to retry
+- `retryable: false` — permanent errors (validation), fix input and try different approach
+- `_next: <tool>` — recovery tool suggestion
+
+### Adaptive Health Check
+
+`health_check` proactively checks both gateway connectivity and stamp availability:
+- `ready: true` — system is fully ready for uploads
+- `ready: false` + `_recommendations` — explains what's needed before uploading
+
+This allows agents to call `health_check` once and immediately know what to do next.
+
+### MCP Prompts (Workflow Templates)
+
+The server registers prompts that agents can invoke via `prompts/list` and `prompts/get` to get step-by-step workflow instructions:
+
+| Prompt | Use case | Arguments |
+|--------|----------|-----------|
+| `provenance-upload` | Full upload workflow: health check → stamp → upload → verify | `data`, `content_type` |
+| `provenance-verify` | Download and inspect existing data by reference | `reference` |
+| `stamp-management` | Review inventory, diagnose issues, extend or purchase | none |
+
+Prompts are higher-level than individual tools — they describe multi-step workflows so agents know the full sequence without relying on per-tool `_next` hints alone.
+
+### Companion Servers
+
+The `health_check` response includes `_companion_servers` showing related servers in the Fair Data Stack:
+
+- **swarm_connect gateway** (required) — the FastAPI gateway this MCP talks to, with live connected/unreachable status
+- **fds-id MCP** (optional) — identity and signing server for cryptographic provenance chain anchoring
+
+This helps agents understand the ecosystem and identify which servers are needed for advanced workflows like signed provenance data.
 
 ## 🔗 Integration Examples
 

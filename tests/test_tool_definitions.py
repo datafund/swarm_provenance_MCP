@@ -29,9 +29,16 @@ async def _get_tools_from_server(server):
 
 @pytest.fixture
 async def tool_list():
-    """Get the list of tools from the MCP server."""
-    server = create_server()
-    return await _get_tools_from_server(server)
+    """Get the list of tools from the MCP server (with chain tools enabled)."""
+    with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+         patch('swarm_provenance_mcp.server.settings') as mock_settings:
+        mock_settings.chain_enabled = True
+        mock_settings.mcp_server_name = "test"
+        mock_settings.mcp_server_version = "0.1.0"
+        mock_settings.default_stamp_amount = 2000000000
+        mock_settings.default_stamp_depth = 17
+        server = create_server()
+        return await _get_tools_from_server(server)
 
 
 class TestToolDefinitions:
@@ -61,7 +68,17 @@ class TestToolDefinitions:
             'extend_stamp',
             'upload_data',
             'download_data',
-            'health_check'
+            'check_stamp_health',
+            'get_wallet_info',
+            'get_notary_info',
+            'health_check',
+            'chain_balance',
+            'chain_health',
+            'anchor_hash',
+            'verify_hash',
+            'get_provenance',
+            'record_transform',
+            'get_provenance_chain',
         }
 
         actual_tools = {tool.name for tool in tool_list}
@@ -121,7 +138,17 @@ class TestToolDefinitions:
             'extend_stamp': ['stamp_id', 'amount'],
             'upload_data': ['data', 'stamp_id'],
             'download_data': ['reference'],
-            'health_check': []
+            'check_stamp_health': ['stamp_id'],
+            'get_wallet_info': [],
+            'get_notary_info': [],
+            'health_check': [],
+            'chain_balance': [],
+            'chain_health': [],
+            'anchor_hash': ['swarm_hash'],
+            'verify_hash': ['swarm_hash'],
+            'get_provenance': ['swarm_hash'],
+            'record_transform': ['original_hash', 'new_hash'],
+            'get_provenance_chain': ['swarm_hash'],
         }
 
         for tool in tool_list:
@@ -145,6 +172,9 @@ class TestToolDefinitions:
             'extend_stamp': 'extend_stamp',
             'upload_data': 'upload_data',
             'download_data': 'download_data',
+            'check_stamp_health': 'check_stamp_health',
+            'get_wallet_info': 'get_wallet_info',
+            'get_notary_info': 'get_notary_info',
             'health_check': 'health_check'
         }
 
@@ -236,7 +266,9 @@ class TestToolImplementationSync:
         client = SwarmGatewayClient()
         critical_methods = [
             'purchase_stamp', 'get_stamp_details', 'list_stamps',
-            'extend_stamp', 'upload_data', 'download_data', 'health_check'
+            'extend_stamp', 'upload_data', 'download_data',
+            'check_stamp_health', 'get_wallet_info', 'get_notary_info',
+            'health_check'
         ]
 
         for method_name in critical_methods:
@@ -277,6 +309,7 @@ class TestToolFutureCompatibility:
             'swarm_gateway_url',
             'default_stamp_amount',
             'default_stamp_depth',
+            'payment_mode',
             'mcp_server_name',
             'mcp_server_version'
         ]

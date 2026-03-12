@@ -116,6 +116,53 @@ class TestSwarmGatewayClient:
             assert m.last_request.json() == {"amount": 500000000}
 
 
+    def test_check_stamp_health_success(self):
+        """Test successful stamp health check."""
+        stamp_id = "test-stamp-id"
+        with requests_mock.Mocker() as m:
+            expected_response = {
+                "stamp_id": stamp_id,
+                "can_upload": True,
+                "errors": [],
+                "warnings": [],
+                "status": {"exists": True, "usable": True, "utilizationPercent": 10.0}
+            }
+            m.get(f"{self.base_url}/api/v1/stamps/{stamp_id}/check", json=expected_response)
+
+            result = self.client.check_stamp_health(stamp_id)
+
+            assert result == expected_response
+            assert result["can_upload"] is True
+
+    def test_get_wallet_info_success(self):
+        """Test successful wallet info retrieval."""
+        with requests_mock.Mocker() as m:
+            expected_response = {
+                "walletAddress": "0x1234567890abcdef1234567890abcdef12345678",
+                "bzzBalance": "5000000000000000"
+            }
+            m.get(f"{self.base_url}/api/v1/wallet", json=expected_response)
+
+            result = self.client.get_wallet_info()
+
+            assert result == expected_response
+
+    def test_get_notary_info_success(self):
+        """Test successful notary info retrieval."""
+        with requests_mock.Mocker() as m:
+            expected_response = {
+                "enabled": True,
+                "available": True,
+                "address": "0xabcdef",
+                "message": "Notary is operational"
+            }
+            m.get(f"{self.base_url}/api/v1/notary/info", json=expected_response)
+
+            result = self.client.get_notary_info()
+
+            assert result == expected_response
+            assert result["enabled"] is True
+
     def test_request_failure(self):
         """Test handling of request failures."""
         with requests_mock.Mocker() as m:
@@ -136,3 +183,5 @@ class TestSwarmGatewayClient:
             assert request_headers["Content-Type"] == "application/json"
             assert "User-Agent" in request_headers
             assert "swarm-provenance-mcp" in request_headers["User-Agent"]
+            assert "X-Payment-Mode" in request_headers
+            assert request_headers["X-Payment-Mode"] == "free"

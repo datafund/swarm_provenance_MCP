@@ -114,7 +114,9 @@ class TestToolSynchronization:
 
         expected_tools = {
             'purchase_stamp', 'get_stamp_status', 'list_stamps',
-            'extend_stamp', 'upload_data', 'download_data', 'health_check'
+            'extend_stamp', 'upload_data', 'download_data',
+            'check_stamp_health', 'get_wallet_info', 'get_notary_info',
+            'health_check'
         }
 
         found_tools = set(tools.keys())
@@ -128,11 +130,21 @@ class TestToolSynchronization:
 
         expected_methods = {
             'purchase_stamp', 'get_stamp_details', 'list_stamps',
-            'extend_stamp', 'upload_data', 'download_data', 'health_check'
+            'extend_stamp', 'upload_data', 'download_data',
+            'check_stamp_health', 'get_wallet_info', 'get_notary_info',
+            'health_check'
         }
 
         missing_methods = expected_methods - methods
         assert not missing_methods, f"Gateway methods missing from source: {missing_methods}"
+
+    def test_new_gateway_methods_exist_in_source(self, gateway_client_source_code):
+        """Test that new gateway methods exist in source code."""
+        methods = self.extract_gateway_methods(gateway_client_source_code)
+
+        new_methods = {'check_stamp_health', 'get_wallet_info', 'get_notary_info'}
+        missing = new_methods - methods
+        assert not missing, f"New gateway methods missing from source: {missing}"
 
     def test_tool_handlers_implemented(self, server_source_code):
         """Test that all tools have handler implementations."""
@@ -151,6 +163,29 @@ class TestToolSynchronization:
             # Error handling is recommended for all handlers
             if not handler_info.get('has_error_handling'):
                 print(f"Warning: Tool '{tool_name}' handler may lack error handling")
+
+    async def test_runtime_prompt_registration(self):
+        """Test that MCP prompts are properly registered at runtime."""
+        from mcp.types import ListPromptsRequest
+
+        server = create_server()
+
+        list_prompts_handler = None
+        for handler_key, handler in server.request_handlers.items():
+            if hasattr(handler, '__name__') and 'list_prompts' in str(handler):
+                list_prompts_handler = handler
+                break
+
+        assert list_prompts_handler is not None, "list_prompts handler not registered"
+
+        result = await list_prompts_handler(ListPromptsRequest(method="prompts/list"))
+        inner = result.root if hasattr(result, 'root') else result
+        prompts = inner.prompts if hasattr(inner, 'prompts') else inner
+        prompt_names = {p.name for p in prompts}
+
+        expected_prompts = {'provenance-upload', 'provenance-verify', 'stamp-management'}
+        missing = expected_prompts - prompt_names
+        assert not missing, f"Prompts not registered at runtime: {missing}"
 
     async def test_runtime_tool_registration(self):
         """Test that tools are properly registered at runtime."""
@@ -175,7 +210,9 @@ class TestToolSynchronization:
 
         expected_tools = {
             'purchase_stamp', 'get_stamp_status', 'list_stamps',
-            'extend_stamp', 'upload_data', 'download_data', 'health_check'
+            'extend_stamp', 'upload_data', 'download_data',
+            'check_stamp_health', 'get_wallet_info', 'get_notary_info',
+            'health_check'
         }
 
         missing_tools = expected_tools - tool_names
@@ -187,7 +224,9 @@ class TestToolSynchronization:
 
         expected_methods = {
             'purchase_stamp', 'get_stamp_details', 'list_stamps',
-            'extend_stamp', 'upload_data', 'download_data', 'health_check'
+            'extend_stamp', 'upload_data', 'download_data',
+            'check_stamp_health', 'get_wallet_info', 'get_notary_info',
+            'health_check'
         }
 
         actual_methods = {name for name, _ in inspect.getmembers(client, inspect.ismethod)

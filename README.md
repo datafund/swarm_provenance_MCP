@@ -34,6 +34,7 @@ This MCP server is specifically designed for provenance data use cases, leveragi
 - **Data Download**: Download data from Swarm network by reference
 - **Provenance Storage**: Store data with provenance metadata for immutable, verifiable records
 - **Health Monitoring**: Check gateway and Swarm network connectivity
+- **Chain Diagnostics** (optional): Check on-chain wallet balance and RPC connectivity for provenance anchoring
 
 ## Installation
 
@@ -103,7 +104,8 @@ docker compose run --rm swarm-provenance-mcp
 |----------|-------------|---------|
 | `SWARM_GATEWAY_URL` | Gateway endpoint URL | `https://provenance-gateway.datafund.io` |
 | `DEFAULT_STAMP_AMOUNT` | Default stamp amount in wei | `2000000000` |
-| `DEFAULT_STAMP_DEPTH` | Default stamp depth (16-24) | `17` |
+| `DEFAULT_STAMP_DEPTH` | Default stamp depth: 17 (small), 20 (medium), 22 (large) | `17` |
+| `PAYMENT_MODE` | Gateway payment tier (`free` = 3 write req/min) | `free` |
 
 ## Configuration
 
@@ -112,6 +114,17 @@ Environment variables (set in `.env` file):
 - `SWARM_GATEWAY_URL`: URL of the swarm_connect FastAPI gateway (default: `https://provenance-gateway.datafund.io`)
 - `DEFAULT_STAMP_AMOUNT`: Default amount for new stamps in wei (default: `2000000000`)
 - `DEFAULT_STAMP_DEPTH`: Default depth for new stamps (default: `17`)
+- `PAYMENT_MODE`: Gateway payment tier (default: `free` — rate limited to 3 write requests/minute)
+
+#### Chain Anchoring (Optional)
+
+- `CHAIN_ENABLED`: Enable on-chain provenance anchoring (default: `false`)
+- `CHAIN_NAME`: Blockchain network — `base-sepolia` (testnet) or `base` (mainnet) (default: `base-sepolia`)
+- `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x prefix)
+- `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set)
+- `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set)
+
+When chain is enabled with `pip install -e .[blockchain]`, additional tools (`chain_balance`, `chain_health`) become available for checking wallet balance and RPC connectivity.
 
 ### Gateway Options
 
@@ -246,8 +259,50 @@ Download data from the Swarm network using a reference hash.
 }
 ```
 
+#### `check_stamp_health`
+Run a health check on a specific stamp. Returns whether uploads can proceed, plus any errors or warnings with actionable suggestions.
+
+**Parameters:**
+- `stamp_id` (string): The batch ID of the stamp to check
+
+**Example:**
+```json
+{
+  "name": "check_stamp_health",
+  "arguments": {
+    "stamp_id": "000de42079daebd58347bb38ce05bdc477701d93651d3bba318a9aee3fbd786a"
+  }
+}
+```
+
+#### `get_wallet_info`
+Get the gateway node's wallet address and BZZ balance. Useful for checking if the node has sufficient funds. Note: this is a debugging/diagnostic tool and may be removed in future versions.
+
+**Parameters:** None
+
+**Example:**
+```json
+{
+  "name": "get_wallet_info",
+  "arguments": {}
+}
+```
+
+#### `get_notary_info`
+Check whether the notary signing service is enabled and available on the gateway.
+
+**Parameters:** None
+
+**Example:**
+```json
+{
+  "name": "get_notary_info",
+  "arguments": {}
+}
+```
+
 #### `health_check`
-Check gateway and Swarm network connectivity status.
+Check gateway and Swarm network connectivity status. Returns an adaptive status including stamp availability, a `ready` flag indicating whether uploads can proceed, and recommendations for next steps.
 
 **Parameters:** None
 
@@ -258,6 +313,82 @@ Check gateway and Swarm network connectivity status.
   "arguments": {}
 }
 ```
+
+#### `chain_balance` *(optional — requires `CHAIN_ENABLED=true` and blockchain dependencies)*
+Check the on-chain wallet ETH balance used for provenance anchoring. Returns wallet address, balance, chain info, and actionable funding guidance when balance is low.
+
+**Parameters:** None
+
+**Example:**
+```json
+{
+  "name": "chain_balance",
+  "arguments": {}
+}
+```
+
+#### `chain_health` *(optional — requires `CHAIN_ENABLED=true` and blockchain dependencies)*
+Test blockchain RPC connectivity for on-chain provenance. Returns connection status, chain name, chain ID, latest block number, and RPC response time. Does not require a wallet key.
+
+**Parameters:** None
+
+**Example:**
+```json
+{
+  "name": "chain_health",
+  "arguments": {}
+}
+```
+
+### Response Format
+
+All tool responses include structured metadata to help agents chain operations efficiently:
+
+#### Success Responses
+
+Every successful response appends workflow hints:
+
+```
+_next: <recommended_tool>        # The logical next tool to call
+_related: <tool1>, <tool2>       # Other relevant tools
+```
+
+Hints are contextual — for example, `list_stamps` suggests `_next: upload_data` when usable stamps exist, but `_next: purchase_stamp` when none are available.
+
+#### Error Responses
+
+Error responses include structured recovery information:
+
+```
+retryable: true|false            # Whether retrying the same call may succeed
+_next: <recovery_tool>           # Tool to call for recovery
+```
+
+- **retryable: true** — transient errors (timeouts, rate limits, 502/503/504). Wait and retry.
+- **retryable: false** — permanent errors (validation failures, unknown tools). Fix input and try a different approach.
+
+#### Adaptive Health Check
+
+The `health_check` tool returns additional fields:
+
+```
+ready: true|false                # Whether the system is ready for uploads
+_recommendations:                # Actionable suggestions (only when issues exist)
+  - No stamps found — purchase one before uploading
+_companion_servers:              # Related servers in the ecosystem
+  - swarm_connect gateway: <url> (connected|unreachable)
+  - fds-id MCP: optional (identity/signing for provenance chain anchoring)
+```
+
+### MCP Prompts
+
+The server provides workflow prompts that agents can invoke via `prompts/list` and `prompts/get`. These give step-by-step instructions for common tasks:
+
+| Prompt | Description | Arguments |
+|--------|-------------|-----------|
+| `provenance-upload` | Upload data to Swarm: health check, stamp selection, upload, verify | `data` (required), `content_type` (optional) |
+| `provenance-verify` | Download and verify existing data by reference | `reference` (required) |
+| `stamp-management` | Review stamp inventory, diagnose issues, recommend actions | none |
 
 ## Docker
 
@@ -313,20 +444,22 @@ Add to your `claude_desktop_config.json`:
 │                 │    │                 │    │   Gateway       │
 │ • Claude        │    │ • Tool handlers │    │                 │
 │ • Other LLMs    │    │ • Gateway client│    │ • Purchase API  │
-│ • Custom agents │    │ • Error handling│    │ • Status API    │
-└─────────────────┘    └─────────────────┘    │ • Extension API │
-                                              └─────────┬───────┘
-                                                        │
-                                              ┌─────────▼───────┐
-                                              │  Swarm Network  │
-                                              │   (Bee Node)    │
-                                              └─────────────────┘
+│ • Custom agents │    │ • Chain client  │    │ • Status API    │
+└─────────────────┘    │ • Error handling│    │ • Extension API │
+                       └────────┬────────┘    └─────────┬───────┘
+                                │                       │
+                       ┌────────▼────────┐    ┌─────────▼───────┐
+                       │  Base Sepolia   │    │  Swarm Network  │
+                       │  (DataProv.     │    │   (Bee Node)    │
+                       │   Contract)     │    └─────────────────┘
+                       └─────────────────┘
 ```
 
 ### Components
 
 - **MCP Server**: Exposes tools via the Model Context Protocol
 - **Gateway Client**: HTTP client for communicating with swarm_connect
+- **Chain Client** (optional): On-chain provenance via DataProvenance smart contract on Base Sepolia
 - **Configuration**: Environment-based settings management
 - **Error Handling**: Comprehensive error handling and logging
 

@@ -4,7 +4,7 @@
     "description": "Purchase a new Swarm postage stamp with configurable amount and depth.",
     "parameters": {
       "amount": "integer (optional) — stamp amount in wei",
-      "depth": "integer (optional) — stamp depth 16-24",
+      "depth": "integer (optional) — stamp depth: 17 (small), 20 (medium), 22 (large)",
       "label": "string (optional) — human-readable label"
     }
   },
@@ -43,6 +43,23 @@
     "parameters": {
       "reference": "string (required) — 64-char hex Swarm reference"
     }
+  },
+  {
+    "name": "check_stamp_health",
+    "description": "Diagnose stamp upload readiness with errors, warnings, and suggestions.",
+    "parameters": {
+      "stamp_id": "string (required) — 64-char hex batch ID"
+    }
+  },
+  {
+    "name": "get_wallet_info",
+    "description": "Get gateway node wallet address and BZZ balance (diagnostic tool).",
+    "parameters": {}
+  },
+  {
+    "name": "get_notary_info",
+    "description": "Check whether the notary signing service is available on the gateway.",
+    "parameters": {}
   },
   {
     "name": "health_check",

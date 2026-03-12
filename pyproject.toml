@@ -50,6 +50,10 @@ test = [
     "psutil>=5.9.0",
     "jsonschema>=4.0.0",
 ]
+blockchain = [
+    "web3>=6.0.0",
+    "eth-account>=0.10.0",
+]
 security = [
     "safety>=2.0.0",
     "bandit>=1.7.0",
@@ -61,6 +65,9 @@ swarm-provenance-mcp = "swarm_provenance_mcp.server:main_sync"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["swarm_provenance_mcp*"]
+
+[tool.setuptools.package-data]
+"swarm_provenance_mcp.chain" = ["abi/*.json"]
 
 [tool.black]
 line-length = 88
@@ -87,6 +94,7 @@ markers = [
     "regression: marks tests as regression tests",
     "smoke: marks tests as smoke tests for quick validation",
     "docker: marks tests requiring a running Docker daemon",
+    "blockchain: marks tests requiring blockchain dependencies (web3, eth-account)",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:pydantic.*",

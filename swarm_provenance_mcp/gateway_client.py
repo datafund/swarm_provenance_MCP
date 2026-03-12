@@ -77,7 +77,7 @@ class SwarmGatewayClient:
         if label:
             payload["label"] = label
 
-        response = self.session.post(url, json=payload, timeout=30)
+        response = self.session.post(url, json=payload, timeout=60)
         self._raise_with_detail(response)
         return response.json()
 

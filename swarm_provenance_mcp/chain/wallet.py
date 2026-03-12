@@ -26,8 +26,7 @@ def _import_eth_account():
             _Account = Account
         except ImportError as e:
             raise ChainConfigurationError(
-                "eth-account not available. "
-                "Reinstall with: pip install -e ."
+                "eth-account not available. " "Reinstall with: pip install -e ."
             ) from e
     return _Account
 

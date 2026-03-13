@@ -35,12 +35,14 @@ This MCP server is specifically designed for provenance data use cases, leveragi
 - **Provenance Storage**: Store data with provenance metadata for immutable, verifiable records
 - **Health Monitoring**: Check gateway and Swarm network connectivity
 - **Chain Diagnostics** (optional): Check on-chain wallet balance and RPC connectivity for provenance anchoring
+- **On-Chain Anchoring** (optional): Register Swarm hashes on-chain for immutable provenance records
+- **Transformation Lineage** (optional): Record and trace data transformations through on-chain event logs
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.8 or higher (use `python3` command)
+- Python 3.10 or higher (use `python3` command)
 - Internet connection (uses public gateway by default)
 - Optional: Self-hosted `swarm_connect` gateway service (see Gateway Options below)
 
@@ -54,7 +56,7 @@ cd swarm_provenance_mcp
 
 2. Create and activate a virtual environment:
 ```bash
-python -m venv venv
+python3 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
@@ -123,8 +125,10 @@ Environment variables (set in `.env` file):
 - `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x prefix)
 - `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set)
 - `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set)
+- `CHAIN_EXPLORER_URL`: Custom block explorer URL (uses chain preset if not set)
+- `CHAIN_GAS_LIMIT`: Explicit gas limit for chain transactions (skips estimation if set)
 
-When chain is enabled, additional tools become available: `chain_balance`, `chain_health`, `anchor_hash`, `verify_hash`, `get_provenance`, `record_transform`, `get_provenance_chain`. Blockchain dependencies (web3, eth-account) are included in the default install. Read-only tools work without a wallet key; write tools require `PROVENANCE_WALLET_KEY` with a funded wallet.
+When chain is enabled, additional tools become available: `chain_balance`, `chain_health`, `anchor_hash`, `verify_hash`, `get_provenance`, `record_transform`, `get_provenance_chain`. Blockchain dependencies (web3, eth-account) are included in the default install. Read-only tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `chain_health`) work without a wallet key; write tools (`anchor_hash`, `record_transform`) and `chain_balance` require `PROVENANCE_WALLET_KEY` with a funded wallet.
 
 ### Gateway Options
 
@@ -340,6 +344,97 @@ Test blockchain RPC connectivity for on-chain provenance. Returns connection sta
 }
 ```
 
+#### `anchor_hash` *(optional — requires `CHAIN_ENABLED=true` and `PROVENANCE_WALLET_KEY`)*
+Register a Swarm reference hash on the blockchain, creating an immutable provenance record with owner, timestamp, and data type. Costs gas. If the hash is already registered, returns the existing record without error.
+
+**Parameters:**
+- `swarm_hash` (string, required): 64-character hex Swarm reference hash to anchor
+- `data_type` (string): Data type/category (default: `swarm-provenance`, max 64 chars)
+- `owner` (string): Ethereum address to register as owner (defaults to wallet address; requires delegate authorization for other addresses)
+
+**Example:**
+```json
+{
+  "name": "anchor_hash",
+  "arguments": {
+    "swarm_hash": "a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789a",
+    "data_type": "provenance-metadata"
+  }
+}
+```
+
+#### `verify_hash` *(optional — requires `CHAIN_ENABLED=true`)*
+Check whether a Swarm reference hash is registered on the blockchain. Returns verified status with basic provenance info (owner, timestamp, data type) if found. Read-only — no gas or wallet key required.
+
+**Parameters:**
+- `swarm_hash` (string, required): 64-character hex Swarm reference hash to verify
+
+**Example:**
+```json
+{
+  "name": "verify_hash",
+  "arguments": {
+    "swarm_hash": "a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789a"
+  }
+}
+```
+
+#### `get_provenance` *(optional — requires `CHAIN_ENABLED=true`)*
+Retrieve the full on-chain provenance record for a Swarm reference hash. Returns owner, registration timestamp, data type, status, transformations, and accessors. Read-only — no gas or wallet key required.
+
+**Parameters:**
+- `swarm_hash` (string, required): 64-character hex Swarm reference hash to look up
+
+**Example:**
+```json
+{
+  "name": "get_provenance",
+  "arguments": {
+    "swarm_hash": "a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789a"
+  }
+}
+```
+
+#### `record_transform` *(optional — requires `CHAIN_ENABLED=true` and `PROVENANCE_WALLET_KEY`)*
+Record a data transformation on-chain, linking the original data to its transformed version. Creates a verifiable lineage trail. The original hash must already be anchored. Costs gas.
+
+**Parameters:**
+- `original_hash` (string, required): 64-character hex Swarm reference of the original data (must be already anchored)
+- `new_hash` (string, required): 64-character hex Swarm reference of the transformed data
+- `description` (string): Description of the transformation (max 256 chars, e.g., "Anonymized PII")
+- `restrict_original` (boolean): If true, set the original data status to RESTRICTED after recording the transformation (default: false)
+
+**Example:**
+```json
+{
+  "name": "record_transform",
+  "arguments": {
+    "original_hash": "a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789a",
+    "new_hash": "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789ab",
+    "description": "Filtered for region EU",
+    "restrict_original": false
+  }
+}
+```
+
+#### `get_provenance_chain` *(optional — requires `CHAIN_ENABLED=true`)*
+Follow the transformation lineage for a Swarm hash. Walks through all recorded transformations using on-chain event logs to show how data evolved — from original to each derived version. Read-only — no gas or wallet key required.
+
+**Parameters:**
+- `swarm_hash` (string, required): 64-character hex Swarm reference hash to trace lineage for
+- `max_depth` (integer): Maximum depth to traverse (default: 10, range: 1–50)
+
+**Example:**
+```json
+{
+  "name": "get_provenance_chain",
+  "arguments": {
+    "swarm_hash": "a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789a",
+    "max_depth": 10
+  }
+}
+```
+
 ### Response Format
 
 All tool responses include structured metadata to help agents chain operations efficiently:
@@ -389,6 +484,15 @@ The server provides workflow prompts that agents can invoke via `prompts/list` a
 | `provenance-upload` | Upload data to Swarm: health check, stamp selection, upload, verify | `data` (required), `content_type` (optional) |
 | `provenance-verify` | Download and verify existing data by reference | `reference` (required) |
 | `stamp-management` | Review stamp inventory, diagnose issues, recommend actions | none |
+| `provenance-chain-workflow` | End-to-end on-chain provenance: store, anchor, and optionally record a transformation | `data` (required), `transform_description` (optional) |
+
+### MCP Resources
+
+The server exposes on-demand knowledge resources that agents can load via `resources/list` and `resources/read`:
+
+| Resource URI | MIME Type | Description |
+|-------------|-----------|-------------|
+| `provenance://skills` | `text/markdown` | Provenance skills guide — concepts, critical rules, workflows, diagrams, and error recovery |
 
 ## Docker
 
@@ -521,6 +625,28 @@ cp .env.example .env
 
 **Alternative (if package is installed)**: You can use `"command": "swarm-provenance-mcp"` instead after running `pip install -e .`
 
+#### With on-chain provenance
+
+To enable blockchain anchoring, add an `"env"` block to the config. You can use this instead of (or alongside) a `.env` file:
+
+```json
+{
+  "mcpServers": {
+    "swarm-provenance": {
+      "command": "/path/to/swarm_provenance_mcp/venv/bin/python",
+      "args": ["-m", "swarm_provenance_mcp.server"],
+      "cwd": "/path/to/swarm_provenance_mcp",
+      "env": {
+        "CHAIN_ENABLED": "true",
+        "PROVENANCE_WALLET_KEY": "0x...your_private_key_here..."
+      }
+    }
+  }
+}
+```
+
+Read-only chain tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `chain_health`) work without `PROVENANCE_WALLET_KEY`. Write tools (`anchor_hash`, `record_transform`) and `chain_balance` require a funded wallet — see [Chain Anchoring](#chain-anchoring-optional) for details.
+
 #### Docker-based
 
 Use Docker for a zero-install experience — no Python, venv, or pip required:
@@ -540,9 +666,60 @@ Use Docker for a zero-install experience — no Python, venv, or pip required:
 }
 ```
 
+To enable chain anchoring with Docker, add the chain env vars:
+
+```json
+{
+  "mcpServers": {
+    "swarm-provenance": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-e", "SWARM_GATEWAY_URL=https://provenance-gateway.datafund.io",
+        "-e", "CHAIN_ENABLED=true",
+        "-e", "PROVENANCE_WALLET_KEY=0x...your_private_key_here...",
+        "ghcr.io/datafund/swarm-provenance-mcp"
+      ]
+    }
+  }
+}
+```
+
 > **Docker Desktop MCP Toolkit**: If you use Docker Desktop with MCP Toolkit support, the server can be discovered automatically from the Docker MCP catalog.
 
-4. **Restart Claude Desktop** and test with: "List all available Swarm stamps"
+4. **Restart Claude Desktop** and verify the connection.
+
+### Getting Started
+
+After setup, try these prompts in Claude Desktop to verify everything works:
+
+**Check connectivity:**
+> "Run a health check on the Swarm gateway"
+
+Expected: a status showing `healthy`, gateway URL, and response time. If chain is enabled, you'll also see RPC connectivity and wallet balance info.
+
+**List stamps:**
+> "List all available Swarm stamps"
+
+Expected: a list of postage stamps with batch IDs, or a message that no stamps exist yet (with a suggestion to purchase one).
+
+**Full upload workflow:**
+> "Upload the text 'Hello Swarm!' to the Swarm network"
+
+Claude will walk through: purchasing a stamp, waiting for it to propagate, uploading the data, and returning the Swarm reference hash.
+
+**Verify on-chain (if chain enabled):**
+> "Anchor the uploaded hash on-chain and verify it"
+
+Claude will register the hash on the blockchain and confirm the provenance record.
+
+### Troubleshooting Setup
+
+If Claude Desktop doesn't show the Swarm tools:
+1. Check the config file path is correct for your OS
+2. Verify the `command` path points to the Python executable inside your venv
+3. Check Claude Desktop logs: **Help > Show Logs** (look for MCP connection errors)
+4. Test manually: run `swarm-provenance-mcp` in your terminal — it should start without errors and wait for MCP input
 
 ## Development
 
@@ -590,6 +767,8 @@ ruff check swarm_provenance_mcp/
   - `requests>=2.31.0`: HTTP client for gateway communication
   - `pydantic>=2.0.0`: Data validation and settings
   - `python-dotenv>=1.0.0`: Environment configuration
+  - `web3>=6.0.0`: Ethereum blockchain interaction for on-chain provenance
+  - `eth-account>=0.10.0`: Wallet and transaction signing for chain anchoring
 
 - **Development Dependencies**:
   - `pytest`: Testing framework
@@ -608,7 +787,8 @@ This MCP server is designed to work with AI agents that support the Model Contex
 4. **Store provenance data**: Upload data with provenance metadata to immutable decentralized storage
 5. **Verify data integrity**: Retrieve and verify immutable records from Swarm network
 6. **Data lifecycle management**: Handle complete provenance workflows from creation to verification
-7. **Automate workflows**: Integrate stamp management and data storage into larger AI workflows
+7. **Track data lineage**: Record transformations and trace the full provenance chain of derived data
+8. **Automate workflows**: Integrate stamp management and data storage into larger AI workflows
 
 ## Troubleshooting
 
@@ -618,6 +798,9 @@ This MCP server is designed to work with AI agents that support the Model Contex
 2. **Authentication errors**: Check that the gateway doesn't require authentication
 3. **Invalid stamp IDs**: Verify stamp IDs are valid batch IDs from the Swarm network
 4. **Timeout errors**: Increase timeout values if operations are taking too long
+5. **Chain: "wallet key not configured"**: Set `PROVENANCE_WALLET_KEY` in `.env` for write operations (`anchor_hash`, `record_transform`). Read-only tools work without it.
+6. **Chain: "insufficient funds"**: Fund your wallet with testnet ETH (Base Sepolia faucet) or bridge ETH to Base mainnet. Run `chain_balance` for guidance.
+7. **Chain: "already registered"**: The hash is already anchored on-chain. Use `get_provenance` to view the existing record.
 
 ### Logging
 

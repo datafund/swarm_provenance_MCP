@@ -19,20 +19,45 @@ class SwarmGatewayClient:
         """
         self.base_url = (base_url or settings.swarm_gateway_url).rstrip("/")
         self.session = requests.Session()
-        self.session.headers.update({
-            "Content-Type": "application/json",
-            "User-Agent": f"{settings.mcp_server_name}/{settings.mcp_server_version}"
-        })
+        self.session.headers.update(
+            {
+                "Content-Type": "application/json",
+                "User-Agent": f"{settings.mcp_server_name}/{settings.mcp_server_version}",
+            }
+        )
 
         # Add payment mode header for x402 gateway access
         if settings.payment_mode:
             self.session.headers["X-Payment-Mode"] = settings.payment_mode
 
+    def _raise_with_detail(self, response):
+        """Raise HTTPError enriched with gateway error details."""
+        if response.ok:
+            return
+        detail = ""
+        try:
+            body = response.json()
+            d = body.get("detail", body)
+            if isinstance(d, dict):
+                detail = d.get("message", "") or d.get("error", "") or str(d)
+            elif isinstance(d, list):
+                detail = "; ".join(
+                    item.get("msg", str(item)) if isinstance(item, dict) else str(item)
+                    for item in d
+                )
+            elif isinstance(d, str):
+                detail = d
+        except Exception:
+            detail = response.text[:200] if response.text else ""
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as e:
+            if detail:
+                raise requests.HTTPError(f"{e} — {detail}", response=response) from e
+            raise
+
     def purchase_stamp(
-        self,
-        amount: int,
-        depth: int,
-        label: Optional[str] = None
+        self, amount: int, depth: int, label: Optional[str] = None
     ) -> Dict[str, Any]:
         """Purchase a new postage stamp.
 
@@ -48,15 +73,12 @@ class SwarmGatewayClient:
             RequestException: If the request fails
         """
         url = f"{self.base_url}/api/v1/stamps/"
-        payload = {
-            "amount": amount,
-            "depth": depth
-        }
+        payload = {"amount": amount, "depth": depth}
         if label:
             payload["label"] = label
 
-        response = self.session.post(url, json=payload, timeout=30)
-        response.raise_for_status()
+        response = self.session.post(url, json=payload, timeout=60)
+        self._raise_with_detail(response)
         return response.json()
 
     def get_stamp_details(self, stamp_id: str) -> Dict[str, Any]:
@@ -73,7 +95,7 @@ class SwarmGatewayClient:
         """
         url = f"{self.base_url}/api/v1/stamps/{stamp_id}"
         response = self.session.get(url, timeout=30)
-        response.raise_for_status()
+        self._raise_with_detail(response)
         return response.json()
 
     def list_stamps(self) -> Dict[str, Any]:
@@ -87,7 +109,7 @@ class SwarmGatewayClient:
         """
         url = f"{self.base_url}/api/v1/stamps/"
         response = self.session.get(url, timeout=30)
-        response.raise_for_status()
+        self._raise_with_detail(response)
         return response.json()
 
     def extend_stamp(self, stamp_id: str, amount: int) -> Dict[str, Any]:
@@ -107,11 +129,12 @@ class SwarmGatewayClient:
         payload = {"amount": amount}
 
         response = self.session.patch(url, json=payload, timeout=30)
-        response.raise_for_status()
+        self._raise_with_detail(response)
         return response.json()
 
-
-    def upload_data(self, data: str, stamp_id: str, content_type: str = "application/json") -> Dict[str, Any]:
+    def upload_data(
+        self, data: str, stamp_id: str, content_type: str = "application/json"
+    ) -> Dict[str, Any]:
         """Upload data to Swarm network.
 
         Args:
@@ -127,31 +150,28 @@ class SwarmGatewayClient:
             ValueError: If data exceeds size limit
         """
         # Check size limit (4KB = 4096 bytes)
-        data_bytes = data.encode('utf-8')
+        data_bytes = data.encode("utf-8")
         if len(data_bytes) > 4096:
-            raise ValueError(f"Data size {len(data_bytes)} bytes exceeds 4KB limit (4096 bytes). Larger uploads are not currently supported.")
+            raise ValueError(
+                f"Data size {len(data_bytes)} bytes exceeds 4KB limit (4096 bytes). Larger uploads are not currently supported."
+            )
 
         url = f"{self.base_url}/api/v1/data/"
 
         # Prepare multipart form data
-        files = {
-            'file': ('data', data_bytes, content_type)
-        }
+        files = {"file": ("data", data_bytes, content_type)}
 
-        params = {
-            'stamp_id': stamp_id,
-            'content_type': content_type
-        }
+        params = {"stamp_id": stamp_id, "content_type": content_type}
 
         # For file uploads, temporarily remove Content-Type from session to let requests set multipart/form-data
-        original_content_type = self.session.headers.pop('Content-Type', None)
+        original_content_type = self.session.headers.pop("Content-Type", None)
         try:
             response = self.session.post(url, files=files, params=params, timeout=30)
         finally:
             # Restore the Content-Type header
             if original_content_type:
-                self.session.headers['Content-Type'] = original_content_type
-        response.raise_for_status()
+                self.session.headers["Content-Type"] = original_content_type
+        self._raise_with_detail(response)
         return response.json()
 
     def download_data(self, reference: str) -> bytes:
@@ -168,7 +188,7 @@ class SwarmGatewayClient:
         """
         url = f"{self.base_url}/api/v1/data/{reference}"
         response = self.session.get(url, timeout=30)
-        response.raise_for_status()
+        self._raise_with_detail(response)
         return response.content
 
     def health_check(self) -> Dict[str, Any]:
@@ -182,7 +202,7 @@ class SwarmGatewayClient:
         """
         url = f"{self.base_url}/"
         response = self.session.get(url, timeout=10)
-        response.raise_for_status()
+        self._raise_with_detail(response)
 
         # Create meaningful health status
         health_data = response.json() if response.content else {}
@@ -190,7 +210,7 @@ class SwarmGatewayClient:
             "status": "healthy",
             "gateway_url": self.base_url,
             "response_time_ms": response.elapsed.total_seconds() * 1000,
-            "gateway_response": health_data
+            "gateway_response": health_data,
         }
 
     def check_stamp_health(self, stamp_id: str) -> Dict[str, Any]:
@@ -207,7 +227,7 @@ class SwarmGatewayClient:
         """
         url = f"{self.base_url}/api/v1/stamps/{stamp_id}/check"
         response = self.session.get(url, timeout=30)
-        response.raise_for_status()
+        self._raise_with_detail(response)
         return response.json()
 
     def get_wallet_info(self) -> Dict[str, Any]:
@@ -221,7 +241,7 @@ class SwarmGatewayClient:
         """
         url = f"{self.base_url}/api/v1/wallet"
         response = self.session.get(url, timeout=30)
-        response.raise_for_status()
+        self._raise_with_detail(response)
         return response.json()
 
     def get_notary_info(self) -> Dict[str, Any]:
@@ -235,7 +255,7 @@ class SwarmGatewayClient:
         """
         url = f"{self.base_url}/api/v1/notary/info"
         response = self.session.get(url, timeout=30)
-        response.raise_for_status()
+        self._raise_with_detail(response)
         return response.json()
 
     def close(self):

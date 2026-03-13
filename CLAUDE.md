@@ -92,7 +92,7 @@ On-chain provenance module. Dependencies (web3, eth-account) included in default
 - `chain/client.py` — High-level facade (anchor, verify, transform, access)
 - `chain/provider.py` — Web3 RPC connection management
 - `chain/wallet.py` — Private key loading and transaction signing
-- `chain/contract.py` — DataProvenance contract wrapper (build_*_tx, read methods)
+- `chain/contract.py` — DataProvenance contract wrapper (build_*_tx, read methods, event queries)
 - `chain/models.py` — Pydantic models (AnchorResult, ChainProvenanceRecord, etc.)
 - `chain/exceptions.py` — Standalone exception hierarchy (ChainError base)
 - `chain/abi/DataProvenance.json` — Contract ABI
@@ -119,7 +119,7 @@ On-chain provenance module. Dependencies (web3, eth-account) included in default
 | `chain_balance` | **required** | no | Check wallet ETH balance with funding guidance |
 | `verify_hash` | not needed | no | Check if hash is registered on-chain |
 | `get_provenance` | not needed | no | Retrieve full on-chain provenance record |
-| `get_provenance_chain` | not needed | no | Follow transformation lineage tree |
+| `get_provenance_chain` | not needed | no | Follow transformation lineage tree via event logs |
 | `anchor_hash` | **required** | **yes** | Register Swarm hash on-chain |
 | `record_transform` | **required** | **yes** | Record data transformation, link original → new hash |
 
@@ -133,9 +133,11 @@ Blockchain dependencies (web3, eth-account) are included in the default install.
 
 ### Testing Strategy
 - **Gateway Client Tests** (`test_gateway_client.py`): Mock-based testing of HTTP client
-- **Tool Execution Tests** (`test_tool_execution.py`): Handler-level tests for all MCP tools including chain tools, with mocked chain_client/CHAIN_AVAILABLE
+- **Tool Execution Tests** (`test_tool_execution.py`): Handler-level tests for all MCP tools including chain tools, with mocked chain_client/CHAIN_AVAILABLE. Covers insufficient funds handling, event-based chain traversal, already-registered reverts, and proactive health_check balance warnings.
 - **Tool Definition Tests** (`test_tool_definitions.py`): Validates tool schemas, required parameters, and registration consistency
 - **Integration Tests** (`test_integration.py`): End-to-end MCP tool testing
+- **Performance Tests** (`test_performance_regression.py`): Handler response time and concurrency regression tests
+- **User Tests** (`user-tests/`): Live end-to-end UX audit against real gateway and blockchain (not run in CI)
 - **Async Support**: Uses `pytest-asyncio` for async test execution
 - **Mocking**: Uses `pytest-mock` and `unittest.mock` for external dependency mocking
 
@@ -165,14 +167,18 @@ The `config.py` module uses Pydantic Settings for type-safe configuration with a
 - Comprehensive error handling for HTTP requests with user-friendly messages
 - Proper MCP error responses with structured error information
 - Request timeout handling and retry logic in gateway client
+- Chain-specific error handling: insufficient funds detection with faucet/bridge guidance, "already registered" revert catch, proactive balance warnings in health_check
 
 ### Agent Guidance (MCP Design Guidelines)
 - **Adaptive health_check**: Returns `ready` boolean, `_recommendations`, `_companion_servers`, and contextual `_next` based on stamp availability
 - **Response hints**: All success responses append `_next: <tool>` and `_related: <tools>` guiding agents to the logical next step
 - **Structured errors**: All error responses include `retryable: true|false` and `_next` recovery hint
 - **Typo correction**: Unknown tool names get Levenshtein-based "Did you mean?" suggestions
-- **MCP Prompts**: 3 workflow prompts (`provenance-upload`, `provenance-verify`, `stamp-management`) registered via `@server.list_prompts()` / `@server.get_prompt()`
+- **MCP Prompts**: 4 workflow prompts (`provenance-upload`, `provenance-verify`, `stamp-management`, `provenance-chain-workflow`) registered via `@server.list_prompts()` / `@server.get_prompt()`
+- **MCP Resources**: `provenance://skills` resource (SKILLS.md content) via `@server.list_resources()` / `@server.read_resource()`
 - **Cross-server coordination**: health_check reports companion servers (swarm_connect gateway status, fds-id MCP availability)
+- **Insufficient funds**: `_is_insufficient_funds_error()` and `_format_insufficient_funds_error()` provide faucet/bridge URLs
+- **Event-based lineage**: `get_provenance_chain` uses `DataTransformed` contract events (not just record fields) for accurate transformation traversal
 - Helper functions: `_format_hints()`, `_format_error()`, `_is_retryable_error()`, `_suggest_tool_name()`
 
 ### Code Quality

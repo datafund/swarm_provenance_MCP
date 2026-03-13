@@ -744,7 +744,7 @@ class TestMCPPrompts:
         return create_server()
 
     async def test_list_prompts_returns_all(self, server):
-        """list_prompts should return all 3 workflow prompts."""
+        """list_prompts should return all 4 workflow prompts."""
         handler = None
         for h in server.request_handlers.values():
             if hasattr(h, '__name__') and 'list_prompts' in str(h):
@@ -758,7 +758,10 @@ class TestMCPPrompts:
         prompts = inner.prompts if hasattr(inner, 'prompts') else inner
 
         prompt_names = {p.name for p in prompts}
-        assert prompt_names == {"provenance-upload", "provenance-verify", "stamp-management"}
+        assert prompt_names == {
+            "provenance-upload", "provenance-verify",
+            "stamp-management", "provenance-chain-workflow",
+        }
 
     async def test_provenance_upload_prompt_has_arguments(self, server):
         """provenance-upload prompt should require data argument."""
@@ -2955,3 +2958,555 @@ class TestGetProvenanceChain:
             tools = inner.tools if hasattr(inner, 'tools') else inner
             tool_names = {t.name for t in tools}
             assert "get_provenance_chain" in tool_names
+
+
+class TestInsufficientFundsHelpers:
+    """Test _is_insufficient_funds_error and _format_insufficient_funds_error."""
+
+    def test_detects_insufficient_funds(self):
+        from swarm_provenance_mcp.server import _is_insufficient_funds_error
+        assert _is_insufficient_funds_error(Exception("insufficient funds for transfer"))
+        assert _is_insufficient_funds_error(Exception("Insufficient funds for gas"))
+        assert _is_insufficient_funds_error(Exception("insufficient balance"))
+
+    def test_ignores_unrelated_errors(self):
+        from swarm_provenance_mcp.server import _is_insufficient_funds_error
+        assert not _is_insufficient_funds_error(Exception("reverted"))
+        assert not _is_insufficient_funds_error(Exception("nonce too low"))
+        assert not _is_insufficient_funds_error(Exception(""))
+
+    def test_format_with_chain_client(self):
+        from swarm_provenance_mcp.server import _format_insufficient_funds_error
+        mock_client = MagicMock()
+        mock_client.address = "0xABC"
+        mock_client.chain = "base-sepolia"
+        msg = _format_insufficient_funds_error("anchor_hash", mock_client)
+        assert "anchor_hash" in msg
+        assert "0xABC" in msg
+        assert "faucet" in msg.lower() or "sepolia" in msg.lower()
+        assert "chain_balance" in msg
+
+    def test_format_without_chain_client(self):
+        from swarm_provenance_mcp.server import _format_insufficient_funds_error
+        with patch('swarm_provenance_mcp.server.settings') as mock_settings:
+            mock_settings.chain_name = "base"
+            msg = _format_insufficient_funds_error("record_transform", None)
+        assert "record_transform" in msg
+        assert "chain_balance" in msg
+
+    def test_format_testnet_shows_faucet(self):
+        from swarm_provenance_mcp.server import _format_insufficient_funds_error
+        mock_client = MagicMock()
+        mock_client.address = "0x1234"
+        mock_client.chain = "base-sepolia"
+        msg = _format_insufficient_funds_error("anchor_hash", mock_client)
+        assert "faucet" in msg.lower()
+
+    def test_format_mainnet_shows_bridge(self):
+        from swarm_provenance_mcp.server import _format_insufficient_funds_error
+        mock_client = MagicMock()
+        mock_client.address = "0x1234"
+        mock_client.chain = "base"
+        msg = _format_insufficient_funds_error("anchor_hash", mock_client)
+        assert "bridge" in msg.lower()
+
+
+class TestAnchorInsufficientFunds:
+    """Test insufficient funds error handling in anchor_hash."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_transaction_error_insufficient_funds(self, server):
+        """ChainTransactionError with 'insufficient funds' gets special formatting."""
+        from swarm_provenance_mcp.chain.exceptions import ChainTransactionError
+
+        mock_client = MagicMock()
+        mock_client.anchor.side_effect = ChainTransactionError(
+            "insufficient funds for transfer"
+        )
+        mock_client.address = "0xWALLET"
+        mock_client.chain = "base-sepolia"
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "anchor_hash", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert result.isError
+        text = result.content[0].text
+        assert "insufficient funds" in text.lower()
+        assert "chain_balance" in text
+
+    async def test_generic_error_insufficient_funds(self, server):
+        """Generic exception with 'insufficient funds' also gets special formatting."""
+        mock_client = MagicMock()
+        mock_client.anchor.side_effect = Exception(
+            "insufficient funds for gas"
+        )
+        mock_client.address = "0xWALLET"
+        mock_client.chain = "base-sepolia"
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "anchor_hash", {
+                "swarm_hash": TEST_REFERENCE,
+            })
+
+        assert result.isError
+        text = result.content[0].text
+        assert "insufficient funds" in text.lower()
+
+
+class TestTransformInsufficientFunds:
+    """Test insufficient funds error handling in record_transform."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_transaction_error_insufficient_funds(self, server):
+        """ChainTransactionError with 'insufficient funds' gets special formatting."""
+        from swarm_provenance_mcp.chain.exceptions import ChainTransactionError
+
+        mock_client = MagicMock()
+        mock_client.transform.side_effect = ChainTransactionError(
+            "insufficient funds for transfer"
+        )
+        mock_client.address = "0xWALLET"
+        mock_client.chain = "base-sepolia"
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "record_transform", {
+                "original_hash": TEST_REFERENCE,
+                "new_hash": TEST_NEW_HASH,
+            })
+
+        assert result.isError
+        text = result.content[0].text
+        assert "insufficient funds" in text.lower()
+        assert "chain_balance" in text
+
+
+class TestHealthCheckBalanceWarning:
+    """Test proactive balance check in health_check."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_low_balance_shows_warning(self, server):
+        """health_check should warn when wallet balance is too low."""
+        mock_chain = MagicMock()
+        mock_chain.chain = "base-sepolia"
+        mock_chain.contract_address = "0xCONTRACT"
+        mock_chain.address = "0xWALLET"
+        mock_chain._provider.health_check.return_value = True
+        mock_chain._provider.get_block_number.return_value = 12345
+        mock_chain._provider.rpc_response_time_ms = 100
+        mock_chain._provider.rpc_url = "https://sepolia.base.org"
+        mock_chain._provider.chain_id = 84532
+        mock_balance = MagicMock()
+        mock_balance.address = "0xWALLET"
+        mock_balance.balance_wei = 0  # empty wallet
+        mock_balance.chain = "base-sepolia"
+        mock_chain.balance.return_value = mock_balance
+
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_gw, \
+             patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_chain):
+            mock_gw.health_check.return_value = {
+                "status": "healthy",
+                "gateway_url": "http://localhost",
+                "response_time_ms": 10,
+            }
+            mock_gw.list_stamps.return_value = {
+                "stamps": [{"batchID": TEST_STAMP_ID, "usable": True}],
+                "total_count": 1,
+            }
+            result = await call_tool_directly(server, "health_check", {})
+
+        assert not result.isError
+        text = result.content[0].text
+        # Should contain funding guidance for empty wallet
+        assert "faucet" in text.lower() or "fund" in text.lower() or "CRITICAL" in text
+
+    async def test_balance_check_failure_doesnt_break_health(self, server):
+        """If balance() throws, health_check should still succeed."""
+        mock_chain = MagicMock()
+        mock_chain.chain = "base-sepolia"
+        mock_chain.contract_address = "0xCONTRACT"
+        mock_chain.address = "0xWALLET"
+        mock_chain._provider.health_check.return_value = True
+        mock_chain._provider.get_block_number.return_value = 12345
+        mock_chain._provider.rpc_response_time_ms = 100
+        mock_chain._provider.rpc_url = "https://sepolia.base.org"
+        mock_chain._provider.chain_id = 84532
+        mock_chain.balance.side_effect = Exception("RPC timeout")
+
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_gw, \
+             patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_chain):
+            mock_gw.health_check.return_value = {
+                "status": "healthy",
+                "gateway_url": "http://localhost",
+                "response_time_ms": 10,
+            }
+            mock_gw.list_stamps.return_value = {
+                "stamps": [{"batchID": TEST_STAMP_ID, "usable": True}],
+                "total_count": 1,
+            }
+            result = await call_tool_directly(server, "health_check", {})
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "operational" in text.lower() or "Gateway" in text
+
+
+class TestAnchorAlreadyRegisteredRevert:
+    """Test anchor() catching 'already registered' reverts from stale RPC."""
+
+    async def test_revert_converted_to_already_registered(self):
+        """When pre-check misses but tx reverts, should raise DataAlreadyRegisteredError."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+        from swarm_provenance_mcp.chain.exceptions import (
+            ChainTransactionError, DataAlreadyRegisteredError, DataNotRegisteredError,
+        )
+
+        client = ChainClient.__new__(ChainClient)
+        client._wallet = MagicMock()
+        client._wallet.address = "0xTEST"
+        client._contract = MagicMock()
+        client._provider = MagicMock()
+        client._gas_limit = None
+        client._gas_limit_multiplier = 1.2
+
+        # Pre-check: hash not found (stale read)
+        mock_record_not_found = MagicMock(side_effect=[
+            DataNotRegisteredError("not found", data_hash="ab" * 32),
+        ])
+
+        # After revert: hash IS found
+        mock_record_found = MagicMock()
+        mock_record_found.owner = "0xOWNER"
+        mock_record_found.timestamp = 1700000000
+        mock_record_found.data_type = "test"
+
+        call_count = [0]
+        def get_side_effect(h):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise DataNotRegisteredError("not found", data_hash=h)
+            return mock_record_found
+
+        client.get = MagicMock(side_effect=get_side_effect)
+        client._send_transaction = MagicMock(
+            side_effect=ChainTransactionError("Data already registered")
+        )
+        client._contract.build_register_data_tx.return_value = {"from": "0xTEST"}
+
+        with pytest.raises(DataAlreadyRegisteredError) as exc_info:
+            client.anchor("ab" * 32)
+
+        assert "already registered" in str(exc_info.value).lower()
+
+
+class TestGetTransformationsFrom:
+    """Test contract.get_transformations_from event query."""
+
+    def test_returns_event_tuples(self):
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract.__new__(DataProvenanceContract)
+        contract._web3 = MagicMock()
+        contract._web3.eth.block_number = 10000
+        contract._contract = MagicMock()
+
+        mock_event = MagicMock()
+        mock_event.args.originalDataHash = b'\xab' * 32
+        mock_event.args.newDataHash = b'\xcd' * 32
+        mock_event.args.transformation = "Anonymized"
+
+        contract._contract.events.DataTransformed.get_logs.return_value = [mock_event]
+
+        results = contract.get_transformations_from("ab" * 32)
+
+        assert len(results) == 1
+        orig, new, desc = results[0]
+        assert orig == b'\xab' * 32
+        assert new == b'\xcd' * 32
+        assert desc == "Anonymized"
+
+    def test_empty_events(self):
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract.__new__(DataProvenanceContract)
+        contract._web3 = MagicMock()
+        contract._web3.eth.block_number = 10000
+        contract._contract = MagicMock()
+        contract._contract.events.DataTransformed.get_logs.return_value = []
+
+        results = contract.get_transformations_from("ab" * 32)
+        assert results == []
+
+    def test_lookback_blocks_calculation(self):
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract.__new__(DataProvenanceContract)
+        contract._web3 = MagicMock()
+        contract._web3.eth.block_number = 100
+        contract._contract = MagicMock()
+        contract._contract.events.DataTransformed.get_logs.return_value = []
+
+        contract.get_transformations_from("ab" * 32, lookback_blocks=5000)
+
+        call_kwargs = contract._contract.events.DataTransformed.get_logs.call_args
+        # from_block should be max(0, 100-5000) = 0
+        assert call_kwargs.kwargs["from_block"] == 0
+        assert call_kwargs.kwargs["to_block"] == 100
+
+    def test_custom_lookback(self):
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract.__new__(DataProvenanceContract)
+        contract._web3 = MagicMock()
+        contract._web3.eth.block_number = 50000
+        contract._contract = MagicMock()
+        contract._contract.events.DataTransformed.get_logs.return_value = []
+
+        contract.get_transformations_from("ab" * 32, lookback_blocks=1000)
+
+        call_kwargs = contract._contract.events.DataTransformed.get_logs.call_args
+        assert call_kwargs.kwargs["from_block"] == 49000
+        assert call_kwargs.kwargs["to_block"] == 50000
+
+
+class TestProvenanceChainEventTraversal:
+    """Test that get_provenance_chain uses events to follow transformation links."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_chain_follows_events(self, server):
+        """get_provenance_chain should return multi-entry chain via event traversal."""
+        mock_rec1 = MagicMock()
+        mock_rec1.data_hash = "aa" * 32
+        mock_rec1.owner = "0xOWNER"
+        mock_rec1.timestamp = 1700000000
+        mock_rec1.data_type = "original"
+        mock_rec1.status = MagicMock(value=0)
+        mock_rec1.transformations = [MagicMock(description="Step 1", new_data_hash="bb" * 32)]
+
+        mock_rec2 = MagicMock()
+        mock_rec2.data_hash = "bb" * 32
+        mock_rec2.owner = "0xOWNER"
+        mock_rec2.timestamp = 1700001000
+        mock_rec2.data_type = "derived"
+        mock_rec2.status = MagicMock(value=0)
+        mock_rec2.transformations = []
+
+        mock_client = MagicMock()
+        mock_client.get_provenance_chain.return_value = [mock_rec1, mock_rec2]
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance_chain", {
+                "swarm_hash": "aa" * 32,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "2 entries" in text
+        assert "aa" * 32 in text
+        assert "bb" * 32 in text
+
+    async def test_chain_event_fallback_on_error(self):
+        """When event query fails, should fall back to record transformations."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+        from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
+        from swarm_provenance_mcp.chain.models import (
+            ChainProvenanceRecord, ChainTransformation, DataStatusEnum,
+        )
+
+        client = ChainClient.__new__(ChainClient)
+        client._contract = MagicMock()
+        # Event query fails
+        client._contract.get_transformations_from.side_effect = Exception("RPC error")
+
+        record = ChainProvenanceRecord(
+            data_hash="aa" * 32,
+            owner="0xOWNER",
+            timestamp=1700000000,
+            data_type="test",
+            status=DataStatusEnum(0),
+            transformations=[
+                ChainTransformation(description="Step 1", new_data_hash="bb" * 32),
+            ],
+            accessors=[],
+        )
+
+        def get_side_effect(h):
+            if h == "aa" * 32:
+                return record
+            raise DataNotRegisteredError("not found", data_hash=h)
+
+        client.get = MagicMock(side_effect=get_side_effect)
+
+        chain = client.get_provenance_chain("aa" * 32)
+        # Should still include the first record (bb*32 not found but attempted)
+        assert len(chain) == 1
+        assert chain[0].data_hash == "aa" * 32
+
+
+class TestProvenanceChainWorkflowPrompt:
+    """Test the provenance-chain-workflow prompt."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_chain_workflow_prompt_basic(self, server):
+        """provenance-chain-workflow prompt should return anchoring steps."""
+        handler = None
+        for h in server.request_handlers.values():
+            if hasattr(h, '__name__') and 'get_prompt' in str(h):
+                handler = h
+                break
+
+        assert handler is not None, "get_prompt handler not registered"
+        from mcp.types import GetPromptRequest
+        result = await handler(GetPromptRequest(
+            method="prompts/get",
+            params={"name": "provenance-chain-workflow", "arguments": {"data": "test data"}}
+        ))
+        inner = result.root if hasattr(result, 'root') else result
+        text = inner.messages[0].content.text
+
+        assert "health_check" in text
+        assert "chain_balance" in text
+        assert "anchor_hash" in text
+        assert "verify_hash" in text
+        # Should NOT include transform steps without transform_description
+        assert "record_transform" not in text
+
+    async def test_chain_workflow_prompt_with_transform(self, server):
+        """provenance-chain-workflow with transform_description should include transform steps."""
+        handler = None
+        for h in server.request_handlers.values():
+            if hasattr(h, '__name__') and 'get_prompt' in str(h):
+                handler = h
+                break
+
+        from mcp.types import GetPromptRequest
+        result = await handler(GetPromptRequest(
+            method="prompts/get",
+            params={
+                "name": "provenance-chain-workflow",
+                "arguments": {
+                    "data": "original data",
+                    "transform_description": "Anonymized PII",
+                },
+            }
+        ))
+        inner = result.root if hasattr(result, 'root') else result
+        text = inner.messages[0].content.text
+
+        assert "record_transform" in text
+        assert "Anonymized PII" in text
+        assert "Do NOT call anchor_hash on the new hash" in text
+        assert "get_provenance_chain" in text
+
+    async def test_chain_workflow_prompt_has_arguments(self, server):
+        """provenance-chain-workflow should have data (required) and transform_description (optional)."""
+        handler = None
+        for h in server.request_handlers.values():
+            if hasattr(h, '__name__') and 'list_prompts' in str(h):
+                handler = h
+                break
+
+        from mcp.types import ListPromptsRequest
+        result = await handler(ListPromptsRequest(method="prompts/list"))
+        inner = result.root if hasattr(result, 'root') else result
+        prompts = inner.prompts if hasattr(inner, 'prompts') else inner
+
+        chain_prompt = next(p for p in prompts if p.name == "provenance-chain-workflow")
+        arg_names = {a.name for a in chain_prompt.arguments}
+        assert arg_names == {"data", "transform_description"}
+        data_arg = next(a for a in chain_prompt.arguments if a.name == "data")
+        assert data_arg.required is True
+        transform_arg = next(a for a in chain_prompt.arguments if a.name == "transform_description")
+        assert transform_arg.required is False
+
+
+class TestMCPResources:
+    """Test MCP resource handlers."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_list_resources_includes_skills(self, server):
+        """list_resources should include the provenance://skills resource."""
+        handler = None
+        for h in server.request_handlers.values():
+            if hasattr(h, '__name__') and 'list_resources' in str(h):
+                handler = h
+                break
+
+        assert handler is not None, "list_resources handler not registered"
+        from mcp.types import ListResourcesRequest
+        result = await handler(ListResourcesRequest(method="resources/list"))
+        inner = result.root if hasattr(result, 'root') else result
+        resources = inner.resources if hasattr(inner, 'resources') else inner
+
+        uris = [str(r.uri) for r in resources]
+        assert "provenance://skills" in uris
+
+        skills_resource = next(r for r in resources if str(r.uri) == "provenance://skills")
+        assert skills_resource.mimeType == "text/markdown"
+        assert "provenance" in skills_resource.description.lower()
+
+    async def test_read_skills_resource_returns_content(self, server):
+        """read_resource for provenance://skills should return SKILLS.md content."""
+        handler = None
+        for h in server.request_handlers.values():
+            if hasattr(h, '__name__') and 'read_resource' in str(h):
+                handler = h
+                break
+
+        assert handler is not None, "read_resource handler not registered"
+        from pydantic import AnyUrl
+        from mcp.types import ReadResourceRequest
+        result = await handler(ReadResourceRequest(
+            method="resources/read",
+            params={"uri": "provenance://skills"},
+        ))
+        inner = result.root if hasattr(result, 'root') else result
+        contents = inner if isinstance(inner, list) else inner.contents if hasattr(inner, 'contents') else [inner]
+
+        assert len(contents) >= 1
+        text = contents[0].content if hasattr(contents[0], 'content') else str(contents[0])
+        assert len(text) > 100
+        # Check for key sections from SKILLS.md
+        assert "Critical Rules" in text or "critical" in text.lower()
+        assert "Workflow" in text or "workflow" in text.lower()
+
+    async def test_read_unknown_resource_raises(self, server):
+        """read_resource for unknown URI should raise ValueError."""
+        handler = None
+        for h in server.request_handlers.values():
+            if hasattr(h, '__name__') and 'read_resource' in str(h):
+                handler = h
+                break
+
+        assert handler is not None
+        from mcp.types import ReadResourceRequest
+        with pytest.raises((ValueError, Exception)):
+            await handler(ReadResourceRequest(
+                method="resources/read",
+                params={"uri": "provenance://unknown"},
+            ))

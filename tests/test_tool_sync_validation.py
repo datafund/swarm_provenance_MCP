@@ -183,7 +183,7 @@ class TestToolSynchronization:
         prompts = inner.prompts if hasattr(inner, 'prompts') else inner
         prompt_names = {p.name for p in prompts}
 
-        expected_prompts = {'provenance-upload', 'provenance-verify', 'stamp-management'}
+        expected_prompts = {'provenance-upload', 'provenance-verify', 'stamp-management', 'provenance-chain-workflow'}
         missing = expected_prompts - prompt_names
         assert not missing, f"Prompts not registered at runtime: {missing}"
 

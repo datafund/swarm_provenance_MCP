@@ -5,17 +5,20 @@ import json
 import logging
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
+from mcp.server.lowlevel.helper_types import ReadResourceContents
 from mcp.types import (
     Tool,
     TextContent,
     CallToolRequest,
     CallToolResult,
     ListToolsRequest,
+    Resource,
     Prompt,
     PromptArgument,
     PromptMessage,
@@ -74,6 +77,17 @@ if settings.chain_enabled:
         else:
             logger.warning("Chain client init failed: %s", e)
 
+def _load_skills_content() -> str:
+    """Load SKILLS.md from repository root for the provenance://skills resource."""
+    skills_path = Path(__file__).parent.parent / "SKILLS.md"
+    try:
+        return skills_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "Provenance skills guide not found. See MCP_INSTRUCTIONS for basic guidance."
+
+
+_SKILLS_CONTENT = _load_skills_content()
+
 # Agent-facing instructions sent during MCP initialization handshake
 MCP_INSTRUCTIONS = """
 Swarm Provenance MCP — decentralized storage with cryptographic provenance on the Swarm network.
@@ -122,6 +136,22 @@ These register Swarm hashes in the DataProvenance smart contract on Base Sepolia
 - record_transform — record data transformation linking original to new hash, creating lineage (costs gas; optionally restricts original)
 - get_provenance_chain — follow transformation lineage for a hash, building a tree of how data evolved (read-only)
 The health_check tool reports chain status alongside gateway status.
+
+PROVENANCE RULES (critical):
+1. record_transform REGISTERS the new_hash on-chain automatically. NEVER call anchor_hash
+   on a hash that will be the new_hash in record_transform — this creates a duplicate
+   instead of a proper transformation link.
+2. The original_hash MUST be anchored before calling record_transform.
+3. Only the data owner (or authorized delegate) can record transformations.
+4. Stamps (BZZ) pay for Swarm storage; chain anchoring costs ETH gas — separate systems.
+5. Lineage is a DAG: one original can have multiple transformations.
+6. For the full provenance guide with examples and diagrams, read the provenance://skills resource.
+
+CHAIN WORKFLOW — store with on-chain provenance:
+health_check → purchase_stamp → check_stamp_health → upload_data → anchor_hash → verify_hash
+
+CHAIN WORKFLOW — record a transformation:
+upload_data (transformed data) → record_transform (original, new, description) → get_provenance_chain
 
 COMPANION SERVERS:
 - swarm_connect gateway (required) — the FastAPI gateway this server talks to, handles Bee node communication
@@ -795,6 +825,22 @@ def create_server() -> Server:
                 description="Review and manage stamp inventory — list stamps, check health, extend or purchase as needed.",
                 arguments=[],
             ),
+            Prompt(
+                name="provenance-chain-workflow",
+                description="End-to-end on-chain provenance: store data on Swarm, anchor on-chain, and optionally record a transformation.",
+                arguments=[
+                    PromptArgument(
+                        name="data",
+                        description="The data content to store and anchor",
+                        required=True,
+                    ),
+                    PromptArgument(
+                        name="transform_description",
+                        description="If provided, continues the workflow to record a transformation with this description",
+                        required=False,
+                    ),
+                ],
+            ),
         ]
 
     @server.get_prompt()
@@ -882,8 +928,68 @@ def create_server() -> Server:
                 ],
             )
 
+        elif name == "provenance-chain-workflow":
+            data_desc = args.get("data", "<your data here>")
+            transform_desc = args.get("transform_description")
+
+            steps = (
+                f"Store data on Swarm with on-chain provenance:\n\n"
+                f"Data: {data_desc}\n\n"
+                f"Steps:\n"
+                f"1. Call health_check — verify gateway and chain connectivity\n"
+                f"2. Call chain_balance — confirm wallet has ETH for gas\n"
+                f"3. Call purchase_stamp (depth 17 for small data) to get a stamp. "
+                f"Do not pick stamps from list_stamps — they may belong to other users.\n"
+                f"4. Poll check_stamp_health every 15 seconds until can_upload is true (up to 2 minutes)\n"
+                f"5. Call upload_data with the data and your stamp_id — save the reference hash\n"
+                f"6. Call anchor_hash with the reference hash to register it on-chain\n"
+                f"7. Call verify_hash to confirm the on-chain registration succeeded"
+            )
+
+            if transform_desc:
+                steps += (
+                    f"\n\nNow record a transformation ({transform_desc}):\n"
+                    f"8. Call upload_data with the transformed data — save the new reference hash\n"
+                    f"9. CRITICAL: Do NOT call anchor_hash on the new hash. "
+                    f"record_transform registers it automatically.\n"
+                    f"10. Call record_transform with original_hash (from step 5), "
+                    f"new_hash (from step 8), and description: \"{transform_desc}\"\n"
+                    f"11. Call get_provenance_chain on the original hash to verify the lineage"
+                )
+
+            return GetPromptResult(
+                description="End-to-end on-chain provenance workflow",
+                messages=[
+                    PromptMessage(
+                        role="user",
+                        content=TextContent(type="text", text=steps),
+                    )
+                ],
+            )
+
         else:
             raise ValueError(f"Unknown prompt: {name}")
+
+    # --- MCP Resources (on-demand knowledge for agents) ---
+
+    @server.list_resources()
+    async def list_resources() -> list[Resource]:
+        """List available resources."""
+        return [
+            Resource(
+                uri="provenance://skills",
+                name="Provenance Skills Guide",
+                description="Concepts, workflows, critical rules, and diagrams for Swarm data provenance",
+                mimeType="text/markdown",
+            ),
+        ]
+
+    @server.read_resource()
+    async def read_resource(uri) -> list[ReadResourceContents]:
+        """Return resource content by URI."""
+        if str(uri) == "provenance://skills":
+            return [ReadResourceContents(content=_SKILLS_CONTENT, mime_type="text/markdown")]
+        raise ValueError(f"Unknown resource: {uri}")
 
     return server
 

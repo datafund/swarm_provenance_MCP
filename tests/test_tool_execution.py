@@ -744,7 +744,7 @@ class TestMCPPrompts:
         return create_server()
 
     async def test_list_prompts_returns_all(self, server):
-        """list_prompts should return all 3 workflow prompts."""
+        """list_prompts should return all 4 workflow prompts."""
         handler = None
         for h in server.request_handlers.values():
             if hasattr(h, '__name__') and 'list_prompts' in str(h):
@@ -758,7 +758,10 @@ class TestMCPPrompts:
         prompts = inner.prompts if hasattr(inner, 'prompts') else inner
 
         prompt_names = {p.name for p in prompts}
-        assert prompt_names == {"provenance-upload", "provenance-verify", "stamp-management"}
+        assert prompt_names == {
+            "provenance-upload", "provenance-verify",
+            "stamp-management", "provenance-chain-workflow",
+        }
 
     async def test_provenance_upload_prompt_has_arguments(self, server):
         """provenance-upload prompt should require data argument."""
@@ -3357,3 +3360,153 @@ class TestProvenanceChainEventTraversal:
         # Should still include the first record (bb*32 not found but attempted)
         assert len(chain) == 1
         assert chain[0].data_hash == "aa" * 32
+
+
+class TestProvenanceChainWorkflowPrompt:
+    """Test the provenance-chain-workflow prompt."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_chain_workflow_prompt_basic(self, server):
+        """provenance-chain-workflow prompt should return anchoring steps."""
+        handler = None
+        for h in server.request_handlers.values():
+            if hasattr(h, '__name__') and 'get_prompt' in str(h):
+                handler = h
+                break
+
+        assert handler is not None, "get_prompt handler not registered"
+        from mcp.types import GetPromptRequest
+        result = await handler(GetPromptRequest(
+            method="prompts/get",
+            params={"name": "provenance-chain-workflow", "arguments": {"data": "test data"}}
+        ))
+        inner = result.root if hasattr(result, 'root') else result
+        text = inner.messages[0].content.text
+
+        assert "health_check" in text
+        assert "chain_balance" in text
+        assert "anchor_hash" in text
+        assert "verify_hash" in text
+        # Should NOT include transform steps without transform_description
+        assert "record_transform" not in text
+
+    async def test_chain_workflow_prompt_with_transform(self, server):
+        """provenance-chain-workflow with transform_description should include transform steps."""
+        handler = None
+        for h in server.request_handlers.values():
+            if hasattr(h, '__name__') and 'get_prompt' in str(h):
+                handler = h
+                break
+
+        from mcp.types import GetPromptRequest
+        result = await handler(GetPromptRequest(
+            method="prompts/get",
+            params={
+                "name": "provenance-chain-workflow",
+                "arguments": {
+                    "data": "original data",
+                    "transform_description": "Anonymized PII",
+                },
+            }
+        ))
+        inner = result.root if hasattr(result, 'root') else result
+        text = inner.messages[0].content.text
+
+        assert "record_transform" in text
+        assert "Anonymized PII" in text
+        assert "Do NOT call anchor_hash on the new hash" in text
+        assert "get_provenance_chain" in text
+
+    async def test_chain_workflow_prompt_has_arguments(self, server):
+        """provenance-chain-workflow should have data (required) and transform_description (optional)."""
+        handler = None
+        for h in server.request_handlers.values():
+            if hasattr(h, '__name__') and 'list_prompts' in str(h):
+                handler = h
+                break
+
+        from mcp.types import ListPromptsRequest
+        result = await handler(ListPromptsRequest(method="prompts/list"))
+        inner = result.root if hasattr(result, 'root') else result
+        prompts = inner.prompts if hasattr(inner, 'prompts') else inner
+
+        chain_prompt = next(p for p in prompts if p.name == "provenance-chain-workflow")
+        arg_names = {a.name for a in chain_prompt.arguments}
+        assert arg_names == {"data", "transform_description"}
+        data_arg = next(a for a in chain_prompt.arguments if a.name == "data")
+        assert data_arg.required is True
+        transform_arg = next(a for a in chain_prompt.arguments if a.name == "transform_description")
+        assert transform_arg.required is False
+
+
+class TestMCPResources:
+    """Test MCP resource handlers."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_list_resources_includes_skills(self, server):
+        """list_resources should include the provenance://skills resource."""
+        handler = None
+        for h in server.request_handlers.values():
+            if hasattr(h, '__name__') and 'list_resources' in str(h):
+                handler = h
+                break
+
+        assert handler is not None, "list_resources handler not registered"
+        from mcp.types import ListResourcesRequest
+        result = await handler(ListResourcesRequest(method="resources/list"))
+        inner = result.root if hasattr(result, 'root') else result
+        resources = inner.resources if hasattr(inner, 'resources') else inner
+
+        uris = [str(r.uri) for r in resources]
+        assert "provenance://skills" in uris
+
+        skills_resource = next(r for r in resources if str(r.uri) == "provenance://skills")
+        assert skills_resource.mimeType == "text/markdown"
+        assert "provenance" in skills_resource.description.lower()
+
+    async def test_read_skills_resource_returns_content(self, server):
+        """read_resource for provenance://skills should return SKILLS.md content."""
+        handler = None
+        for h in server.request_handlers.values():
+            if hasattr(h, '__name__') and 'read_resource' in str(h):
+                handler = h
+                break
+
+        assert handler is not None, "read_resource handler not registered"
+        from pydantic import AnyUrl
+        from mcp.types import ReadResourceRequest
+        result = await handler(ReadResourceRequest(
+            method="resources/read",
+            params={"uri": "provenance://skills"},
+        ))
+        inner = result.root if hasattr(result, 'root') else result
+        contents = inner if isinstance(inner, list) else inner.contents if hasattr(inner, 'contents') else [inner]
+
+        assert len(contents) >= 1
+        text = contents[0].content if hasattr(contents[0], 'content') else str(contents[0])
+        assert len(text) > 100
+        # Check for key sections from SKILLS.md
+        assert "Critical Rules" in text or "critical" in text.lower()
+        assert "Workflow" in text or "workflow" in text.lower()
+
+    async def test_read_unknown_resource_raises(self, server):
+        """read_resource for unknown URI should raise ValueError."""
+        handler = None
+        for h in server.request_handlers.values():
+            if hasattr(h, '__name__') and 'read_resource' in str(h):
+                handler = h
+                break
+
+        assert handler is not None
+        from mcp.types import ReadResourceRequest
+        with pytest.raises((ValueError, Exception)):
+            await handler(ReadResourceRequest(
+                method="resources/read",
+                params={"uri": "provenance://unknown"},
+            ))

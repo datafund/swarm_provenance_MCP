@@ -484,6 +484,15 @@ The server provides workflow prompts that agents can invoke via `prompts/list` a
 | `provenance-upload` | Upload data to Swarm: health check, stamp selection, upload, verify | `data` (required), `content_type` (optional) |
 | `provenance-verify` | Download and verify existing data by reference | `reference` (required) |
 | `stamp-management` | Review stamp inventory, diagnose issues, recommend actions | none |
+| `provenance-chain-workflow` | End-to-end on-chain provenance: store, anchor, and optionally record a transformation | `data` (required), `transform_description` (optional) |
+
+### MCP Resources
+
+The server exposes on-demand knowledge resources that agents can load via `resources/list` and `resources/read`:
+
+| Resource URI | MIME Type | Description |
+|-------------|-----------|-------------|
+| `provenance://skills` | `text/markdown` | Provenance skills guide — concepts, critical rules, workflows, diagrams, and error recovery |
 
 ## Docker
 

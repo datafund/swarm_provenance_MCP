@@ -174,7 +174,8 @@ The `config.py` module uses Pydantic Settings for type-safe configuration with a
 - **Response hints**: All success responses append `_next: <tool>` and `_related: <tools>` guiding agents to the logical next step
 - **Structured errors**: All error responses include `retryable: true|false` and `_next` recovery hint
 - **Typo correction**: Unknown tool names get Levenshtein-based "Did you mean?" suggestions
-- **MCP Prompts**: 3 workflow prompts (`provenance-upload`, `provenance-verify`, `stamp-management`) registered via `@server.list_prompts()` / `@server.get_prompt()`
+- **MCP Prompts**: 4 workflow prompts (`provenance-upload`, `provenance-verify`, `stamp-management`, `provenance-chain-workflow`) registered via `@server.list_prompts()` / `@server.get_prompt()`
+- **MCP Resources**: `provenance://skills` resource (SKILLS.md content) via `@server.list_resources()` / `@server.read_resource()`
 - **Cross-server coordination**: health_check reports companion servers (swarm_connect gateway status, fds-id MCP availability)
 - **Insufficient funds**: `_is_insufficient_funds_error()` and `_format_insufficient_funds_error()` provide faucet/bridge URLs
 - **Event-based lineage**: `get_provenance_chain` uses `DataTransformed` contract events (not just record fields) for accurate transformation traversal

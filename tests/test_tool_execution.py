@@ -3583,7 +3583,7 @@ class TestGetTransformationsFrom:
 
         contract = DataProvenanceContract.__new__(DataProvenanceContract)
         contract._web3 = MagicMock()
-        contract._web3.eth.block_number = 10000
+        contract._web3.eth.block_number = 5000  # Single chunk
         contract._contract = MagicMock()
 
         mock_event = MagicMock()
@@ -3606,7 +3606,7 @@ class TestGetTransformationsFrom:
 
         contract = DataProvenanceContract.__new__(DataProvenanceContract)
         contract._web3 = MagicMock()
-        contract._web3.eth.block_number = 10000
+        contract._web3.eth.block_number = 5000  # Single chunk
         contract._contract = MagicMock()
         contract._contract.events.DataTransformed.get_logs.return_value = []
 
@@ -3656,9 +3656,9 @@ class TestGetTransformationsFrom:
 
         contract.get_transformations_from("ab" * 32)
 
-        call_kwargs = contract._contract.events.DataTransformed.get_logs.call_args
-        assert call_kwargs.kwargs["from_block"] == 50_000
-        assert call_kwargs.kwargs["to_block"] == 100_000
+        # Chunked scanning — first chunk starts at from_block=50000
+        first_call = contract._contract.events.DataTransformed.get_logs.call_args_list[0]
+        assert first_call.kwargs["from_block"] == 50_000
 
 
 class TestGetTransformationsTo:
@@ -3669,7 +3669,7 @@ class TestGetTransformationsTo:
 
         contract = DataProvenanceContract.__new__(DataProvenanceContract)
         contract._web3 = MagicMock()
-        contract._web3.eth.block_number = 10000
+        contract._web3.eth.block_number = 5000  # Single chunk
         contract._contract = MagicMock()
 
         mock_event = MagicMock()
@@ -3696,7 +3696,7 @@ class TestGetTransformationsTo:
 
         contract = DataProvenanceContract.__new__(DataProvenanceContract)
         contract._web3 = MagicMock()
-        contract._web3.eth.block_number = 10000
+        contract._web3.eth.block_number = 5000  # Single chunk
         contract._contract = MagicMock()
         contract._contract.events.DataTransformed.get_logs.return_value = []
 
@@ -3730,9 +3730,9 @@ class TestGetTransformationsTo:
 
         contract.get_transformations_to("cd" * 32)
 
-        call_kwargs = contract._contract.events.DataTransformed.get_logs.call_args
-        assert call_kwargs.kwargs["from_block"] == 50_000
-        assert call_kwargs.kwargs["to_block"] == 100_000
+        # Chunked scanning — first chunk starts at from_block=50000
+        first_call = contract._contract.events.DataTransformed.get_logs.call_args_list[0]
+        assert first_call.kwargs["from_block"] == 50_000
 
 
 class TestProvenanceChainEventTraversal:

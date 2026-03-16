@@ -40,6 +40,14 @@ gateway_client = SwarmGatewayClient()
 chain_client = None
 CHAIN_AVAILABLE = False
 
+
+def _parse_rpc_fallbacks():
+    """Parse CHAIN_RPC_URLS into a list of fallback URLs, or None."""
+    if settings.chain_rpc_urls:
+        return [u.strip() for u in settings.chain_rpc_urls.split(",") if u.strip()]
+    return None
+
+
 if settings.chain_enabled:
     try:
         from .chain import CHAIN_AVAILABLE as _chain_avail, ChainClient
@@ -53,6 +61,7 @@ if settings.chain_enabled:
                 private_key=settings.provenance_wallet_key,
                 explorer_url=settings.chain_explorer_url,
                 gas_limit=settings.chain_gas_limit,
+                rpc_fallbacks=_parse_rpc_fallbacks(),
             )
             logger.info(
                 "Chain client initialized: chain=%s contract=%s",
@@ -76,6 +85,7 @@ if settings.chain_enabled:
             )
         else:
             logger.warning("Chain client init failed: %s", e)
+
 
 def _load_skills_content() -> str:
     """Load SKILLS.md from repository root for the provenance://skills resource."""
@@ -955,7 +965,7 @@ def create_server() -> Server:
                     f"9. CRITICAL: Do NOT call anchor_hash on the new hash. "
                     f"record_transform registers it automatically.\n"
                     f"10. Call record_transform with original_hash (from step 5), "
-                    f"new_hash (from step 8), and description: \"{transform_desc}\"\n"
+                    f'new_hash (from step 8), and description: "{transform_desc}"\n'
                     f"11. Call get_provenance_chain on the original hash to verify the lineage"
                 )
 
@@ -990,7 +1000,9 @@ def create_server() -> Server:
     async def read_resource(uri) -> list[ReadResourceContents]:
         """Return resource content by URI."""
         if str(uri) == "provenance://skills":
-            return [ReadResourceContents(content=_SKILLS_CONTENT, mime_type="text/markdown")]
+            return [
+                ReadResourceContents(content=_SKILLS_CONTENT, mime_type="text/markdown")
+            ]
         raise ValueError(f"Unknown resource: {uri}")
 
     return server
@@ -1055,12 +1067,18 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         if propagation_status == "ready":
             response_text += "⏱️  Stamp is ready immediately (from the gateway pool).\n"
         elif propagation_status == "propagating" and estimated_ready:
-            response_text += f"⏱️  Stamp is propagating — estimated ready at {estimated_ready}.\n"
-            response_text += "   → Use check_stamp_health to confirm it's ready before uploading."
+            response_text += (
+                f"⏱️  Stamp is propagating — estimated ready at {estimated_ready}.\n"
+            )
+            response_text += (
+                "   → Use check_stamp_health to confirm it's ready before uploading."
+            )
         else:
             response_text += "⏱️  Your stamp may be ready immediately (from the gateway pool) or may need\n"
             response_text += "   up to 2 minutes to propagate on the blockchain.\n"
-            response_text += "   → Use check_stamp_health to confirm it's ready before uploading."
+            response_text += (
+                "   → Use check_stamp_health to confirm it's ready before uploading."
+            )
         response_text += _format_hints(
             "check_stamp_health", ["get_stamp_status", "upload_data", "list_stamps"]
         )
@@ -1902,7 +1920,7 @@ async def handle_chain_balance(arguments: Dict[str, Any]) -> CallToolResult:
         )
 
     try:
-        wallet_info = chain_client.balance()
+        wallet_info = await asyncio.to_thread(chain_client.balance)
 
         response_text = f"⛓️  Chain Wallet Balance\n\n"
         response_text += f"   Wallet: {wallet_info.address}\n"
@@ -1963,13 +1981,14 @@ async def handle_chain_health(arguments: Dict[str, Any]) -> CallToolResult:
                 rpc_url=settings.chain_rpc_url,
                 contract_address=settings.chain_contract_address,
                 explorer_url=settings.chain_explorer_url,
+                rpc_fallbacks=_parse_rpc_fallbacks(),
             )
 
         start = time.monotonic()
-        provider.health_check()
+        await asyncio.to_thread(provider.health_check)
         elapsed_ms = (time.monotonic() - start) * 1000
 
-        block_number = provider.get_block_number()
+        block_number = await asyncio.to_thread(provider.get_block_number)
 
         response_text = f"⛓️  Chain RPC Health\n\n"
         response_text += f"   Connected: true\n"
@@ -2056,9 +2075,11 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
         owner = arguments.get("owner")
 
         if owner:
-            result = chain_client.anchor_for(clean_hash, owner, data_type)
+            result = await asyncio.to_thread(
+                chain_client.anchor_for, clean_hash, owner, data_type
+            )
         else:
-            result = chain_client.anchor(clean_hash, data_type)
+            result = await asyncio.to_thread(chain_client.anchor, clean_hash, data_type)
 
         response_text = f"⛓️  Hash anchored on-chain\n\n"
         response_text += f"   Swarm Hash: {result.swarm_hash}\n"
@@ -2072,7 +2093,7 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
 
         # Post-tx balance check
         try:
-            wallet_info = chain_client.balance()
+            wallet_info = await asyncio.to_thread(chain_client.balance)
             guidance = _format_funding_guidance(
                 wallet_info.address, wallet_info.balance_wei, wallet_info.chain
             )
@@ -2249,9 +2270,9 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
 
         # Use chain_client if available, otherwise create temporary provider + contract
         if chain_client:
-            is_registered = chain_client.verify(clean_hash)
+            is_registered = await asyncio.to_thread(chain_client.verify, clean_hash)
             if is_registered:
-                record = chain_client.get(clean_hash)
+                record = await asyncio.to_thread(chain_client.get, clean_hash)
             else:
                 record = None
         else:
@@ -2264,12 +2285,13 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
                 rpc_url=settings.chain_rpc_url,
                 contract_address=settings.chain_contract_address,
                 explorer_url=settings.chain_explorer_url,
+                rpc_fallbacks=_parse_rpc_fallbacks(),
             )
             contract = DataProvenanceContract(
                 web3=provider.web3,
                 contract_address=provider.contract_address,
             )
-            raw = contract.get_data_record(clean_hash)
+            raw = await asyncio.to_thread(contract.get_data_record, clean_hash)
             zero_address = "0x" + "0" * 40
             if raw[1] == zero_address:
                 is_registered = False
@@ -2386,7 +2408,7 @@ async def handle_get_provenance(arguments: Dict[str, Any]) -> CallToolResult:
 
         # Use chain_client if available, otherwise create temporary provider + contract
         if chain_client:
-            record = chain_client.get(clean_hash)
+            record = await asyncio.to_thread(chain_client.get, clean_hash)
         else:
             from .chain.provider import ChainProvider
             from .chain.contract import DataProvenanceContract
@@ -2402,12 +2424,13 @@ async def handle_get_provenance(arguments: Dict[str, Any]) -> CallToolResult:
                 rpc_url=settings.chain_rpc_url,
                 contract_address=settings.chain_contract_address,
                 explorer_url=settings.chain_explorer_url,
+                rpc_fallbacks=_parse_rpc_fallbacks(),
             )
             contract = DataProvenanceContract(
                 web3=provider.web3,
                 contract_address=provider.contract_address,
             )
-            raw = contract.get_data_record(clean_hash)
+            raw = await asyncio.to_thread(contract.get_data_record, clean_hash)
             zero_address = "0x" + "0" * 40
             if raw[1] == zero_address:
                 raise DataNotRegisteredError(
@@ -2572,7 +2595,9 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
 
         restrict_original = arguments.get("restrict_original", False)
 
-        result = chain_client.transform(clean_original, clean_new, description)
+        result = await asyncio.to_thread(
+            chain_client.transform, clean_original, clean_new, description
+        )
 
         response_text = f"⛓️  Transformation recorded on-chain\n\n"
         response_text += f"   Original: {result.original_hash}\n"
@@ -2588,7 +2613,9 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
         # Optionally restrict the original data after transformation
         if restrict_original:
             try:
-                chain_client.set_status(clean_original, 1)  # 1 = RESTRICTED
+                await asyncio.to_thread(
+                    chain_client.set_status, clean_original, 1
+                )  # 1 = RESTRICTED
                 response_text += f"\n\n   ⚠️  Original data status set to RESTRICTED"
             except Exception as restrict_err:
                 response_text += (
@@ -2598,7 +2625,7 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
 
         # Post-tx balance check
         try:
-            wallet_info = chain_client.balance()
+            wallet_info = await asyncio.to_thread(chain_client.balance)
             guidance = _format_funding_guidance(
                 wallet_info.address, wallet_info.balance_wei, wallet_info.chain
             )
@@ -2658,9 +2685,7 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
 
         if isinstance(e, ChainTransactionError):
             if _is_insufficient_funds_error(e):
-                msg = _format_insufficient_funds_error(
-                    "record_transform", chain_client
-                )
+                msg = _format_insufficient_funds_error("record_transform", chain_client)
             else:
                 msg = f"Transaction failed: {str(e)}"
                 if e.tx_hash:
@@ -2708,9 +2733,7 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
 
         # Catch-all: still check for insufficient funds in generic errors
         if _is_insufficient_funds_error(e):
-            msg = _format_insufficient_funds_error(
-                "record_transform", chain_client
-            )
+            msg = _format_insufficient_funds_error("record_transform", chain_client)
             return CallToolResult(
                 content=[
                     TextContent(
@@ -2766,8 +2789,10 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
             raise ValueError("max_depth must be an integer between 1 and 50")
 
         if chain_client:
-            chain_records = chain_client.get_provenance_chain(
-                clean_hash, max_depth=max_depth
+            chain_records = await asyncio.to_thread(
+                lambda: chain_client.get_provenance_chain(
+                    clean_hash, max_depth=max_depth
+                )
             )
         else:
             # Read-only fallback without wallet key
@@ -2785,87 +2810,94 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
                 rpc_url=settings.chain_rpc_url,
                 contract_address=settings.chain_contract_address,
                 explorer_url=settings.chain_explorer_url,
+                rpc_fallbacks=_parse_rpc_fallbacks(),
             )
             contract = DataProvenanceContract(
                 web3=provider.web3,
                 contract_address=provider.contract_address,
             )
 
-            # Manual traversal mirroring ChainClient.get_provenance_chain
-            chain_records = []
-            visited = set()
-            to_visit = [(clean_hash, 0)]
-            zero_address = "0x" + "0" * 40
+            def _readonly_traverse():
+                """BFS traversal in a thread to avoid blocking the event loop."""
+                records = []
+                visited = set()
+                to_visit = [(clean_hash, 0)]
+                zero_address = "0x" + "0" * 40
 
-            while to_visit:
-                current_hash, depth = to_visit.pop(0)
-                if current_hash in visited or depth > max_depth:
-                    continue
-                visited.add(current_hash)
-
-                try:
-                    raw = contract.get_data_record(current_hash)
-                    if raw[1] == zero_address:
+                while to_visit:
+                    current_hash, depth = to_visit.pop(0)
+                    if current_hash in visited or depth > max_depth:
                         continue
-                    record = ChainProvenanceRecord(
-                        data_hash=(
-                            raw[0].hex() if isinstance(raw[0], bytes) else str(raw[0])
-                        ),
-                        owner=raw[1],
-                        timestamp=raw[2],
-                        data_type=raw[3],
-                        status=DataStatusEnum(raw[6]),
-                        accessors=list(raw[5]),
-                        transformations=[
-                            ChainTransformation(description=str(t)) for t in raw[4]
-                        ],
-                    )
+                    visited.add(current_hash)
 
-                    # Enrich transformations with new_data_hash from events
                     try:
-                        events = contract.get_transformations_from(current_hash)
-                        if events:
-                            enriched = []
-                            for orig_bytes, new_bytes, desc in events:
-                                new_hash = (
-                                    new_bytes.hex()
-                                    if isinstance(new_bytes, bytes)
-                                    else str(new_bytes)
-                                )
-                                enriched.append(
-                                    ChainTransformation(
-                                        description=desc,
-                                        new_data_hash=new_hash,
-                                    )
-                                )
-                                if new_hash not in visited:
-                                    to_visit.append((new_hash, depth + 1))
-                            record.transformations = enriched
-                    except Exception:
-                        # Fall back to record.transformations (description-only)
-                        for t in record.transformations:
-                            if t.new_data_hash and t.new_data_hash not in visited:
-                                to_visit.append((t.new_data_hash, depth + 1))
-
-                    # Reverse: find parents
-                    try:
-                        reverse_events = contract.get_transformations_to(
-                            current_hash
+                        raw = contract.get_data_record(current_hash)
+                        if raw[1] == zero_address:
+                            continue
+                        record = ChainProvenanceRecord(
+                            data_hash=(
+                                raw[0].hex()
+                                if isinstance(raw[0], bytes)
+                                else str(raw[0])
+                            ),
+                            owner=raw[1],
+                            timestamp=raw[2],
+                            data_type=raw[3],
+                            status=DataStatusEnum(raw[6]),
+                            accessors=list(raw[5]),
+                            transformations=[
+                                ChainTransformation(description=str(t)) for t in raw[4]
+                            ],
                         )
-                        for orig_bytes, new_bytes, desc in reverse_events:
-                            orig_hash = (
-                                orig_bytes.hex()
-                                if isinstance(orig_bytes, bytes)
-                                else str(orig_bytes)
-                            )
-                            if orig_hash not in visited:
-                                to_visit.append((orig_hash, depth + 1))
-                    except Exception:
-                        pass
 
-                    chain_records.append(record)
-                except Exception:
-                    continue
+                        # Enrich transformations with new_data_hash from events
+                        try:
+                            events = contract.get_transformations_from(current_hash)
+                            if events:
+                                enriched = []
+                                for orig_bytes, new_bytes, desc in events:
+                                    new_hash = (
+                                        new_bytes.hex()
+                                        if isinstance(new_bytes, bytes)
+                                        else str(new_bytes)
+                                    )
+                                    enriched.append(
+                                        ChainTransformation(
+                                            description=desc,
+                                            new_data_hash=new_hash,
+                                        )
+                                    )
+                                    if new_hash not in visited:
+                                        to_visit.append((new_hash, depth + 1))
+                                record.transformations = enriched
+                        except Exception:
+                            for t in record.transformations:
+                                if t.new_data_hash and t.new_data_hash not in visited:
+                                    to_visit.append((t.new_data_hash, depth + 1))
+
+                        # Reverse: find parents
+                        try:
+                            reverse_events = contract.get_transformations_to(
+                                current_hash
+                            )
+                            for orig_bytes, new_bytes, desc in reverse_events:
+                                orig_hash = (
+                                    orig_bytes.hex()
+                                    if isinstance(orig_bytes, bytes)
+                                    else str(orig_bytes)
+                                )
+                                if orig_hash not in visited:
+                                    to_visit.append((orig_hash, depth + 1))
+                        except Exception:
+                            pass
+
+                        records.append(record)
+                    except Exception:
+                        continue
+
+                return records
+
+            chain_records = await asyncio.to_thread(_readonly_traverse)
 
         if not chain_records:
             response_text = f"⛓️  No provenance chain found\n\n"

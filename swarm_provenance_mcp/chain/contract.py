@@ -580,7 +580,7 @@ class DataProvenanceContract:
     def get_transformations_from(
         self,
         data_hash: str,
-        lookback_blocks: int = 5_000,
+        lookback_blocks: int = 50_000,
     ) -> List[Tuple[bytes, bytes, str]]:
         """
         Query DataTransformed events where data_hash is the original.
@@ -604,17 +604,19 @@ class DataProvenanceContract:
         )
         results = []
         for evt in events:
-            results.append((
-                evt.args.originalDataHash,
-                evt.args.newDataHash,
-                evt.args.transformation,
-            ))
+            results.append(
+                (
+                    evt.args.originalDataHash,
+                    evt.args.newDataHash,
+                    evt.args.transformation,
+                )
+            )
         return results
 
     def get_transformations_to(
         self,
         data_hash: str,
-        lookback_blocks: int = 5_000,
+        lookback_blocks: int = 50_000,
     ) -> List[Tuple[bytes, bytes, str]]:
         """
         Query DataTransformed events where data_hash is the new (reverse lookup).
@@ -622,6 +624,8 @@ class DataProvenanceContract:
         Args:
             data_hash: 64-char hex hash.
             lookback_blocks: How many blocks to scan backwards from latest.
+                Default 50,000 (~28h on Base at 2s/block). Public RPCs
+                reject very large ranges.
 
         Returns:
             List of (originalDataHash, newDataHash, description) tuples.
@@ -636,11 +640,13 @@ class DataProvenanceContract:
         )
         results = []
         for evt in events:
-            results.append((
-                evt.args.originalDataHash,
-                evt.args.newDataHash,
-                evt.args.transformation,
-            ))
+            results.append(
+                (
+                    evt.args.originalDataHash,
+                    evt.args.newDataHash,
+                    evt.args.transformation,
+                )
+            )
         return results
 
     # --- Gas estimation ---

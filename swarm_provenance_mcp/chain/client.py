@@ -48,6 +48,7 @@ class ChainClient:
         gas_limit_multiplier: float = 1.2,
         explorer_url: Optional[str] = None,
         gas_limit: Optional[int] = None,
+        rpc_fallbacks: Optional[List[str]] = None,
     ):
         """
         Initialize the chain client.
@@ -61,6 +62,7 @@ class ChainClient:
             gas_limit_multiplier: Safety multiplier for gas estimates (default 1.2).
             explorer_url: Custom block explorer URL. If None, uses preset.
             gas_limit: Explicit gas limit. If set, skips estimation and multiplier.
+            rpc_fallbacks: Fallback RPC URLs tried in order on failure.
 
         Raises:
             ChainConfigurationError: If dependencies missing or config invalid.
@@ -74,6 +76,7 @@ class ChainClient:
             rpc_url=rpc_url,
             contract_address=contract_address,
             explorer_url=explorer_url,
+            rpc_fallbacks=rpc_fallbacks,
         )
         self._wallet = ChainWallet(
             private_key=private_key,
@@ -789,9 +792,7 @@ class ChainClient:
                     if orig_hash not in visited:
                         to_visit.append((orig_hash, current_depth + 1))
             except Exception:
-                logger.debug(
-                    "Could not query reverse events for %s", current_hash
-                )
+                logger.debug("Could not query reverse events for %s", current_hash)
 
             chain.append(record)
 

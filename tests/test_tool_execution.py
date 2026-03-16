@@ -1432,6 +1432,37 @@ class TestChainHealth:
         text = result.content[0].text
         assert "Connected: false" in text
 
+    async def test_chain_health_with_fallback_urls(self, server):
+        """CHAIN_RPC_URLS config should be parsed and passed to ChainProvider."""
+        mock_provider_cls = MagicMock()
+        mock_provider_instance = MagicMock()
+        mock_provider_instance.chain = "base-sepolia"
+        mock_provider_instance.chain_id = 84532
+        mock_provider_instance.rpc_url = "https://sepolia.base.org"
+        mock_provider_instance.contract_address = "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
+        mock_provider_instance.health_check.return_value = True
+        mock_provider_instance.get_block_number.return_value = 12345678
+        mock_provider_cls.return_value = mock_provider_instance
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', None), \
+             patch('swarm_provenance_mcp.server.settings') as mock_settings, \
+             patch('swarm_provenance_mcp.chain.provider.ChainProvider', mock_provider_cls):
+            mock_settings.chain_name = "base-sepolia"
+            mock_settings.chain_rpc_url = None
+            mock_settings.chain_contract_address = None
+            mock_settings.chain_explorer_url = None
+            mock_settings.chain_rpc_urls = "https://fallback1.com,https://fallback2.com"
+            result = await call_tool_directly(server, "chain_health", {})
+
+        assert not result.isError
+        # Verify ChainProvider was called with rpc_fallbacks
+        call_kwargs = mock_provider_cls.call_args
+        assert call_kwargs.kwargs["rpc_fallbacks"] == [
+            "https://fallback1.com",
+            "https://fallback2.com",
+        ]
+
 
 class TestFundingGuidance:
     """Direct unit tests for _format_funding_guidance helper."""
@@ -1489,6 +1520,62 @@ class TestFundingGuidance:
         from swarm_provenance_mcp.server import _format_funding_guidance
         result = _format_funding_guidance("0xabc", 100, "base-mainnet-custom")
         assert "bridge.base.org" in result
+
+
+class TestParseRpcFallbacks:
+    """Unit tests for _parse_rpc_fallbacks helper."""
+
+    def test_none_returns_none(self):
+        """No CHAIN_RPC_URLS setting should return None."""
+        from swarm_provenance_mcp.server import _parse_rpc_fallbacks
+
+        with patch("swarm_provenance_mcp.server.settings") as mock_settings:
+            mock_settings.chain_rpc_urls = None
+            assert _parse_rpc_fallbacks() is None
+
+    def test_empty_string_returns_none(self):
+        """Empty string should return None."""
+        from swarm_provenance_mcp.server import _parse_rpc_fallbacks
+
+        with patch("swarm_provenance_mcp.server.settings") as mock_settings:
+            mock_settings.chain_rpc_urls = ""
+            assert _parse_rpc_fallbacks() is None
+
+    def test_single_url(self):
+        """Single URL without commas."""
+        from swarm_provenance_mcp.server import _parse_rpc_fallbacks
+
+        with patch("swarm_provenance_mcp.server.settings") as mock_settings:
+            mock_settings.chain_rpc_urls = "https://fb1.io"
+            assert _parse_rpc_fallbacks() == ["https://fb1.io"]
+
+    def test_comma_separated(self):
+        """Multiple comma-separated URLs."""
+        from swarm_provenance_mcp.server import _parse_rpc_fallbacks
+
+        with patch("swarm_provenance_mcp.server.settings") as mock_settings:
+            mock_settings.chain_rpc_urls = "https://fb1.io,https://fb2.io,https://fb3.io"
+            assert _parse_rpc_fallbacks() == [
+                "https://fb1.io",
+                "https://fb2.io",
+                "https://fb3.io",
+            ]
+
+    def test_whitespace_trimmed(self):
+        """Whitespace around URLs should be stripped."""
+        from swarm_provenance_mcp.server import _parse_rpc_fallbacks
+
+        with patch("swarm_provenance_mcp.server.settings") as mock_settings:
+            mock_settings.chain_rpc_urls = " https://fb1.io , https://fb2.io "
+            assert _parse_rpc_fallbacks() == ["https://fb1.io", "https://fb2.io"]
+
+    def test_trailing_comma_ignored(self):
+        """Trailing comma should not produce an empty entry."""
+        from swarm_provenance_mcp.server import _parse_rpc_fallbacks
+
+        with patch("swarm_provenance_mcp.server.settings") as mock_settings:
+            mock_settings.chain_rpc_urls = "https://fb1.io,"
+            assert _parse_rpc_fallbacks() == ["https://fb1.io"]
 
 
 class TestMaskRpcUrl:
@@ -3557,6 +3644,22 @@ class TestGetTransformationsFrom:
         assert call_kwargs.kwargs["from_block"] == 49000
         assert call_kwargs.kwargs["to_block"] == 50000
 
+    def test_default_lookback_is_50000(self):
+        """Default lookback should be 50,000 blocks (~28h on Base)."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract.__new__(DataProvenanceContract)
+        contract._web3 = MagicMock()
+        contract._web3.eth.block_number = 100_000
+        contract._contract = MagicMock()
+        contract._contract.events.DataTransformed.get_logs.return_value = []
+
+        contract.get_transformations_from("ab" * 32)
+
+        call_kwargs = contract._contract.events.DataTransformed.get_logs.call_args
+        assert call_kwargs.kwargs["from_block"] == 50_000
+        assert call_kwargs.kwargs["to_block"] == 100_000
+
 
 class TestGetTransformationsTo:
     """Test contract.get_transformations_to reverse event query."""
@@ -3614,6 +3717,22 @@ class TestGetTransformationsTo:
         call_kwargs = contract._contract.events.DataTransformed.get_logs.call_args
         assert call_kwargs.kwargs["from_block"] == 0
         assert call_kwargs.kwargs["to_block"] == 100
+
+    def test_default_lookback_is_50000(self):
+        """Default lookback should be 50,000 blocks (~28h on Base)."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract.__new__(DataProvenanceContract)
+        contract._web3 = MagicMock()
+        contract._web3.eth.block_number = 100_000
+        contract._contract = MagicMock()
+        contract._contract.events.DataTransformed.get_logs.return_value = []
+
+        contract.get_transformations_to("cd" * 32)
+
+        call_kwargs = contract._contract.events.DataTransformed.get_logs.call_args
+        assert call_kwargs.kwargs["from_block"] == 50_000
+        assert call_kwargs.kwargs["to_block"] == 100_000
 
 
 class TestProvenanceChainEventTraversal:

@@ -155,6 +155,7 @@ Blockchain dependencies (web3, eth-account) are included in the default install.
 - `CHAIN_NAME`: Blockchain network (`base-sepolia` or `base`, default: `base-sepolia`)
 - `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x)
 - `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set)
+- `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs, tried in order after `CHAIN_RPC_URL`
 - `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set)
 - `CHAIN_EXPLORER_URL`: Custom block explorer URL (uses chain preset if not set)
 - `CHAIN_GAS_LIMIT`: Explicit gas limit for chain transactions (skips estimation if set)

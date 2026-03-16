@@ -74,8 +74,8 @@ Register data on Swarm with an immutable on-chain ownership record.
 ```
 1. health_check              → verify gateway + chain connectivity
 2. chain_balance              → confirm wallet has ETH for gas
-3. purchase_stamp             → get a stamp for Swarm storage
-4. check_stamp_health         → poll until can_upload: true
+3. purchase_stamp             → get a stamp for Swarm storage (check propagationStatus in response)
+4. check_stamp_health         → poll until can_upload: true (uses propagationStatus + estimatedReadyAt)
 5. upload_data                → store data, receive reference hash
 6. anchor_hash(swarm_hash)    → register hash on-chain
 7. verify_hash(swarm_hash)    → confirm registration succeeded
@@ -175,7 +175,8 @@ Inspect provenance records without a wallet.
                                                    └───────────────────┘
 
   get_provenance_chain(hash_0) returns: hash_0 → hash_1 → hash_2
-  get_provenance_chain(hash_1) returns: hash_1 → hash_2
+  get_provenance_chain(hash_2) returns: hash_0 → hash_1 → hash_2  (walks backward to root)
+  get_provenance_chain(hash_1) returns: hash_0 → hash_1 → hash_2  (walks both directions)
 ```
 
 ---
@@ -184,9 +185,10 @@ Inspect provenance records without a wallet.
 
 | Error | Cause | Recovery |
 |-------|-------|----------|
-| "Not usable" / "NOT_FOUND" | Stamp not yet propagated | Poll `check_stamp_health` every 15s (up to 2 min) |
+| "Not usable" / "NOT_FOUND" | Stamp not yet propagated | Check `propagationStatus` and `estimatedReadyAt` in the response. Poll `check_stamp_health` every 15s until `propagationStatus: "ready"` |
 | "insufficient funds" | Wallet ETH too low for gas | Run `chain_balance` for funding guidance (faucet/bridge URLs) |
 | "already registered" revert | Hash was already anchored | Not an error — `anchor_hash` returns the existing record |
+| "already exists" / "already registered" revert on `record_transform` | `new_hash` was pre-anchored via `anchor_hash` | Do NOT anchor `new_hash` before `record_transform` — it auto-registers. Re-upload the data to get a fresh hash. |
 | "data not registered" | `original_hash` not anchored | Call `anchor_hash` on the original first, then retry `record_transform` |
 | "not owner" / "unauthorized" | Wrong wallet for this data | Only the anchoring wallet (or delegate) can transform |
 | Size exceeded (4KB) | Upload payload too large | Split or compress data before upload |
@@ -203,10 +205,12 @@ Inspect provenance records without a wallet.
 | **Stamp** | Prepaid storage ticket (BZZ) — controls capacity (depth) and duration (TTL) |
 | **Anchor** | Registering a Swarm hash on the blockchain via `anchor_hash` |
 | **Transformation** | On-chain link between an original hash and a derived hash, recorded via `record_transform` |
-| **Lineage / Provenance chain** | The full tree of transformations from a root hash, retrieved via `get_provenance_chain` |
+| **Lineage / Provenance chain** | The full tree of transformations reachable from any hash (walks both directions), retrieved via `get_provenance_chain` |
 | **DAG** | Directed Acyclic Graph — the structure of transformation lineage (branching, no cycles) |
 | **Gas** | ETH spent to execute blockchain transactions (`anchor_hash`, `record_transform`) |
 | **Base Sepolia** | Testnet for the Base L2 chain — where the DataProvenance contract is deployed |
 | **DataProvenance contract** | Smart contract that stores provenance records and emits `DataTransformed` events |
 | **Owner** | The wallet address that anchored a hash — has exclusive rights to record transformations |
 | **RESTRICTED status** | Irreversible status set via `restrict_original=true` — signals data should not be accessed directly |
+| **Owned stamp** | A stamp purchased by your wallet — exclusive access, predictable utilization, production-ready |
+| **Public stamp** | A stamp available to all gateway users (accessMode: "shared" in API) — utilization is unpredictable, suitable for testing |

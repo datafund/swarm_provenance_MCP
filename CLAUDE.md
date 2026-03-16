@@ -100,13 +100,14 @@ On-chain provenance module. Dependencies (web3, eth-account) included in default
 ### Available MCP Tools
 
 #### Swarm Gateway Tools
-- `purchase_stamp` - Create new postage stamps
-- `get_stamp_status` - Retrieve detailed stamp information (includes utilization data)
-- `list_stamps` - List all available stamps
+- `purchase_stamp` - Create new postage stamps (response includes propagation timing)
+- `get_stamp_status` - Retrieve detailed stamp information (includes utilization + propagation data)
+- `list_stamps` - List local stamps with access mode (owned/shared) and propagation status
+  Stamps have `accessMode`: `"owned"` (dedicated, yours) or `"shared"` (public, any gateway user). Use owned stamps for production.
 - `extend_stamp` - Add funds to existing stamps
 - `upload_data` - Upload data to Swarm (max 4KB)
 - `download_data` - Download data from Swarm by reference hash
-- `check_stamp_health` - Diagnose stamp upload readiness with errors/warnings
+- `check_stamp_health` - Diagnose stamp upload readiness with errors/warnings and propagation timing
 - `get_wallet_info` - Node wallet address and BZZ balance (debug, may be removed)
 - `get_notary_info` - Check notary signing service availability
 - `health_check` - Gateway connectivity status
@@ -119,7 +120,7 @@ On-chain provenance module. Dependencies (web3, eth-account) included in default
 | `chain_balance` | **required** | no | Check wallet ETH balance with funding guidance |
 | `verify_hash` | not needed | no | Check if hash is registered on-chain |
 | `get_provenance` | not needed | no | Retrieve full on-chain provenance record |
-| `get_provenance_chain` | not needed | no | Follow transformation lineage tree via event logs |
+| `get_provenance_chain` | not needed | no | Follow transformation lineage tree bidirectionally via event logs |
 | `anchor_hash` | **required** | **yes** | Register Swarm hash on-chain |
 | `record_transform` | **required** | **yes** | Record data transformation, link original → new hash |
 
@@ -178,7 +179,7 @@ The `config.py` module uses Pydantic Settings for type-safe configuration with a
 - **MCP Resources**: `provenance://skills` resource (SKILLS.md content) via `@server.list_resources()` / `@server.read_resource()`
 - **Cross-server coordination**: health_check reports companion servers (swarm_connect gateway status, fds-id MCP availability)
 - **Insufficient funds**: `_is_insufficient_funds_error()` and `_format_insufficient_funds_error()` provide faucet/bridge URLs
-- **Event-based lineage**: `get_provenance_chain` uses `DataTransformed` contract events (not just record fields) for accurate transformation traversal
+- **Event-based lineage**: `get_provenance_chain` uses `DataTransformed` contract events bidirectionally (forward via `originalDataHash`, reverse via `newDataHash`) for accurate transformation traversal from any node
 - Helper functions: `_format_hints()`, `_format_error()`, `_is_retryable_error()`, `_suggest_tool_name()`
 
 ### Code Quality
@@ -206,8 +207,8 @@ Before submitting changes:
 This MCP server requires a running `swarm_connect` FastAPI gateway service. The gateway must be accessible at the configured `SWARM_GATEWAY_URL` and provide the following endpoints:
 - `POST /api/v1/stamps/` - Purchase stamps
 - `GET /api/v1/stamps/` - List stamps
-- `GET /api/v1/stamps/{id}` - Get stamp details
-- `GET /api/v1/stamps/{id}/check` - Stamp health check
+- `GET /api/v1/stamps/{id}` - Get stamp details (includes `propagationStatus`, `secondsSincePurchase`, `estimatedReadyAt`)
+- `GET /api/v1/stamps/{id}/check` - Stamp health check (includes propagation timing fields)
 - `PATCH /api/v1/stamps/{id}/extend` - Extend stamps
 - `POST /api/v1/data/` - Upload data
 - `GET /api/v1/data/{reference}` - Download data

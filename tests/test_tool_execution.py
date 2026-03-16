@@ -97,7 +97,9 @@ class TestToolExecution:
                         "batchID": TEST_STAMP_ID,
                         "amount": "2000000000",
                         "depth": 17,
-                        "utilization": 0.1
+                        "utilization": 0.1,
+                        "usable": True,
+                        "accessMode": "owned",
                     }
                 ],
                 "total_count": 1
@@ -198,6 +200,8 @@ class TestToolExecution:
         # Verify response contains stamp information
         content_text = result.content[0].text
         assert "stamp" in content_text.lower()
+        # Outdated network-visible warning must not appear
+        assert "network-visible" not in content_text
 
     async def test_extend_stamp_tool(self, server, mock_gateway_client):
         """Test extend_stamp tool execution."""
@@ -536,6 +540,239 @@ class TestResponseHints:
         )
         text = result.content[0].text
         assert "_next: purchase_stamp" in text
+
+
+class TestPropagationFields:
+    """Test that stamp handlers surface gateway propagation timing fields."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_health_check_shows_propagation_status(self, server):
+        """check_stamp_health should display propagationStatus and timing."""
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.check_stamp_health.return_value = {
+                "stamp_id": TEST_STAMP_ID,
+                "can_upload": False,
+                "errors": [{"code": "NOT_USABLE", "message": "Not usable yet"}],
+                "warnings": [],
+                "status": {"utilizationPercent": 0},
+                "propagationStatus": "propagating",
+                "secondsSincePurchase": 30,
+                "estimatedReadyAt": "2026-03-16T12:30:00Z",
+            }
+            result = await call_tool_directly(
+                server, "check_stamp_health", {"stamp_id": TEST_STAMP_ID}
+            )
+
+        text = result.content[0].text
+        assert "propagating" in text
+        assert "30s ago" in text
+        assert "2026-03-16T12:30:00Z" in text
+
+    async def test_health_check_propagating_uses_estimated_ready(self, server):
+        """Propagating stamp should show estimated ready time in hint."""
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.check_stamp_health.return_value = {
+                "stamp_id": TEST_STAMP_ID,
+                "can_upload": False,
+                "errors": [{"code": "NOT_USABLE", "message": "Not usable"}],
+                "warnings": [],
+                "status": {},
+                "propagationStatus": "propagating",
+                "secondsSincePurchase": 15,
+                "estimatedReadyAt": "2026-03-16T12:32:00Z",
+            }
+            result = await call_tool_directly(
+                server, "check_stamp_health", {"stamp_id": TEST_STAMP_ID}
+            )
+
+        text = result.content[0].text
+        assert "Estimated ready at 2026-03-16T12:32:00Z" in text
+        assert "_next: check_stamp_health" in text
+
+    async def test_health_check_no_propagation_fields(self, server):
+        """Older gateway without propagation fields should fall back to heuristic."""
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.check_stamp_health.return_value = {
+                "stamp_id": TEST_STAMP_ID,
+                "can_upload": False,
+                "errors": [{"code": "NOT_FOUND", "message": "Not found"}],
+                "warnings": [],
+                "status": {},
+            }
+            result = await call_tool_directly(
+                server, "check_stamp_health", {"stamp_id": TEST_STAMP_ID}
+            )
+
+        text = result.content[0].text
+        assert "propagating on the blockchain" in text
+        assert "_next: check_stamp_health" in text
+
+    async def test_stamp_status_shows_propagation(self, server):
+        """get_stamp_status should display propagation fields when present."""
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.get_stamp_details.return_value = {
+                "amount": "2000000000",
+                "depth": 17,
+                "bucketDepth": 16,
+                "blockNumber": 12345,
+                "batchTTL": 86400,
+                "expectedExpiration": "2026-04-15",
+                "usable": False,
+                "utilization": 0,
+                "immutableFlag": False,
+                "local": True,
+                "propagationStatus": "propagating",
+                "secondsSincePurchase": 45,
+                "estimatedReadyAt": "2026-03-16T12:35:00Z",
+            }
+            result = await call_tool_directly(
+                server, "get_stamp_status", {"stamp_id": TEST_STAMP_ID}
+            )
+
+        text = result.content[0].text
+        assert "propagating" in text
+        assert "45s since purchase" in text
+        assert "2026-03-16T12:35:00Z" in text
+
+    async def test_purchase_stamp_propagating(self, server):
+        """purchase_stamp should show estimated ready when propagating."""
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.purchase_stamp.return_value = {
+                "batchID": TEST_STAMP_ID,
+                "propagationStatus": "propagating",
+                "estimatedReadyAt": "2026-03-16T12:40:00Z",
+            }
+            result = await call_tool_directly(server, "purchase_stamp", {})
+
+        text = result.content[0].text
+        assert "propagating" in text
+        assert "2026-03-16T12:40:00Z" in text
+
+    async def test_purchase_stamp_ready_immediately(self, server):
+        """purchase_stamp from pool should show ready immediately."""
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.purchase_stamp.return_value = {
+                "batchID": TEST_STAMP_ID,
+                "propagationStatus": "ready",
+            }
+            result = await call_tool_directly(server, "purchase_stamp", {})
+
+        text = result.content[0].text
+        assert "ready immediately" in text
+
+
+class TestStampAccessMode:
+    """Test that list_stamps surfaces accessMode and propagationStatus from gateway."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_list_stamps_shows_access_mode_owned(self, server):
+        """Stamp with accessMode 'owned' should display 'owned' in output."""
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.list_stamps.return_value = {
+                "stamps": [
+                    {
+                        "batchID": TEST_STAMP_ID,
+                        "usable": True,
+                        "accessMode": "owned",
+                    }
+                ],
+                "total_count": 1,
+            }
+            result = await call_tool_directly(server, "list_stamps", {})
+
+        text = result.content[0].text
+        assert "Access: owned" in text
+        assert "network-visible" not in text
+
+    async def test_list_stamps_shows_access_mode_shared(self, server):
+        """Stamp with accessMode 'shared' should display 'shared' in output."""
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.list_stamps.return_value = {
+                "stamps": [
+                    {
+                        "batchID": TEST_STAMP_ID,
+                        "usable": True,
+                        "accessMode": "shared",
+                    }
+                ],
+                "total_count": 1,
+            }
+            result = await call_tool_directly(server, "list_stamps", {})
+
+        text = result.content[0].text
+        assert "Access: shared" in text
+
+    async def test_list_stamps_propagation_status(self, server):
+        """Stamp with propagationStatus should display it in output."""
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.list_stamps.return_value = {
+                "stamps": [
+                    {
+                        "batchID": TEST_STAMP_ID,
+                        "usable": False,
+                        "accessMode": "owned",
+                        "propagationStatus": "propagating",
+                    }
+                ],
+                "total_count": 1,
+            }
+            result = await call_tool_directly(server, "list_stamps", {})
+
+        text = result.content[0].text
+        assert "Propagation: propagating" in text
+
+    async def test_list_stamps_public_only_hint(self, server):
+        """When all stamps are shared (public), show guidance about dedicated stamps."""
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.list_stamps.return_value = {
+                "stamps": [
+                    {
+                        "batchID": TEST_STAMP_ID,
+                        "usable": True,
+                        "accessMode": "shared",
+                    },
+                    {
+                        "batchID": "c" * 64,
+                        "usable": True,
+                        "accessMode": "shared",
+                    },
+                ],
+                "total_count": 2,
+            }
+            result = await call_tool_directly(server, "list_stamps", {})
+
+        text = result.content[0].text
+        assert "All stamps are public (shared)" in text
+        assert "dedicated stamps" in text
+
+    async def test_list_stamps_owned_no_public_hint(self, server):
+        """When at least one stamp is owned, do NOT show the public-only hint."""
+        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+            mock_client.list_stamps.return_value = {
+                "stamps": [
+                    {
+                        "batchID": TEST_STAMP_ID,
+                        "usable": True,
+                        "accessMode": "owned",
+                    },
+                    {
+                        "batchID": "c" * 64,
+                        "usable": True,
+                        "accessMode": "shared",
+                    },
+                ],
+                "total_count": 2,
+            }
+            result = await call_tool_directly(server, "list_stamps", {})
+
+        text = result.content[0].text
+        assert "All stamps are public" not in text
 
 
 class TestStructuredErrors:
@@ -2900,6 +3137,43 @@ class TestGetProvenanceChain:
         assert "_related:" in text
         assert "record_transform" in text
 
+    async def test_chain_from_leaf_node(self, server):
+        """Querying from leaf should return multi-entry chain via reverse traversal."""
+        parent_hash = "aa" * 32
+        leaf_hash = "bb" * 32
+
+        mock_t = MagicMock()
+        mock_t.description = "Step 1"
+        mock_t.new_data_hash = leaf_hash
+
+        mock_client = MagicMock()
+        # chain_client returns both parent and leaf when queried from leaf
+        mock_client.get_provenance_chain.return_value = [
+            self._mock_record(
+                data_hash=leaf_hash, data_hash_val=leaf_hash,
+                data_type="derived",
+            ),
+            self._mock_record(
+                data_hash=parent_hash, data_hash_val=parent_hash,
+                data_type="original", transformations=[mock_t],
+            ),
+        ]
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "get_provenance_chain", {
+                "swarm_hash": leaf_hash,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "2 entries" in text
+        assert leaf_hash in text
+        assert parent_hash in text
+        mock_client.get_provenance_chain.assert_called_once_with(
+            leaf_hash, max_depth=10
+        )
+
     async def test_chain_timestamp_zero(self, server):
         """Timestamp=0 should display as 'unknown'."""
         mock_client = MagicMock()
@@ -3284,6 +3558,64 @@ class TestGetTransformationsFrom:
         assert call_kwargs.kwargs["to_block"] == 50000
 
 
+class TestGetTransformationsTo:
+    """Test contract.get_transformations_to reverse event query."""
+
+    def test_returns_event_tuples(self):
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract.__new__(DataProvenanceContract)
+        contract._web3 = MagicMock()
+        contract._web3.eth.block_number = 10000
+        contract._contract = MagicMock()
+
+        mock_event = MagicMock()
+        mock_event.args.originalDataHash = b'\xab' * 32
+        mock_event.args.newDataHash = b'\xcd' * 32
+        mock_event.args.transformation = "Anonymized"
+
+        contract._contract.events.DataTransformed.get_logs.return_value = [mock_event]
+
+        results = contract.get_transformations_to("cd" * 32)
+
+        assert len(results) == 1
+        orig, new, desc = results[0]
+        assert orig == b'\xab' * 32
+        assert new == b'\xcd' * 32
+        assert desc == "Anonymized"
+
+        # Verify filter used newDataHash, not originalDataHash
+        call_kwargs = contract._contract.events.DataTransformed.get_logs.call_args
+        assert "newDataHash" in call_kwargs.kwargs["argument_filters"]
+
+    def test_empty_events(self):
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract.__new__(DataProvenanceContract)
+        contract._web3 = MagicMock()
+        contract._web3.eth.block_number = 10000
+        contract._contract = MagicMock()
+        contract._contract.events.DataTransformed.get_logs.return_value = []
+
+        results = contract.get_transformations_to("cd" * 32)
+        assert results == []
+
+    def test_lookback_blocks_calculation(self):
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract.__new__(DataProvenanceContract)
+        contract._web3 = MagicMock()
+        contract._web3.eth.block_number = 100
+        contract._contract = MagicMock()
+        contract._contract.events.DataTransformed.get_logs.return_value = []
+
+        contract.get_transformations_to("cd" * 32, lookback_blocks=5000)
+
+        call_kwargs = contract._contract.events.DataTransformed.get_logs.call_args
+        assert call_kwargs.kwargs["from_block"] == 0
+        assert call_kwargs.kwargs["to_block"] == 100
+
+
 class TestProvenanceChainEventTraversal:
     """Test that get_provenance_chain uses events to follow transformation links."""
 
@@ -3336,6 +3668,7 @@ class TestProvenanceChainEventTraversal:
         client._contract = MagicMock()
         # Event query fails
         client._contract.get_transformations_from.side_effect = Exception("RPC error")
+        client._contract.get_transformations_to.side_effect = Exception("RPC error")
 
         record = ChainProvenanceRecord(
             data_hash="aa" * 32,
@@ -3360,6 +3693,70 @@ class TestProvenanceChainEventTraversal:
         # Should still include the first record (bb*32 not found but attempted)
         assert len(chain) == 1
         assert chain[0].data_hash == "aa" * 32
+
+    async def test_chain_from_leaf_walks_backward(self):
+        """Querying a leaf node should walk backward to find parents."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+        from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
+        from swarm_provenance_mcp.chain.models import (
+            ChainProvenanceRecord, ChainTransformation, DataStatusEnum,
+        )
+
+        client = ChainClient.__new__(ChainClient)
+        client._contract = MagicMock()
+
+        parent_hash = "aa" * 32
+        leaf_hash = "bb" * 32
+
+        parent_record = ChainProvenanceRecord(
+            data_hash=parent_hash,
+            owner="0xOWNER",
+            timestamp=1700000000,
+            data_type="original",
+            status=DataStatusEnum(0),
+            transformations=[],
+            accessors=[],
+        )
+        leaf_record = ChainProvenanceRecord(
+            data_hash=leaf_hash,
+            owner="0xOWNER",
+            timestamp=1700001000,
+            data_type="derived",
+            status=DataStatusEnum(0),
+            transformations=[],
+            accessors=[],
+        )
+
+        def get_side_effect(h):
+            if h == parent_hash:
+                return parent_record
+            if h == leaf_hash:
+                return leaf_record
+            raise DataNotRegisteredError("not found", data_hash=h)
+
+        client.get = MagicMock(side_effect=get_side_effect)
+
+        # Forward: leaf has no children
+        def fwd_side_effect(h):
+            return []
+        client._contract.get_transformations_from = MagicMock(
+            side_effect=fwd_side_effect
+        )
+
+        # Reverse: leaf was produced from parent
+        def rev_side_effect(h):
+            if h == leaf_hash:
+                return [(bytes.fromhex(parent_hash), bytes.fromhex(leaf_hash), "Step 1")]
+            return []
+        client._contract.get_transformations_to = MagicMock(
+            side_effect=rev_side_effect
+        )
+
+        chain = client.get_provenance_chain(leaf_hash)
+        hashes = [r.data_hash for r in chain]
+        assert len(chain) == 2
+        assert leaf_hash in hashes
+        assert parent_hash in hashes
 
 
 class TestProvenanceChainWorkflowPrompt:

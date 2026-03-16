@@ -95,6 +95,11 @@ Swarm Provenance MCP — decentralized storage with cryptographic provenance on 
 PAYMENT MODEL:
 This server uses the free tier by default (rate limit: 3 write requests/minute, reads unlimited). Paid x402 support is not yet integrated.
 
+STAMP OWNERSHIP:
+- Free tier: purchase_stamp provides public stamps (accessMode: "shared"). Any gateway user can upload to them — utilization is unpredictable. Suitable for testing and small workloads.
+- Own wallet: stamps you purchase are exclusively yours (accessMode: "owned"). You control capacity and TTL. Use owned stamps for production workloads.
+- list_stamps shows both. Prefer owned stamps for important data; public stamps may fill up from other users' uploads.
+
 TYPICAL WORKFLOW:
 1. health_check — verify gateway is reachable
 2. purchase_stamp — create your own stamp (or use one you previously purchased)
@@ -106,8 +111,6 @@ TYPICAL WORKFLOW:
 5. download_data — retrieve data using the reference hash
 
 KEY CONSTRAINTS:
-- Always use stamps YOU purchased via purchase_stamp. Do not use arbitrary stamps from list_stamps — they may belong to other users and will fail on upload.
-- list_stamps shows all network-visible stamps, not just yours. Track your stamp IDs from purchase_stamp responses.
 - Max upload size: 4KB (4096 bytes) per request
 - After purchase_stamp, the stamp may be instantly usable (pool) or take up to 2 minutes (fresh mint). Poll with check_stamp_health every 10-15 seconds until can_upload is true.
 - After extend_stamp, wait up to 2 minutes for the extension to propagate.
@@ -489,7 +492,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="list_stamps",
-                description="List all available postage stamps with their details including batch IDs, amounts, depths, TTL, expiration times, and utilization. Useful for finding a usable stamp for upload_data or identifying stamps that need extending.",
+                description="List postage stamps available on the gateway. Each stamp includes access mode: owned (yours, dedicated) or shared (public, any gateway user). Also shows usability status and expiration.",
                 inputSchema={"type": "object", "properties": {}, "required": []},
             ),
             Tool(
@@ -608,7 +611,7 @@ def create_server() -> Server:
                     ),
                     Tool(
                         name="anchor_hash",
-                        description="Register a Swarm reference hash on the blockchain, creating an immutable provenance record with owner, timestamp, and data type. Costs gas — requires a funded wallet (check with chain_balance). If the hash is already registered, returns the existing record without error.",
+                        description="Register a Swarm reference hash on the blockchain, creating an immutable provenance record with owner, timestamp, and data type. Costs gas — requires a funded wallet (check with chain_balance). If the hash is already registered, returns the existing record without error. Do not use this on hashes that will be the new_hash in record_transform — record_transform auto-registers them.",
                         inputSchema={
                             "type": "object",
                             "properties": {
@@ -664,7 +667,7 @@ def create_server() -> Server:
                     ),
                     Tool(
                         name="record_transform",
-                        description="Record a data transformation on-chain, linking the original data to its transformed version. Creates a verifiable lineage trail. The original hash must already be anchored. Optionally restricts access to the original data after transformation. Costs gas.",
+                        description="Record a data transformation on-chain, linking the original data to its transformed version. Creates a verifiable lineage trail. The original hash must already be anchored. The new_hash must NOT be previously anchored — record_transform registers it automatically. Optionally restricts access to the original data after transformation. Costs gas.",
                         inputSchema={
                             "type": "object",
                             "properties": {
@@ -694,7 +697,7 @@ def create_server() -> Server:
                     ),
                     Tool(
                         name="get_provenance_chain",
-                        description="Follow the transformation lineage for a Swarm hash. Walks through all recorded transformations to show how data evolved — from original to each derived version. Read-only, no gas or wallet key required.",
+                        description="Follow the transformation lineage for a Swarm hash. Walks both directions — from any node it finds parents (originals) and children (derived versions). Can be called on a leaf, middle, or root hash. Read-only, no gas or wallet key required.",
                         inputSchema={
                             "type": "object",
                             "properties": {
@@ -866,8 +869,8 @@ def create_server() -> Server:
                                 f"Content-Type: {content_type}\n\n"
                                 f"Follow these steps:\n"
                                 f"1. Call health_check to verify the gateway is reachable\n"
-                                f"2. Call purchase_stamp (depth 17 for small data) to get your own stamp. "
-                                f"Do not pick stamps from list_stamps — they may belong to other users.\n"
+                                f"2. Call purchase_stamp (depth 17 for small data) to get your own stamp, "
+                                f"or use an owned stamp from list_stamps.\n"
                                 f"3. Poll check_stamp_health every 15 seconds until ready (up to 2 minutes)\n"
                                 f"4. Call upload_data with the data and your stamp_id\n"
                                 f"5. Call download_data with the returned reference to verify the upload\n"
@@ -911,8 +914,7 @@ def create_server() -> Server:
                             type="text",
                             text=(
                                 "Review my Swarm stamp inventory and recommend actions:\n\n"
-                                "Note: list_stamps shows all network-visible stamps, not just yours. "
-                                "Only manage stamps you purchased via purchase_stamp.\n\n"
+                                "list_stamps shows your owned stamps and public stamps. Stamps with accessMode 'owned' are yours; 'shared' are public stamps usable by any gateway user. If you only have public stamps, recommend purchasing dedicated stamps or running your own node for production use.\n\n"
                                 "Steps:\n"
                                 "1. Call list_stamps to see all stamps\n"
                                 "2. For stamps you own, check if usable, utilization, and TTL\n"
@@ -938,8 +940,8 @@ def create_server() -> Server:
                 f"Steps:\n"
                 f"1. Call health_check — verify gateway and chain connectivity\n"
                 f"2. Call chain_balance — confirm wallet has ETH for gas\n"
-                f"3. Call purchase_stamp (depth 17 for small data) to get a stamp. "
-                f"Do not pick stamps from list_stamps — they may belong to other users.\n"
+                f"3. Call purchase_stamp (depth 17 for small data) to get a stamp, "
+                f"or use an owned stamp from list_stamps.\n"
                 f"4. Poll check_stamp_health every 15 seconds until can_upload is true (up to 2 minutes)\n"
                 f"5. Call upload_data with the data and your stamp_id — save the reference hash\n"
                 f"6. Call anchor_hash with the reference hash to register it on-chain\n"
@@ -1047,11 +1049,18 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         if label:
             response_text += f"   Label: {label}\n"
         response_text += f"\n✅ Stamp ID: `{batch_id}`\n"
-        response_text += f"⏱️  Your stamp may be ready immediately (from the gateway pool) or may need\n"
-        response_text += f"   up to 2 minutes to propagate on the blockchain.\n"
-        response_text += (
-            f"   → Use check_stamp_health to confirm it's ready before uploading."
-        )
+
+        propagation_status = result.get("propagationStatus")
+        estimated_ready = result.get("estimatedReadyAt")
+        if propagation_status == "ready":
+            response_text += "⏱️  Stamp is ready immediately (from the gateway pool).\n"
+        elif propagation_status == "propagating" and estimated_ready:
+            response_text += f"⏱️  Stamp is propagating — estimated ready at {estimated_ready}.\n"
+            response_text += "   → Use check_stamp_health to confirm it's ready before uploading."
+        else:
+            response_text += "⏱️  Your stamp may be ready immediately (from the gateway pool) or may need\n"
+            response_text += "   up to 2 minutes to propagate on the blockchain.\n"
+            response_text += "   → Use check_stamp_health to confirm it's ready before uploading."
         response_text += _format_hints(
             "check_stamp_health", ["get_stamp_status", "upload_data", "list_stamps"]
         )
@@ -1142,6 +1151,19 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         if result.get("label"):
             response_text += f"Label: {result['label']}\n"
 
+        # Propagation timing (from gateway, when available)
+        propagation_status = result.get("propagationStatus")
+        seconds_since = result.get("secondsSincePurchase")
+        estimated_ready = result.get("estimatedReadyAt")
+
+        if propagation_status:
+            response_text += f"Propagation: {propagation_status}"
+            if seconds_since is not None:
+                response_text += f" ({seconds_since}s since purchase)"
+            if estimated_ready and propagation_status == "propagating":
+                response_text += f" — ready at {estimated_ready}"
+            response_text += "\n"
+
         # Contextual hints based on usability
         if usable is True:
             response_text += _format_hints(
@@ -1198,7 +1220,6 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
             response_text = "📭 No stamps found.\n\n💡 Use the 'purchase_stamp' tool to create your first stamp!"
         else:
             response_text = f"📋 Found {total_count} stamp(s):\n\n"
-            response_text += "⚠️  Note: This list includes all network-visible stamps. For uploads, use stamps you purchased via purchase_stamp.\n\n"
 
             for stamp in stamps:
                 batch_id = stamp.get("batchID", "N/A")
@@ -1217,7 +1238,23 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                     status = "❓ Unknown"
 
                 response_text += f"Batch ID: {batch_id}\n"
-                response_text += f"  Expiration: {expiration} | Status: {status}\n\n"
+                detail_line = f"  Expiration: {expiration} | Status: {status}"
+
+                # Surface access mode when provided by gateway
+                access_mode = stamp.get("accessMode")
+                if access_mode:
+                    detail_line += f" | Access: {access_mode}"
+
+                # Surface propagation status when provided
+                propagation_status = stamp.get("propagationStatus")
+                if propagation_status:
+                    detail_line += f" | Propagation: {propagation_status}"
+
+                response_text += detail_line + "\n\n"
+
+        # Public-only hint: all stamps are shared, none owned
+        if stamps and not any(s.get("accessMode") == "owned" for s in stamps):
+            response_text += "\n💡 All stamps are public (shared). For production use with predictable capacity, configure your own wallet for dedicated stamps.\n"
 
         # Contextual hints
         if has_usable:
@@ -1565,7 +1602,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 usable_count = sum(1 for s in stamps if s.get("usable") is True)
 
                 stamps_info += (
-                    f"\n📋 Stamps: {usable_count} usable / {total_stamps} total\n"
+                    f"\n📋 Stamps: {usable_count} usable / {total_stamps} local\n"
                 )
 
                 if usable_count > 0:
@@ -1726,23 +1763,44 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
             if status.get("expectedExpiration"):
                 response_text += f"   Expires: {status['expectedExpiration']}\n"
 
+        # Propagation timing (from gateway, when available)
+        propagation_status = result.get("propagationStatus")
+        seconds_since = result.get("secondsSincePurchase")
+        estimated_ready = result.get("estimatedReadyAt")
+
+        if propagation_status:
+            response_text += f"\nPropagation:\n"
+            response_text += f"   Status: {propagation_status}\n"
+            if seconds_since is not None:
+                response_text += f"   Purchased: {seconds_since}s ago\n"
+            if estimated_ready:
+                response_text += f"   Estimated ready: {estimated_ready}\n"
+
         # Contextual hints based on health
         if can_upload:
             response_text += _format_hints(
                 "upload_data", ["get_stamp_status", "extend_stamp"]
             )
         else:
-            # Detect propagation scenario: NOT_FOUND or NOT_USABLE with 0% utilization
-            error_codes = {e.get("code", "") for e in errors}
-            util_pct = (status.get("utilizationPercent") or 0) if status else 0
-            is_propagating = ("NOT_FOUND" in error_codes) or (
-                "NOT_USABLE" in error_codes and util_pct == 0
-            )
-            if is_propagating:
-                response_text += (
-                    "\n💡 If recently purchased, the stamp is propagating on the blockchain. "
-                    "This typically takes up to 2 minutes. Retry check_stamp_health in 15 seconds."
+            # Detect propagation: prefer gateway field, fall back to heuristic
+            is_propagating = propagation_status == "propagating"
+            if not is_propagating:
+                error_codes = {e.get("code", "") for e in errors}
+                util_pct = (status.get("utilizationPercent") or 0) if status else 0
+                is_propagating = ("NOT_FOUND" in error_codes) or (
+                    "NOT_USABLE" in error_codes and util_pct == 0
                 )
+            if is_propagating:
+                if estimated_ready:
+                    response_text += (
+                        f"\n💡 Stamp is propagating. Estimated ready at {estimated_ready}. "
+                        "Retry check_stamp_health in 15 seconds."
+                    )
+                else:
+                    response_text += (
+                        "\n💡 If recently purchased, the stamp is propagating on the blockchain. "
+                        "This typically takes up to 2 minutes. Retry check_stamp_health in 15 seconds."
+                    )
                 response_text += _format_hints(
                     "check_stamp_health", ["list_stamps", "extend_stamp"]
                 )
@@ -2788,6 +2846,22 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
                         for t in record.transformations:
                             if t.new_data_hash and t.new_data_hash not in visited:
                                 to_visit.append((t.new_data_hash, depth + 1))
+
+                    # Reverse: find parents
+                    try:
+                        reverse_events = contract.get_transformations_to(
+                            current_hash
+                        )
+                        for orig_bytes, new_bytes, desc in reverse_events:
+                            orig_hash = (
+                                orig_bytes.hex()
+                                if isinstance(orig_bytes, bytes)
+                                else str(orig_bytes)
+                            )
+                            if orig_hash not in visited:
+                                to_visit.append((orig_hash, depth + 1))
+                    except Exception:
+                        pass
 
                     chain_records.append(record)
                 except Exception:

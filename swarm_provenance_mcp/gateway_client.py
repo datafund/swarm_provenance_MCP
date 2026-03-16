@@ -99,7 +99,7 @@ class SwarmGatewayClient:
         return response.json()
 
     def list_stamps(self) -> Dict[str, Any]:
-        """List all available stamps.
+        """List local stamps available on the gateway.
 
         Returns:
             Response containing list of stamps and total count

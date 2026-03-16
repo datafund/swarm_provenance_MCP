@@ -611,6 +611,38 @@ class DataProvenanceContract:
             ))
         return results
 
+    def get_transformations_to(
+        self,
+        data_hash: str,
+        lookback_blocks: int = 5_000,
+    ) -> List[Tuple[bytes, bytes, str]]:
+        """
+        Query DataTransformed events where data_hash is the new (reverse lookup).
+
+        Args:
+            data_hash: 64-char hex hash.
+            lookback_blocks: How many blocks to scan backwards from latest.
+
+        Returns:
+            List of (originalDataHash, newDataHash, description) tuples.
+        """
+        hash_bytes = _normalize_hash(data_hash)
+        latest = self._web3.eth.block_number
+        from_block = max(0, latest - lookback_blocks)
+        events = self._contract.events.DataTransformed.get_logs(
+            argument_filters={"newDataHash": hash_bytes},
+            from_block=from_block,
+            to_block=latest,
+        )
+        results = []
+        for evt in events:
+            results.append((
+                evt.args.originalDataHash,
+                evt.args.newDataHash,
+                evt.args.transformation,
+            ))
+        return results
+
     # --- Gas estimation ---
 
     def estimate_gas(self, tx: dict) -> int:

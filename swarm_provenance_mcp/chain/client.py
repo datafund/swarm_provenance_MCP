@@ -777,6 +777,22 @@ class ChainClient:
                     if t.new_data_hash and t.new_data_hash not in visited:
                         to_visit.append((t.new_data_hash, current_depth + 1))
 
+            # Reverse: transformations TO this hash (find parents)
+            try:
+                reverse_events = self._contract.get_transformations_to(current_hash)
+                for orig_bytes, new_bytes, desc in reverse_events:
+                    orig_hash = (
+                        orig_bytes.hex()
+                        if isinstance(orig_bytes, bytes)
+                        else str(orig_bytes)
+                    )
+                    if orig_hash not in visited:
+                        to_visit.append((orig_hash, current_depth + 1))
+            except Exception:
+                logger.debug(
+                    "Could not query reverse events for %s", current_hash
+                )
+
             chain.append(record)
 
         logger.debug("Chain length: %d", len(chain))

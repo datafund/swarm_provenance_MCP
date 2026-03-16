@@ -577,6 +577,57 @@ class DataProvenanceContract:
 
     # --- Event queries ---
 
+    # Public RPCs enforce per-request block range limits (Base Sepolia
+    # allows ~10k blocks).  We chunk large lookbacks into windows of
+    # this size so that the default 50k lookback works reliably.
+    _EVENT_CHUNK_SIZE = 10_000
+
+    def _get_logs_chunked(self, event, argument_filters, from_block, to_block):
+        """
+        Query event logs in chunks to avoid RPC payload limits.
+
+        Splits the range [from_block, to_block] into windows of
+        ``_EVENT_CHUNK_SIZE`` and concatenates results.  On 413/payload
+        errors the failing chunk is halved once before giving up.
+        """
+        all_events = []
+        start = from_block
+        while start <= to_block:
+            end = min(start + self._EVENT_CHUNK_SIZE - 1, to_block)
+            try:
+                logs = event.get_logs(
+                    argument_filters=argument_filters,
+                    from_block=start,
+                    to_block=end,
+                )
+                all_events.extend(logs)
+            except Exception as e:
+                err_str = str(e).lower()
+                if "413" in err_str or "payload" in err_str or "too large" in err_str:
+                    # Halve the chunk and retry once
+                    mid = (start + end) // 2
+                    if mid == start:
+                        raise  # Can't split further
+                    try:
+                        logs1 = event.get_logs(
+                            argument_filters=argument_filters,
+                            from_block=start,
+                            to_block=mid,
+                        )
+                        logs2 = event.get_logs(
+                            argument_filters=argument_filters,
+                            from_block=mid + 1,
+                            to_block=end,
+                        )
+                        all_events.extend(logs1)
+                        all_events.extend(logs2)
+                    except Exception:
+                        raise  # Give up on this chunk
+                else:
+                    raise
+            start = end + 1
+        return all_events
+
     def get_transformations_from(
         self,
         data_hash: str,
@@ -588,8 +639,8 @@ class DataProvenanceContract:
         Args:
             data_hash: 64-char hex hash.
             lookback_blocks: How many blocks to scan backwards from latest.
-                Default 50,000 (~28h on Base at 2s/block). Public RPCs
-                reject very large ranges.
+                Default 50,000 (~28h on Base at 2s/block). Scanned in
+                chunks of 10k blocks to stay within public RPC limits.
 
         Returns:
             List of (originalDataHash, newDataHash, description) tuples.
@@ -597,10 +648,11 @@ class DataProvenanceContract:
         hash_bytes = _normalize_hash(data_hash)
         latest = self._web3.eth.block_number
         from_block = max(0, latest - lookback_blocks)
-        events = self._contract.events.DataTransformed.get_logs(
-            argument_filters={"originalDataHash": hash_bytes},
-            from_block=from_block,
-            to_block=latest,
+        events = self._get_logs_chunked(
+            self._contract.events.DataTransformed,
+            {"originalDataHash": hash_bytes},
+            from_block,
+            latest,
         )
         results = []
         for evt in events:
@@ -624,8 +676,8 @@ class DataProvenanceContract:
         Args:
             data_hash: 64-char hex hash.
             lookback_blocks: How many blocks to scan backwards from latest.
-                Default 50,000 (~28h on Base at 2s/block). Public RPCs
-                reject very large ranges.
+                Default 50,000 (~28h on Base at 2s/block). Scanned in
+                chunks of 10k blocks to stay within public RPC limits.
 
         Returns:
             List of (originalDataHash, newDataHash, description) tuples.
@@ -633,10 +685,11 @@ class DataProvenanceContract:
         hash_bytes = _normalize_hash(data_hash)
         latest = self._web3.eth.block_number
         from_block = max(0, latest - lookback_blocks)
-        events = self._contract.events.DataTransformed.get_logs(
-            argument_filters={"newDataHash": hash_bytes},
-            from_block=from_block,
-            to_block=latest,
+        events = self._get_logs_chunked(
+            self._contract.events.DataTransformed,
+            {"newDataHash": hash_bytes},
+            from_block,
+            latest,
         )
         results = []
         for evt in events:

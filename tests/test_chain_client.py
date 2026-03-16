@@ -498,6 +498,100 @@ class TestChainProvider:
         url = provider.get_explorer_address_url(DUMMY_ADDRESS)
         assert "sepolia.basescan.org/address/" in url
 
+    def test_preset_fallbacks_used_by_default(self, mock_chain_deps):
+        """Default init should include primary + preset fallback URLs."""
+        from swarm_provenance_mcp.chain.provider import ChainProvider
+
+        provider = ChainProvider(chain="base-sepolia")
+        assert len(provider._rpc_urls) == 3
+        assert provider._rpc_urls[0] == "https://sepolia.base.org"
+        assert "publicnode.com" in provider._rpc_urls[1]
+        assert "drpc.org" in provider._rpc_urls[2]
+
+    def test_custom_rpc_skips_preset_fallbacks(self, mock_chain_deps):
+        """Custom RPC with no explicit fallbacks should only have primary."""
+        from swarm_provenance_mcp.chain.provider import ChainProvider
+
+        provider = ChainProvider(
+            chain="base-sepolia",
+            rpc_url="https://custom.rpc.io",
+        )
+        assert len(provider._rpc_urls) == 1
+        assert provider._rpc_urls[0] == "https://custom.rpc.io"
+
+    def test_explicit_fallbacks_with_custom_rpc(self, mock_chain_deps):
+        """Custom RPC + explicit fallbacks should include both."""
+        from swarm_provenance_mcp.chain.provider import ChainProvider
+
+        provider = ChainProvider(
+            chain="base-sepolia",
+            rpc_url="https://custom.rpc.io",
+            rpc_fallbacks=["https://fb1.io", "https://fb2.io"],
+        )
+        assert len(provider._rpc_urls) == 3
+        assert provider._rpc_urls[0] == "https://custom.rpc.io"
+        assert provider._rpc_urls[1] == "https://fb1.io"
+        assert provider._rpc_urls[2] == "https://fb2.io"
+
+    def test_request_timeout_applied(self, mock_chain_deps):
+        """HTTPProvider should receive the timeout kwarg."""
+        from swarm_provenance_mcp.chain.provider import ChainProvider
+
+        provider = ChainProvider(chain="base-sepolia", request_timeout=15)
+        # The Web3 class is mocked, so verify HTTPProvider was called with timeout
+        web3_cls = mock_chain_deps["web3_class"]
+        http_provider_calls = web3_cls.HTTPProvider.call_args_list
+        # Last call should have our timeout
+        last_call = http_provider_calls[-1]
+        assert last_call.kwargs.get("request_kwargs") == {"timeout": 15}
+
+    def test_health_check_tries_fallback(self, mock_chain_deps):
+        """Primary fails, fallback succeeds — provider should switch."""
+        from swarm_provenance_mcp.chain.provider import ChainProvider
+
+        provider = ChainProvider(chain="base-sepolia")
+        original_url = provider.rpc_url
+
+        # Make the current web3 fail is_connected
+        provider._web3.is_connected.return_value = False
+
+        # Mock _import_web3 to return a Web3 class whose instances succeed
+        fallback_web3 = MagicMock()
+        fallback_web3.is_connected.return_value = True
+        fallback_web3.eth.chain_id = 84532
+
+        web3_cls = mock_chain_deps["web3_class"]
+        web3_cls.return_value = fallback_web3
+
+        result = provider.health_check()
+        assert result is True
+        # Provider should have switched to a fallback URL
+        assert provider.rpc_url != original_url
+        assert provider._web3 == fallback_web3
+
+    def test_get_block_number_tries_fallback(self, mock_chain_deps):
+        """get_block_number should try fallback when primary fails."""
+        from swarm_provenance_mcp.chain.provider import ChainProvider
+
+        provider = ChainProvider(chain="base-sepolia")
+
+        # Make current web3 block_number raise
+        type(provider._web3.eth).block_number = PropertyMock(
+            side_effect=Exception("RPC timeout")
+        )
+
+        # Fallback web3 returns a block number
+        fallback_web3 = MagicMock()
+        fallback_web3.is_connected.return_value = True
+        type(fallback_web3.eth).block_number = PropertyMock(return_value=99999)
+
+        web3_cls = mock_chain_deps["web3_class"]
+        web3_cls.return_value = fallback_web3
+
+        block = provider.get_block_number()
+        assert block == 99999
+        assert provider._web3 == fallback_web3
+
 
 # --- Wallet tests ---
 
@@ -594,6 +688,19 @@ class TestChainClientInit:
         # Verify explorer URL is used in anchor results
         result = client.anchor(swarm_hash=DUMMY_HASH)
         assert "custom-explorer.io" in result.explorer_url
+
+    def test_rpc_fallbacks_passthrough(self, mock_chain_deps):
+        """rpc_fallbacks should be passed through to ChainProvider."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+
+        fallbacks = ["https://fb1.io", "https://fb2.io"]
+        client = ChainClient(
+            chain="base-sepolia",
+            rpc_fallbacks=fallbacks,
+        )
+        assert client._provider._rpc_urls[0] == "https://sepolia.base.org"
+        assert client._provider._rpc_urls[1] == "https://fb1.io"
+        assert client._provider._rpc_urls[2] == "https://fb2.io"
 
     def test_missing_deps_shows_helpful_message(self):
         """Tests that missing blockchain deps give clear error."""

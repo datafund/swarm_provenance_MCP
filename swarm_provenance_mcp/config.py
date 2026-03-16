@@ -74,6 +74,12 @@ class Settings(BaseSettings):
         description="Custom RPC endpoint URL (uses chain preset if not set)",
     )
 
+    chain_rpc_urls: Optional[str] = Field(
+        default=None,
+        env="CHAIN_RPC_URLS",
+        description="Comma-separated fallback RPC URLs, tried in order after CHAIN_RPC_URL",
+    )
+
     chain_contract_address: Optional[str] = Field(
         default=None,
         env="CHAIN_CONTRACT",

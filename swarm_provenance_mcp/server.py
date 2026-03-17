@@ -2659,6 +2659,7 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
                 ChainTransactionError,
                 ChainConnectionError,
                 ChainValidationError,
+                TransformationAlreadyExistsError,
             )
         except ImportError:
             return CallToolResult(
@@ -2669,6 +2670,21 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
                     )
                 ],
                 isError=True,
+            )
+
+        if isinstance(e, TransformationAlreadyExistsError):
+            # Intentionally NOT isError — idempotent, same as anchor_hash
+            response_text = f"⛓️  Transformation already recorded on-chain\n\n"
+            response_text += f"   Original: {e.original_hash}\n"
+            response_text += f"   Transformed: {e.new_hash}\n"
+            if e.existing_description:
+                response_text += f"   Description: {e.existing_description}\n"
+            response_text += (
+                f"\n   The (original → new) link is already on-chain. No gas spent."
+            )
+            response_text += _format_hints("get_provenance", ["get_provenance_chain"])
+            return CallToolResult(
+                content=[TextContent(type="text", text=response_text)]
             )
 
         if isinstance(e, DataNotRegisteredError):
@@ -2819,6 +2835,33 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
 
             def _readonly_traverse():
                 """BFS traversal in a thread to avoid blocking the event loop."""
+                import logging as _log
+
+                _logger = _log.getLogger(__name__)
+
+                # Build in-memory transformation index via cached event scan
+                from .chain.event_cache import get_cache as _get_event_cache
+
+                forward = {}  # original_hex -> [(new_hex, desc)]
+                reverse = {}  # new_hex -> [(original_hex, desc)]
+                deploy_block = provider.deploy_block
+                use_local_index = False
+
+                if deploy_block is not None:
+                    try:
+                        cache = _get_event_cache(
+                            provider.chain, provider.contract_address
+                        )
+                        current_block = provider.web3.eth.block_number
+                        forward, reverse = cache.get_maps(
+                            contract, deploy_block, current_block
+                        )
+                        use_local_index = True
+                    except Exception as e:
+                        _logger.warning(
+                            "Full event scan failed, per-node fallback: %s", e
+                        )
+
                 records = []
                 visited = set()
                 to_visit = [(clean_hash, 0)]
@@ -2850,46 +2893,73 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
                             ],
                         )
 
-                        # Enrich transformations with new_data_hash from events
-                        try:
-                            events = contract.get_transformations_from(current_hash)
-                            if events:
-                                enriched = []
-                                for orig_bytes, new_bytes, desc in events:
-                                    new_hash = (
-                                        new_bytes.hex()
-                                        if isinstance(new_bytes, bytes)
-                                        else str(new_bytes)
+                        if use_local_index:
+                            fwd = forward.get(current_hash, [])
+                            if fwd:
+                                record.transformations = [
+                                    ChainTransformation(
+                                        description=desc,
+                                        new_data_hash=nh,
                                     )
-                                    enriched.append(
-                                        ChainTransformation(
-                                            description=desc,
-                                            new_data_hash=new_hash,
+                                    for nh, desc in fwd
+                                ]
+                                for nh, _ in fwd:
+                                    if nh not in visited:
+                                        to_visit.append((nh, depth + 1))
+                            for orig_hex, _ in reverse.get(current_hash, []):
+                                if orig_hex not in visited:
+                                    to_visit.append((orig_hex, depth + 1))
+                        else:
+                            try:
+                                events = contract.get_transformations_from(current_hash)
+                                if events:
+                                    enriched = []
+                                    for orig_bytes, new_bytes, desc in events:
+                                        new_hash = (
+                                            new_bytes.hex()
+                                            if isinstance(new_bytes, bytes)
+                                            else str(new_bytes)
                                         )
-                                    )
-                                    if new_hash not in visited:
-                                        to_visit.append((new_hash, depth + 1))
-                                record.transformations = enriched
-                        except Exception:
-                            for t in record.transformations:
-                                if t.new_data_hash and t.new_data_hash not in visited:
-                                    to_visit.append((t.new_data_hash, depth + 1))
-
-                        # Reverse: find parents
-                        try:
-                            reverse_events = contract.get_transformations_to(
-                                current_hash
-                            )
-                            for orig_bytes, new_bytes, desc in reverse_events:
-                                orig_hash = (
-                                    orig_bytes.hex()
-                                    if isinstance(orig_bytes, bytes)
-                                    else str(orig_bytes)
+                                        enriched.append(
+                                            ChainTransformation(
+                                                description=desc,
+                                                new_data_hash=new_hash,
+                                            )
+                                        )
+                                        if new_hash not in visited:
+                                            to_visit.append((new_hash, depth + 1))
+                                    record.transformations = enriched
+                            except Exception as e:
+                                _logger.warning(
+                                    "Event query failed for %s: %s",
+                                    current_hash,
+                                    e,
                                 )
-                                if orig_hash not in visited:
-                                    to_visit.append((orig_hash, depth + 1))
-                        except Exception:
-                            pass
+                                for t in record.transformations:
+                                    if (
+                                        t.new_data_hash
+                                        and t.new_data_hash not in visited
+                                    ):
+                                        to_visit.append((t.new_data_hash, depth + 1))
+
+                            try:
+                                reverse_events = contract.get_transformations_to(
+                                    current_hash
+                                )
+                                for orig_bytes, new_bytes, desc in reverse_events:
+                                    orig_hash = (
+                                        orig_bytes.hex()
+                                        if isinstance(orig_bytes, bytes)
+                                        else str(orig_bytes)
+                                    )
+                                    if orig_hash not in visited:
+                                        to_visit.append((orig_hash, depth + 1))
+                            except Exception as e:
+                                _logger.warning(
+                                    "Reverse event query failed for %s: %s",
+                                    current_hash,
+                                    e,
+                                )
 
                         records.append(record)
                     except Exception:

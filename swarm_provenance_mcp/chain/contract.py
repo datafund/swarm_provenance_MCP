@@ -589,18 +589,25 @@ class DataProvenanceContract:
         Splits the range [from_block, to_block] into windows of
         ``_EVENT_CHUNK_SIZE`` and concatenates results.  On 413/payload
         errors the failing chunk is halved once before giving up.
+
+        ``argument_filters`` may be ``None`` to fetch all events of the
+        given type (unfiltered scan).
         """
         all_events = []
         start = from_block
+
+        # Build kwargs — omit argument_filters when None so web3 uses
+        # its default (no topic filtering beyond the event signature).
+        def _get(fb, tb):
+            kw = {"from_block": fb, "to_block": tb}
+            if argument_filters:
+                kw["argument_filters"] = argument_filters
+            return event.get_logs(**kw)
+
         while start <= to_block:
             end = min(start + self._EVENT_CHUNK_SIZE - 1, to_block)
             try:
-                logs = event.get_logs(
-                    argument_filters=argument_filters,
-                    from_block=start,
-                    to_block=end,
-                )
-                all_events.extend(logs)
+                all_events.extend(_get(start, end))
             except Exception as e:
                 err_str = str(e).lower()
                 if "413" in err_str or "payload" in err_str or "too large" in err_str:
@@ -609,18 +616,8 @@ class DataProvenanceContract:
                     if mid == start:
                         raise  # Can't split further
                     try:
-                        logs1 = event.get_logs(
-                            argument_filters=argument_filters,
-                            from_block=start,
-                            to_block=mid,
-                        )
-                        logs2 = event.get_logs(
-                            argument_filters=argument_filters,
-                            from_block=mid + 1,
-                            to_block=end,
-                        )
-                        all_events.extend(logs1)
-                        all_events.extend(logs2)
+                        all_events.extend(_get(start, mid))
+                        all_events.extend(_get(mid + 1, end))
                     except Exception:
                         raise  # Give up on this chunk
                 else:
@@ -701,6 +698,37 @@ class DataProvenanceContract:
                 )
             )
         return results
+
+    def get_all_transformations(
+        self,
+        from_block: int = 0,
+        to_block: int = None,
+    ) -> List[Tuple[bytes, bytes, str]]:
+        """
+        Query ALL DataTransformed events in a block range (no hash filter).
+
+        Used by ``get_provenance_chain`` to build an in-memory index of
+        all transformations, enabling BFS traversal without per-node
+        event queries.
+
+        Args:
+            from_block: Start of the scan range (e.g. contract deploy block).
+            to_block: End of the scan range. Defaults to latest block.
+
+        Returns:
+            List of (originalDataHash, newDataHash, description) tuples.
+        """
+        latest = to_block if to_block is not None else self._web3.eth.block_number
+        events = self._get_logs_chunked(
+            self._contract.events.DataTransformed,
+            None,
+            from_block,
+            latest,
+        )
+        return [
+            (evt.args.originalDataHash, evt.args.newDataHash, evt.args.transformation)
+            for evt in events
+        ]
 
     # --- Gas estimation ---
 

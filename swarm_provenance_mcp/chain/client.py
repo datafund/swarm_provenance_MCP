@@ -16,6 +16,7 @@ from .exceptions import (
     ChainTransactionError,
     DataAlreadyRegisteredError,
     DataNotRegisteredError,
+    TransformationAlreadyExistsError,
 )
 from .models import (
     AccessResult,
@@ -351,6 +352,28 @@ class ChainClient:
             new_hash,
             description,
         )
+
+        # Pre-check: avoid wasting gas on duplicate transformations
+        deploy_block = self._provider.deploy_block
+        if deploy_block is not None:
+            try:
+                from .event_cache import get_cache
+
+                cache = get_cache(self._provider.chain, self._provider.contract_address)
+                current_block = self._provider.web3.eth.block_number
+                forward, _ = cache.get_maps(self._contract, deploy_block, current_block)
+                for existing_new, existing_desc in forward.get(original_hash, []):
+                    if existing_new == new_hash:
+                        raise TransformationAlreadyExistsError(
+                            f"Transformation {original_hash[:16]}… → {new_hash[:16]}… already exists",
+                            original_hash=original_hash,
+                            new_hash=new_hash,
+                            existing_description=existing_desc,
+                        )
+            except TransformationAlreadyExistsError:
+                raise
+            except Exception as e:
+                logger.warning("Duplicate check failed, proceeding: %s", e)
 
         tx = self._contract.build_record_transformation_tx(
             original_hash=original_hash,

@@ -2659,6 +2659,7 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
                 ChainTransactionError,
                 ChainConnectionError,
                 ChainValidationError,
+                TransformationAlreadyExistsError,
             )
         except ImportError:
             return CallToolResult(
@@ -2669,6 +2670,21 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
                     )
                 ],
                 isError=True,
+            )
+
+        if isinstance(e, TransformationAlreadyExistsError):
+            # Intentionally NOT isError — idempotent, same as anchor_hash
+            response_text = f"⛓️  Transformation already recorded on-chain\n\n"
+            response_text += f"   Original: {e.original_hash}\n"
+            response_text += f"   Transformed: {e.new_hash}\n"
+            if e.existing_description:
+                response_text += f"   Description: {e.existing_description}\n"
+            response_text += (
+                f"\n   The (original → new) link is already on-chain. No gas spent."
+            )
+            response_text += _format_hints("get_provenance", ["get_provenance_chain"])
+            return CallToolResult(
+                content=[TextContent(type="text", text=response_text)]
             )
 
         if isinstance(e, DataNotRegisteredError):

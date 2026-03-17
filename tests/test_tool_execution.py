@@ -2951,6 +2951,61 @@ class TestRecordTransform:
             tool_names = {t.name for t in tools}
             assert "record_transform" in tool_names
 
+    async def test_transform_already_exists(self, server):
+        """TransformationAlreadyExistsError should NOT be isError (idempotent)."""
+        from swarm_provenance_mcp.chain.exceptions import TransformationAlreadyExistsError
+
+        mock_client = MagicMock()
+        mock_client.transform.side_effect = TransformationAlreadyExistsError(
+            "Already exists",
+            original_hash=TEST_REFERENCE,
+            new_hash=TEST_NEW_HASH,
+            existing_description="Anonymized PII",
+        )
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "record_transform", {
+                "original_hash": TEST_REFERENCE,
+                "new_hash": TEST_NEW_HASH,
+                "description": "Anonymized PII",
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "already recorded" in text.lower()
+        assert TEST_REFERENCE in text
+        assert TEST_NEW_HASH in text
+        assert "Anonymized PII" in text
+        assert "No gas spent" in text
+        assert "_next: get_provenance" in text
+        assert "get_provenance_chain" in text
+
+    async def test_transform_already_exists_no_description(self, server):
+        """TransformationAlreadyExistsError with no description should omit the line."""
+        from swarm_provenance_mcp.chain.exceptions import TransformationAlreadyExistsError
+
+        mock_client = MagicMock()
+        mock_client.transform.side_effect = TransformationAlreadyExistsError(
+            "Already exists",
+            original_hash=TEST_REFERENCE,
+            new_hash=TEST_NEW_HASH,
+            existing_description=None,
+        )
+
+        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
+             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+            result = await call_tool_directly(server, "record_transform", {
+                "original_hash": TEST_REFERENCE,
+                "new_hash": TEST_NEW_HASH,
+            })
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "already recorded" in text.lower()
+        assert "Description:" not in text
+        assert "No gas spent" in text
+
 
 class TestGetProvenanceChain:
     """Test get_provenance_chain tool execution."""
@@ -4045,6 +4100,88 @@ class TestProvenanceChainEventTraversal:
         assert len(chain) == 1
         # Should have fallen back to per-node queries
         client._contract.get_transformations_from.assert_called()
+
+    async def test_transform_duplicate_check_uses_cache(self):
+        """Pre-check should raise TransformationAlreadyExistsError when cache has matching pair."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+        from swarm_provenance_mcp.chain.exceptions import TransformationAlreadyExistsError
+        from swarm_provenance_mcp.chain.event_cache import clear_registry
+
+        clear_registry()
+
+        original_hash = "aa" * 32
+        new_hash = "bb" * 32
+
+        client = ChainClient.__new__(ChainClient)
+        client._contract = MagicMock()
+        client._wallet = MagicMock()
+        client._wallet.address = "0xTEST"
+        client._provider = MagicMock()
+        client._provider.deploy_block = 100
+        client._provider.chain = "base-sepolia"
+        client._provider.contract_address = "0xTEST_DUP_CHECK"
+        client._provider.web3.eth.block_number = 50_000
+        client._gas_limit_multiplier = 1.2
+        client._gas_limit = None
+
+        # Populate cache with existing transformation
+        client._contract.get_all_transformations.return_value = [
+            (bytes.fromhex(original_hash), bytes.fromhex(new_hash), "Existing transform"),
+        ]
+
+        with pytest.raises(TransformationAlreadyExistsError) as exc_info:
+            client.transform(original_hash, new_hash, "Duplicate attempt")
+
+        assert exc_info.value.original_hash == original_hash
+        assert exc_info.value.new_hash == new_hash
+        assert exc_info.value.existing_description == "Existing transform"
+        # build_record_transformation_tx should NOT have been called (gas saved)
+        client._contract.build_record_transformation_tx.assert_not_called()
+
+    async def test_transform_duplicate_check_cache_failure_proceeds(self):
+        """If cache raises, transform should proceed normally."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+        from swarm_provenance_mcp.chain.event_cache import clear_registry
+
+        clear_registry()
+
+        original_hash = "aa" * 32
+        new_hash = "bb" * 32
+
+        client = ChainClient.__new__(ChainClient)
+        client._contract = MagicMock()
+        client._wallet = MagicMock()
+        client._wallet.address = "0xTEST"
+        client._provider = MagicMock()
+        client._provider.deploy_block = 100
+        client._provider.chain = "base-sepolia"
+        client._provider.contract_address = "0xTEST_CACHE_FAIL"
+        client._provider.web3.eth.block_number = 50_000
+        client._provider.chain_id = 84532
+        client._gas_limit_multiplier = 1.2
+        client._gas_limit = 100_000
+
+        # Cache scan fails
+        client._contract.get_all_transformations.side_effect = Exception("RPC flaky")
+
+        # Transaction succeeds
+        mock_receipt = {
+            "transactionHash": MagicMock(hex=lambda: "0xabc"),
+            "blockNumber": 12345,
+            "gasUsed": 85000,
+            "status": 1,
+        }
+        client._provider.web3.eth.get_transaction_count.return_value = 0
+        client._provider.web3.eth.send_raw_transaction.return_value = b"\xab\xc0"
+        client._provider.web3.eth.wait_for_transaction_receipt.return_value = mock_receipt
+        client._wallet.sign_transaction.return_value = b"\x00"
+        client._provider.get_explorer_tx_url.return_value = None
+
+        result = client.transform(original_hash, new_hash, "Should proceed")
+        assert result.original_hash == original_hash
+        assert result.new_hash == new_hash
+        # build_record_transformation_tx should have been called (cache failed, proceeded)
+        client._contract.build_record_transformation_tx.assert_called_once()
 
 
 class TestGetAllTransformations:

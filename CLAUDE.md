@@ -135,7 +135,7 @@ Blockchain dependencies (web3, eth-account) are included in the default install.
 
 ### Testing Strategy
 - **Gateway Client Tests** (`test_gateway_client.py`): Mock-based testing of HTTP client
-- **Tool Execution Tests** (`test_tool_execution.py`): Handler-level tests for all MCP tools including chain tools, with mocked chain_client/CHAIN_AVAILABLE. Covers insufficient funds handling, event-based chain traversal, already-registered reverts, and proactive health_check balance warnings.
+- **Tool Execution Tests** (`test_tool_execution.py`): Handler-level tests for all MCP tools including chain tools, with mocked chain_client/CHAIN_AVAILABLE. Covers insufficient funds handling, event-based chain traversal, already-registered reverts, duplicate transformation detection, and proactive health_check balance warnings.
 - **Tool Definition Tests** (`test_tool_definitions.py`): Validates tool schemas, required parameters, and registration consistency
 - **Integration Tests** (`test_integration.py`): End-to-end MCP tool testing
 - **Performance Tests** (`test_performance_regression.py`): Handler response time and concurrency regression tests
@@ -170,7 +170,7 @@ The `config.py` module uses Pydantic Settings for type-safe configuration with a
 - Comprehensive error handling for HTTP requests with user-friendly messages
 - Proper MCP error responses with structured error information
 - Request timeout handling and retry logic in gateway client
-- Chain-specific error handling: insufficient funds detection with faucet/bridge guidance, "already registered" revert catch, proactive balance warnings in health_check
+- Chain-specific error handling: insufficient funds detection with faucet/bridge guidance, "already registered" revert catch, duplicate transformation detection via event cache, proactive balance warnings in health_check
 
 ### Agent Guidance (MCP Design Guidelines)
 - **Adaptive health_check**: Returns `ready` boolean, `_recommendations`, `_companion_servers`, and contextual `_next` based on stamp availability

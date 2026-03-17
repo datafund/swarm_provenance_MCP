@@ -3785,6 +3785,8 @@ class TestProvenanceChainEventTraversal:
 
         client = ChainClient.__new__(ChainClient)
         client._contract = MagicMock()
+        client._provider = MagicMock()
+        client._provider.deploy_block = None  # Force per-node fallback path
         # Event query fails
         client._contract.get_transformations_from.side_effect = Exception("RPC error")
         client._contract.get_transformations_to.side_effect = Exception("RPC error")
@@ -3823,6 +3825,8 @@ class TestProvenanceChainEventTraversal:
 
         client = ChainClient.__new__(ChainClient)
         client._contract = MagicMock()
+        client._provider = MagicMock()
+        client._provider.deploy_block = None  # Force per-node scanning path
 
         parent_hash = "aa" * 32
         leaf_hash = "bb" * 32
@@ -3876,6 +3880,254 @@ class TestProvenanceChainEventTraversal:
         assert len(chain) == 2
         assert leaf_hash in hashes
         assert parent_hash in hashes
+
+    async def test_full_history_scan_with_deploy_block(self):
+        """When deploy_block is set, should do a single full scan instead of per-node queries."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+        from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
+        from swarm_provenance_mcp.chain.models import (
+            ChainProvenanceRecord, ChainTransformation, DataStatusEnum,
+        )
+        from swarm_provenance_mcp.chain.event_cache import clear_registry
+        clear_registry()
+
+        parent_hash = "aa" * 32
+        child_hash = "bb" * 32
+
+        client = ChainClient.__new__(ChainClient)
+        client._contract = MagicMock()
+        client._provider = MagicMock()
+        client._provider.deploy_block = 37_562_100  # Known deploy block
+        client._provider.chain = "base-sepolia"
+        client._provider.contract_address = "0xTEST_FULL_SCAN"
+        client._provider.web3.eth.block_number = 40_000_000
+
+        # get_all_transformations returns all events in one scan
+        client._contract.get_all_transformations.return_value = [
+            (bytes.fromhex(parent_hash), bytes.fromhex(child_hash), "Anonymized"),
+        ]
+
+        parent_record = ChainProvenanceRecord(
+            data_hash=parent_hash,
+            owner="0xOWNER",
+            timestamp=1700000000,
+            data_type="original",
+            status=DataStatusEnum(0),
+            transformations=[],
+            accessors=[],
+        )
+        child_record = ChainProvenanceRecord(
+            data_hash=child_hash,
+            owner="0xOWNER",
+            timestamp=1700001000,
+            data_type="derived",
+            status=DataStatusEnum(0),
+            transformations=[],
+            accessors=[],
+        )
+
+        def get_side_effect(h):
+            if h == parent_hash:
+                return parent_record
+            if h == child_hash:
+                return child_record
+            raise DataNotRegisteredError("not found", data_hash=h)
+
+        client.get = MagicMock(side_effect=get_side_effect)
+
+        chain = client.get_provenance_chain(parent_hash)
+        hashes = [r.data_hash for r in chain]
+        assert len(chain) == 2
+        assert parent_hash in hashes
+        assert child_hash in hashes
+
+        # Verify it used get_all_transformations (full scan) NOT per-node queries
+        client._contract.get_all_transformations.assert_called_once_with(
+            from_block=37_562_100,
+            to_block=40_000_000,
+        )
+        client._contract.get_transformations_from.assert_not_called()
+        client._contract.get_transformations_to.assert_not_called()
+
+    async def test_full_history_scan_enriches_transformations(self):
+        """Full history scan should enrich record.transformations with new_data_hash."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+        from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
+        from swarm_provenance_mcp.chain.models import (
+            ChainProvenanceRecord, ChainTransformation, DataStatusEnum,
+        )
+        from swarm_provenance_mcp.chain.event_cache import clear_registry
+        clear_registry()
+
+        root_hash = "aa" * 32
+        child_hash = "bb" * 32
+
+        client = ChainClient.__new__(ChainClient)
+        client._contract = MagicMock()
+        client._provider = MagicMock()
+        client._provider.deploy_block = 100
+        client._provider.chain = "base-sepolia"
+        client._provider.contract_address = "0xTEST_ENRICH"
+        client._provider.web3.eth.block_number = 50_000
+
+        client._contract.get_all_transformations.return_value = [
+            (bytes.fromhex(root_hash), bytes.fromhex(child_hash), "Step 1"),
+        ]
+
+        root_record = ChainProvenanceRecord(
+            data_hash=root_hash,
+            owner="0xOWNER",
+            timestamp=1700000000,
+            data_type="test",
+            status=DataStatusEnum(0),
+            transformations=[ChainTransformation(description="Step 1")],
+            accessors=[],
+        )
+
+        def get_side_effect(h):
+            if h == root_hash:
+                return root_record
+            raise DataNotRegisteredError("not found", data_hash=h)
+
+        client.get = MagicMock(side_effect=get_side_effect)
+
+        chain = client.get_provenance_chain(root_hash)
+        assert len(chain) == 1
+        # Transformation should be enriched with new_data_hash from the event index
+        t = chain[0].transformations[0]
+        assert t.new_data_hash == child_hash
+        assert t.description == "Step 1"
+
+    async def test_full_scan_fallback_on_error(self):
+        """If get_all_transformations fails, should fall back to per-node scanning."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+        from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
+        from swarm_provenance_mcp.chain.models import (
+            ChainProvenanceRecord, ChainTransformation, DataStatusEnum,
+        )
+        from swarm_provenance_mcp.chain.event_cache import clear_registry
+        clear_registry()
+
+        hash_a = "aa" * 32
+
+        client = ChainClient.__new__(ChainClient)
+        client._contract = MagicMock()
+        client._provider = MagicMock()
+        client._provider.deploy_block = 100  # Deploy block set but scan fails
+        client._provider.chain = "base-sepolia"
+        client._provider.contract_address = "0xTEST_FALLBACK"
+        client._provider.web3.eth.block_number = 50_000
+
+        # Full scan fails
+        client._contract.get_all_transformations.side_effect = Exception("RPC down")
+        # Per-node fallback works
+        client._contract.get_transformations_from.return_value = []
+        client._contract.get_transformations_to.return_value = []
+
+        record = ChainProvenanceRecord(
+            data_hash=hash_a,
+            owner="0xOWNER",
+            timestamp=1700000000,
+            data_type="test",
+            status=DataStatusEnum(0),
+            transformations=[],
+            accessors=[],
+        )
+
+        def get_side_effect(h):
+            if h == hash_a:
+                return record
+            raise DataNotRegisteredError("not found", data_hash=h)
+
+        client.get = MagicMock(side_effect=get_side_effect)
+
+        chain = client.get_provenance_chain(hash_a)
+        assert len(chain) == 1
+        # Should have fallen back to per-node queries
+        client._contract.get_transformations_from.assert_called()
+
+
+class TestGetAllTransformations:
+    """Test contract.get_all_transformations method."""
+
+    def test_returns_all_events_unfiltered(self):
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract.__new__(DataProvenanceContract)
+        contract._web3 = MagicMock()
+        contract._web3.eth.block_number = 5000
+        contract._contract = MagicMock()
+
+        mock_event1 = MagicMock()
+        mock_event1.args.originalDataHash = b'\xaa' * 32
+        mock_event1.args.newDataHash = b'\xbb' * 32
+        mock_event1.args.transformation = "Step 1"
+
+        mock_event2 = MagicMock()
+        mock_event2.args.originalDataHash = b'\xbb' * 32
+        mock_event2.args.newDataHash = b'\xcc' * 32
+        mock_event2.args.transformation = "Step 2"
+
+        contract._contract.events.DataTransformed.get_logs.return_value = [
+            mock_event1, mock_event2,
+        ]
+
+        results = contract.get_all_transformations(from_block=0, to_block=5000)
+        assert len(results) == 2
+        assert results[0][2] == "Step 1"
+        assert results[1][2] == "Step 2"
+
+        # Verify no argument_filters were passed (unfiltered scan)
+        call_kw = contract._contract.events.DataTransformed.get_logs.call_args
+        assert "argument_filters" not in call_kw.kwargs
+
+    def test_uses_latest_block_when_to_block_omitted(self):
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract.__new__(DataProvenanceContract)
+        contract._web3 = MagicMock()
+        contract._web3.eth.block_number = 9999
+        contract._contract = MagicMock()
+        contract._contract.events.DataTransformed.get_logs.return_value = []
+
+        contract.get_all_transformations(from_block=5000)
+        call_kw = contract._contract.events.DataTransformed.get_logs.call_args
+        assert call_kw.kwargs["to_block"] == 9999
+
+    def test_empty_range_returns_empty(self):
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract.__new__(DataProvenanceContract)
+        contract._web3 = MagicMock()
+        contract._web3.eth.block_number = 100
+        contract._contract = MagicMock()
+        contract._contract.events.DataTransformed.get_logs.return_value = []
+
+        results = contract.get_all_transformations(from_block=0, to_block=100)
+        assert results == []
+
+
+class TestDeployBlock:
+    """Test deploy_block in chain presets."""
+
+    def test_base_sepolia_has_deploy_block(self):
+        from swarm_provenance_mcp.chain.provider import CHAIN_PRESETS
+        assert CHAIN_PRESETS["base-sepolia"]["deploy_block"] == 37_562_100
+
+    def test_base_deploy_block_is_none(self):
+        from swarm_provenance_mcp.chain.provider import CHAIN_PRESETS
+        assert CHAIN_PRESETS["base"]["deploy_block"] is None
+
+    def test_provider_exposes_deploy_block(self):
+        from swarm_provenance_mcp.chain.provider import ChainProvider
+        with patch("swarm_provenance_mcp.chain.provider._import_web3") as mock_w3:
+            mock_web3_cls = MagicMock()
+            mock_w3.return_value = mock_web3_cls
+            provider = ChainProvider(
+                chain="base-sepolia",
+                contract_address="0x9a3c6F47B69211F05891CCb7aD33596290b9fE64",
+            )
+            assert provider.deploy_block == 37_562_100
 
 
 class TestProvenanceChainWorkflowPrompt:

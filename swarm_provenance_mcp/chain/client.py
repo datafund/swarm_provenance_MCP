@@ -713,9 +713,10 @@ class ChainClient:
         """
         Get the provenance chain for a data hash.
 
-        Retrieves the record for the given hash, then queries
-        DataTransformed events to discover linked hashes and follows
-        them to build a lineage chain.
+        Scans ALL DataTransformed events from the contract's deploy block
+        to build an in-memory index, then performs BFS traversal using
+        local lookups (no per-node event queries).  Falls back to
+        per-node event scanning when the deploy block is unknown.
 
         Args:
             swarm_hash: Starting Swarm reference hash.
@@ -730,6 +731,29 @@ class ChainClient:
         )
 
         effective_max = max_depth if max_depth is not None else 50
+
+        # Build in-memory transformation index via cached event scan.
+        # First call does a full scan; subsequent calls are incremental.
+        from .event_cache import get_cache
+
+        forward = {}  # original_hex -> [(new_hex, desc)]
+        reverse = {}  # new_hex -> [(original_hex, desc)]
+        deploy_block = self._provider.deploy_block
+
+        if deploy_block is not None:
+            try:
+                cache = get_cache(self._provider.chain, self._provider.contract_address)
+                current_block = self._provider.web3.eth.block_number
+                forward, reverse = cache.get_maps(
+                    self._contract, deploy_block, current_block
+                )
+            except Exception as e:
+                logger.warning(
+                    "Full event scan failed, falling back to per-node queries: %s", e
+                )
+                deploy_block = None  # triggers per-node fallback below
+
+        use_local_index = deploy_block is not None
 
         chain = []
         visited = set()
@@ -750,49 +774,62 @@ class ChainClient:
                 logger.debug("Hash %s not registered, skipping", current_hash)
                 continue
 
-            # Enrich transformations with new_data_hash from events
-            try:
-                events = self._contract.get_transformations_from(current_hash)
-                enriched = []
-                for orig_bytes, new_bytes, desc in events:
-                    new_hash = (
-                        new_bytes.hex()
-                        if isinstance(new_bytes, bytes)
-                        else str(new_bytes)
-                    )
-                    enriched.append(
-                        ChainTransformation(
-                            description=desc,
-                            new_data_hash=new_hash,
+            if use_local_index:
+                # Use pre-built index — no RPC calls
+                fwd = forward.get(current_hash, [])
+                if fwd:
+                    record.transformations = [
+                        ChainTransformation(description=desc, new_data_hash=nh)
+                        for nh, desc in fwd
+                    ]
+                    for nh, _ in fwd:
+                        if nh not in visited:
+                            to_visit.append((nh, current_depth + 1))
+                # Reverse links (parents)
+                for orig_hex, _ in reverse.get(current_hash, []):
+                    if orig_hex not in visited:
+                        to_visit.append((orig_hex, current_depth + 1))
+            else:
+                # Per-node event scanning (fallback when deploy_block unknown)
+                try:
+                    events = self._contract.get_transformations_from(current_hash)
+                    enriched = []
+                    for orig_bytes, new_bytes, desc in events:
+                        new_hash = (
+                            new_bytes.hex()
+                            if isinstance(new_bytes, bytes)
+                            else str(new_bytes)
                         )
-                    )
-                    if new_hash not in visited:
-                        to_visit.append((new_hash, current_depth + 1))
-                if enriched:
-                    record.transformations = enriched
-            except Exception:
-                logger.debug(
-                    "Could not query events for %s, using record data",
-                    current_hash,
-                )
-                # Fall back to record.transformations (description-only)
-                for t in record.transformations:
-                    if t.new_data_hash and t.new_data_hash not in visited:
-                        to_visit.append((t.new_data_hash, current_depth + 1))
+                        enriched.append(
+                            ChainTransformation(
+                                description=desc,
+                                new_data_hash=new_hash,
+                            )
+                        )
+                        if new_hash not in visited:
+                            to_visit.append((new_hash, current_depth + 1))
+                    if enriched:
+                        record.transformations = enriched
+                except Exception as e:
+                    logger.warning("Event query failed for %s: %s", current_hash, e)
+                    for t in record.transformations:
+                        if t.new_data_hash and t.new_data_hash not in visited:
+                            to_visit.append((t.new_data_hash, current_depth + 1))
 
-            # Reverse: transformations TO this hash (find parents)
-            try:
-                reverse_events = self._contract.get_transformations_to(current_hash)
-                for orig_bytes, new_bytes, desc in reverse_events:
-                    orig_hash = (
-                        orig_bytes.hex()
-                        if isinstance(orig_bytes, bytes)
-                        else str(orig_bytes)
+                try:
+                    reverse_events = self._contract.get_transformations_to(current_hash)
+                    for orig_bytes, new_bytes, desc in reverse_events:
+                        orig_hash = (
+                            orig_bytes.hex()
+                            if isinstance(orig_bytes, bytes)
+                            else str(orig_bytes)
+                        )
+                        if orig_hash not in visited:
+                            to_visit.append((orig_hash, current_depth + 1))
+                except Exception as e:
+                    logger.warning(
+                        "Reverse event query failed for %s: %s", current_hash, e
                     )
-                    if orig_hash not in visited:
-                        to_visit.append((orig_hash, current_depth + 1))
-            except Exception:
-                logger.debug("Could not query reverse events for %s", current_hash)
 
             chain.append(record)
 

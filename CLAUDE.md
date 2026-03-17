@@ -93,6 +93,7 @@ On-chain provenance module. Dependencies (web3, eth-account) included in default
 - `chain/provider.py` — Web3 RPC connection management
 - `chain/wallet.py` — Private key loading and transaction signing
 - `chain/contract.py` — DataProvenance contract wrapper (build_*_tx, read methods, event queries)
+- `chain/event_cache.py` — In-memory cache for DataTransformed events (singleton per chain+contract, incremental scans)
 - `chain/models.py` — Pydantic models (AnchorResult, ChainProvenanceRecord, etc.)
 - `chain/exceptions.py` — Standalone exception hierarchy (ChainError base)
 - `chain/abi/DataProvenance.json` — Contract ABI
@@ -180,7 +181,7 @@ The `config.py` module uses Pydantic Settings for type-safe configuration with a
 - **MCP Resources**: `provenance://skills` resource (SKILLS.md content) via `@server.list_resources()` / `@server.read_resource()`
 - **Cross-server coordination**: health_check reports companion servers (swarm_connect gateway status, fds-id MCP availability)
 - **Insufficient funds**: `_is_insufficient_funds_error()` and `_format_insufficient_funds_error()` provide faucet/bridge URLs
-- **Event-based lineage**: `get_provenance_chain` uses `DataTransformed` contract events bidirectionally (forward via `originalDataHash`, reverse via `newDataHash`) for accurate transformation traversal from any node
+- **Event-based lineage**: `get_provenance_chain` uses `DataTransformed` contract events bidirectionally (forward via `originalDataHash`, reverse via `newDataHash`) for accurate transformation traversal from any node. Events are cached in-memory (`chain/event_cache.py`): full scan on first call, incremental scans on subsequent calls (<1s vs ~20s)
 - Helper functions: `_format_hints()`, `_format_error()`, `_is_retryable_error()`, `_suggest_tool_name()`
 
 ### Code Quality

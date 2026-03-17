@@ -63,3 +63,19 @@ class DataAlreadyRegisteredError(ChainError):
         self.owner = owner
         self.timestamp = timestamp
         self.data_type = data_type
+
+
+class TransformationAlreadyExistsError(ChainError):
+    """Transformation (original → new) pair is already recorded on-chain."""
+
+    def __init__(
+        self,
+        message: str,
+        original_hash: str = None,
+        new_hash: str = None,
+        existing_description: str = None,
+    ):
+        super().__init__(message)
+        self.original_hash = original_hash
+        self.new_hash = new_hash
+        self.existing_description = existing_description

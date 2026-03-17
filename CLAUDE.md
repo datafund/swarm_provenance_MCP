@@ -93,6 +93,7 @@ On-chain provenance module. Dependencies (web3, eth-account) included in default
 - `chain/provider.py` — Web3 RPC connection management
 - `chain/wallet.py` — Private key loading and transaction signing
 - `chain/contract.py` — DataProvenance contract wrapper (build_*_tx, read methods, event queries)
+- `chain/event_cache.py` — In-memory cache for DataTransformed events (singleton per chain+contract, incremental scans)
 - `chain/models.py` — Pydantic models (AnchorResult, ChainProvenanceRecord, etc.)
 - `chain/exceptions.py` — Standalone exception hierarchy (ChainError base)
 - `chain/abi/DataProvenance.json` — Contract ABI
@@ -134,7 +135,7 @@ Blockchain dependencies (web3, eth-account) are included in the default install.
 
 ### Testing Strategy
 - **Gateway Client Tests** (`test_gateway_client.py`): Mock-based testing of HTTP client
-- **Tool Execution Tests** (`test_tool_execution.py`): Handler-level tests for all MCP tools including chain tools, with mocked chain_client/CHAIN_AVAILABLE. Covers insufficient funds handling, event-based chain traversal, already-registered reverts, and proactive health_check balance warnings.
+- **Tool Execution Tests** (`test_tool_execution.py`): Handler-level tests for all MCP tools including chain tools, with mocked chain_client/CHAIN_AVAILABLE. Covers insufficient funds handling, event-based chain traversal, already-registered reverts, duplicate transformation detection, and proactive health_check balance warnings.
 - **Tool Definition Tests** (`test_tool_definitions.py`): Validates tool schemas, required parameters, and registration consistency
 - **Integration Tests** (`test_integration.py`): End-to-end MCP tool testing
 - **Performance Tests** (`test_performance_regression.py`): Handler response time and concurrency regression tests
@@ -169,7 +170,7 @@ The `config.py` module uses Pydantic Settings for type-safe configuration with a
 - Comprehensive error handling for HTTP requests with user-friendly messages
 - Proper MCP error responses with structured error information
 - Request timeout handling and retry logic in gateway client
-- Chain-specific error handling: insufficient funds detection with faucet/bridge guidance, "already registered" revert catch, proactive balance warnings in health_check
+- Chain-specific error handling: insufficient funds detection with faucet/bridge guidance, "already registered" revert catch, duplicate transformation detection via event cache, proactive balance warnings in health_check
 
 ### Agent Guidance (MCP Design Guidelines)
 - **Adaptive health_check**: Returns `ready` boolean, `_recommendations`, `_companion_servers`, and contextual `_next` based on stamp availability
@@ -180,7 +181,7 @@ The `config.py` module uses Pydantic Settings for type-safe configuration with a
 - **MCP Resources**: `provenance://skills` resource (SKILLS.md content) via `@server.list_resources()` / `@server.read_resource()`
 - **Cross-server coordination**: health_check reports companion servers (swarm_connect gateway status, fds-id MCP availability)
 - **Insufficient funds**: `_is_insufficient_funds_error()` and `_format_insufficient_funds_error()` provide faucet/bridge URLs
-- **Event-based lineage**: `get_provenance_chain` uses `DataTransformed` contract events bidirectionally (forward via `originalDataHash`, reverse via `newDataHash`) for accurate transformation traversal from any node
+- **Event-based lineage**: `get_provenance_chain` uses `DataTransformed` contract events bidirectionally (forward via `originalDataHash`, reverse via `newDataHash`) for accurate transformation traversal from any node. Events are cached in-memory (`chain/event_cache.py`): full scan on first call, incremental scans on subsequent calls (<1s vs ~20s)
 - Helper functions: `_format_hints()`, `_format_error()`, `_is_retryable_error()`, `_suggest_tool_name()`
 
 ### Code Quality

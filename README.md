@@ -397,7 +397,7 @@ Retrieve the full on-chain provenance record for a Swarm reference hash. Returns
 ```
 
 #### `record_transform` *(optional — requires `CHAIN_ENABLED=true` and `PROVENANCE_WALLET_KEY`)*
-Record a data transformation on-chain, linking the original data to its transformed version. Creates a verifiable lineage trail. The original hash must already be anchored. Costs gas.
+Record a data transformation on-chain, linking the original data to its transformed version. Creates a verifiable lineage trail. The original hash must already be anchored. Costs gas. If the same `(original → new)` pair is already recorded, returns the existing link without spending gas (idempotent).
 
 **Parameters:**
 - `original_hash` (string, required): 64-character hex Swarm reference of the original data (must be already anchored)
@@ -802,6 +802,7 @@ This MCP server is designed to work with AI agents that support the Model Contex
 5. **Chain: "wallet key not configured"**: Set `PROVENANCE_WALLET_KEY` in `.env` for write operations (`anchor_hash`, `record_transform`). Read-only tools work without it.
 6. **Chain: "insufficient funds"**: Fund your wallet with testnet ETH (Base Sepolia faucet) or bridge ETH to Base mainnet. Run `chain_balance` for guidance.
 7. **Chain: "already registered"**: The hash is already anchored on-chain. Use `get_provenance` to view the existing record.
+8. **Chain: "transformation already recorded"**: The `(original → new)` link already exists on-chain. No gas spent — use `get_provenance_chain` to verify the lineage.
 
 ### Logging
 

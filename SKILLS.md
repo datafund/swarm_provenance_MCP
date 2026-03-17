@@ -189,6 +189,7 @@ Inspect provenance records without a wallet.
 | "insufficient funds" | Wallet ETH too low for gas | Run `chain_balance` for funding guidance (faucet/bridge URLs) |
 | "already registered" revert | Hash was already anchored | Not an error — `anchor_hash` returns the existing record |
 | "already exists" / "already registered" revert on `record_transform` | `new_hash` was pre-anchored via `anchor_hash` | Do NOT anchor `new_hash` before `record_transform` — it auto-registers. Re-upload the data to get a fresh hash. |
+| "Transformation already recorded" on `record_transform` | Same `(original → new)` pair was already recorded | Not an error — `record_transform` returns the existing link without spending gas. Use `get_provenance_chain` to verify. |
 | "data not registered" | `original_hash` not anchored | Call `anchor_hash` on the original first, then retry `record_transform` |
 | "not owner" / "unauthorized" | Wrong wallet for this data | Only the anchoring wallet (or delegate) can transform |
 | Size exceeded (4KB) | Upload payload too large | Split or compress data before upload |

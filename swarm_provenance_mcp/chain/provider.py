@@ -40,6 +40,7 @@ CHAIN_PRESETS = {
         "rpc_url": "https://sepolia.base.org",
         "explorer_url": "https://sepolia.basescan.org",
         "contract_address": "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64",
+        "deploy_block": 37_562_100,
         "rpc_fallbacks": [
             "https://base-sepolia-rpc.publicnode.com",
             "https://base-sepolia.drpc.org",
@@ -50,6 +51,7 @@ CHAIN_PRESETS = {
         "rpc_url": "https://mainnet.base.org",
         "explorer_url": "https://basescan.org",
         "contract_address": None,  # Not yet deployed
+        "deploy_block": None,
         "rpc_fallbacks": [
             "https://base-rpc.publicnode.com",
             "https://base.drpc.org",
@@ -103,6 +105,7 @@ class ChainProvider:
         self.rpc_url = rpc_url or preset["rpc_url"]
         self.explorer_url = explorer_url or preset["explorer_url"]
         self.contract_address = contract_address or preset["contract_address"]
+        self.deploy_block = preset.get("deploy_block")
         self._custom_rpc = rpc_url is not None
         self._request_timeout = request_timeout
 

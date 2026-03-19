@@ -134,16 +134,21 @@ class TestDockerBuild:
         """Build accepts VERSION build arg."""
         result = subprocess.run(
             [
-                "docker", "build",
-                "--build-arg", "VERSION=1.2.3",
-                "-t", "swarm-provenance-mcp:version-test",
+                "docker",
+                "build",
+                "--build-arg",
+                "VERSION=1.2.3",
+                "-t",
+                "swarm-provenance-mcp:version-test",
                 ".",
             ],
             capture_output=True,
             text=True,
             timeout=300,
         )
-        assert result.returncode == 0, f"Build with VERSION arg failed:\n{result.stderr}"
+        assert (
+            result.returncode == 0
+        ), f"Build with VERSION arg failed:\n{result.stderr}"
         subprocess.run(
             ["docker", "rmi", "swarm-provenance-mcp:version-test"],
             capture_output=True,
@@ -163,8 +168,10 @@ class TestDockerBuild:
         """Entrypoint runs the MCP server binary."""
         result = subprocess.run(
             [
-                "docker", "inspect",
-                "--format", "{{json .Config.Entrypoint}}",
+                "docker",
+                "inspect",
+                "--format",
+                "{{json .Config.Entrypoint}}",
                 IMAGE_NAME,
             ],
             capture_output=True,
@@ -178,10 +185,14 @@ class TestDockerBuild:
         """PYTHONUNBUFFERED=1 is set for stdio reliability."""
         result = subprocess.run(
             [
-                "docker", "run", "--rm",
-                "--entrypoint", "sh",
+                "docker",
+                "run",
+                "--rm",
+                "--entrypoint",
+                "sh",
                 IMAGE_NAME,
-                "-c", "echo $PYTHONUNBUFFERED",
+                "-c",
+                "echo $PYTHONUNBUFFERED",
             ],
             capture_output=True,
             text=True,
@@ -194,8 +205,10 @@ class TestDockerBuild:
         """Stdio server should not expose any ports."""
         result = subprocess.run(
             [
-                "docker", "inspect",
-                "--format", "{{json .Config.ExposedPorts}}",
+                "docker",
+                "inspect",
+                "--format",
+                "{{json .Config.ExposedPorts}}",
                 IMAGE_NAME,
             ],
             capture_output=True,
@@ -214,10 +227,14 @@ class TestDockerBuildContext:
         """Tests directory should not be in the image."""
         result = subprocess.run(
             [
-                "docker", "run", "--rm",
-                "--entrypoint", "sh",
+                "docker",
+                "run",
+                "--rm",
+                "--entrypoint",
+                "sh",
                 IMAGE_NAME,
-                "-c", "ls /app/tests 2>&1 || echo 'NOT_FOUND'",
+                "-c",
+                "ls /app/tests 2>&1 || echo 'NOT_FOUND'",
             ],
             capture_output=True,
             text=True,
@@ -229,10 +246,14 @@ class TestDockerBuildContext:
         """.git directory should not be in the image."""
         result = subprocess.run(
             [
-                "docker", "run", "--rm",
-                "--entrypoint", "sh",
+                "docker",
+                "run",
+                "--rm",
+                "--entrypoint",
+                "sh",
                 IMAGE_NAME,
-                "-c", "ls /app/.git 2>&1 || echo 'NOT_FOUND'",
+                "-c",
+                "ls /app/.git 2>&1 || echo 'NOT_FOUND'",
             ],
             capture_output=True,
             text=True,
@@ -244,10 +265,14 @@ class TestDockerBuildContext:
         """.env file should not be in the image."""
         result = subprocess.run(
             [
-                "docker", "run", "--rm",
-                "--entrypoint", "sh",
+                "docker",
+                "run",
+                "--rm",
+                "--entrypoint",
+                "sh",
                 IMAGE_NAME,
-                "-c", "ls /app/.env 2>&1 || echo 'NOT_FOUND'",
+                "-c",
+                "ls /app/.env 2>&1 || echo 'NOT_FOUND'",
             ],
             capture_output=True,
             text=True,
@@ -259,10 +284,14 @@ class TestDockerBuildContext:
         """Package source should be in the image."""
         result = subprocess.run(
             [
-                "docker", "run", "--rm",
-                "--entrypoint", "sh",
+                "docker",
+                "run",
+                "--rm",
+                "--entrypoint",
+                "sh",
                 IMAGE_NAME,
-                "-c", "ls /app/swarm_provenance_mcp/__init__.py",
+                "-c",
+                "ls /app/swarm_provenance_mcp/__init__.py",
             ],
             capture_output=True,
             text=True,
@@ -278,8 +307,10 @@ class TestOCILabels:
         """OCI title label is set."""
         result = subprocess.run(
             [
-                "docker", "inspect",
-                "--format", "{{json .Config.Labels}}",
+                "docker",
+                "inspect",
+                "--format",
+                "{{json .Config.Labels}}",
                 IMAGE_NAME,
             ],
             capture_output=True,
@@ -293,9 +324,10 @@ class TestOCILabels:
         """OCI source label points to datafund repo."""
         result = subprocess.run(
             [
-                "docker", "inspect",
+                "docker",
+                "inspect",
                 "--format",
-                "{{index .Config.Labels \"org.opencontainers.image.source\"}}",
+                '{{index .Config.Labels "org.opencontainers.image.source"}}',
                 IMAGE_NAME,
             ],
             capture_output=True,
@@ -308,9 +340,10 @@ class TestOCILabels:
         """OCI license label is set."""
         result = subprocess.run(
             [
-                "docker", "inspect",
+                "docker",
+                "inspect",
                 "--format",
-                "{{index .Config.Labels \"org.opencontainers.image.licenses\"}}",
+                '{{index .Config.Labels "org.opencontainers.image.licenses"}}',
                 IMAGE_NAME,
             ],
             capture_output=True,
@@ -344,8 +377,12 @@ class TestContainerStartup:
         custom_url = "https://custom-gateway.example.com"
         proc = subprocess.Popen(
             [
-                "docker", "run", "-i", "--rm",
-                "-e", f"SWARM_GATEWAY_URL={custom_url}",
+                "docker",
+                "run",
+                "-i",
+                "--rm",
+                "-e",
+                f"SWARM_GATEWAY_URL={custom_url}",
                 IMAGE_NAME,
             ],
             stdin=subprocess.PIPE,
@@ -378,11 +415,13 @@ class TestMCPProtocol:
 
     def test_tools_list(self):
         """Server returns all 7 expected tools."""
-        responses, _ = send_mcp_messages([
-            INITIALIZE_REQUEST,
-            INITIALIZED_NOTIFICATION,
-            TOOLS_LIST_REQUEST,
-        ])
+        responses, _ = send_mcp_messages(
+            [
+                INITIALIZE_REQUEST,
+                INITIALIZED_NOTIFICATION,
+                TOOLS_LIST_REQUEST,
+            ]
+        )
 
         tools_response = next(r for r in responses if r.get("id") == 2)
         tool_names = [t["name"] for t in tools_response["result"]["tools"]]
@@ -391,11 +430,13 @@ class TestMCPProtocol:
 
     def test_tools_have_schemas(self):
         """Every tool has an inputSchema with type=object."""
-        responses, _ = send_mcp_messages([
-            INITIALIZE_REQUEST,
-            INITIALIZED_NOTIFICATION,
-            TOOLS_LIST_REQUEST,
-        ])
+        responses, _ = send_mcp_messages(
+            [
+                INITIALIZE_REQUEST,
+                INITIALIZED_NOTIFICATION,
+                TOOLS_LIST_REQUEST,
+            ]
+        )
 
         tools_response = next(r for r in responses if r.get("id") == 2)
         for tool in tools_response["result"]["tools"]:
@@ -404,11 +445,13 @@ class TestMCPProtocol:
 
     def test_health_check_tool_call(self):
         """health_check tool executes and returns a result from the gateway."""
-        responses, _ = send_mcp_messages([
-            INITIALIZE_REQUEST,
-            INITIALIZED_NOTIFICATION,
-            HEALTH_CHECK_REQUEST,
-        ])
+        responses, _ = send_mcp_messages(
+            [
+                INITIALIZE_REQUEST,
+                INITIALIZED_NOTIFICATION,
+                HEALTH_CHECK_REQUEST,
+            ]
+        )
 
         health_response = next(r for r in responses if r.get("id") == 3)
         content = health_response["result"]["content"]
@@ -424,11 +467,13 @@ class TestMCPProtocol:
             "method": "tools/call",
             "params": {"name": "nonexistent_tool", "arguments": {}},
         }
-        responses, _ = send_mcp_messages([
-            INITIALIZE_REQUEST,
-            INITIALIZED_NOTIFICATION,
-            request,
-        ])
+        responses, _ = send_mcp_messages(
+            [
+                INITIALIZE_REQUEST,
+                INITIALIZED_NOTIFICATION,
+                request,
+            ]
+        )
 
         error_response = next(r for r in responses if r.get("id") == 3)
         result = error_response["result"]

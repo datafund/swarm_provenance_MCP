@@ -15,29 +15,31 @@ class TestGatewayContractStability:
     @pytest.fixture
     def gateway_url(self):
         """Get gateway URL from environment or use default."""
-        return os.getenv('SWARM_GATEWAY_URL', 'http://localhost:8000')
+        return os.getenv("SWARM_GATEWAY_URL", "http://localhost:8000")
 
     def test_gateway_endpoints_exist(self, gateway_url):
         """Test that expected gateway endpoints are available."""
         expected_endpoints = [
-            ('GET', '/'),
-            ('GET', '/docs'),
-            ('POST', '/api/v1/stamps'),
-            ('GET', '/api/v1/stamps'),
-            ('POST', '/api/v1/data/'),
-            ('GET', '/api/v1/data/test')  # Will 404 but endpoint should exist
+            ("GET", "/"),
+            ("GET", "/docs"),
+            ("POST", "/api/v1/stamps"),
+            ("GET", "/api/v1/stamps"),
+            ("POST", "/api/v1/data/"),
+            ("GET", "/api/v1/data/test"),  # Will 404 but endpoint should exist
         ]
 
         for method, endpoint in expected_endpoints:
             url = f"{gateway_url.rstrip('/')}{endpoint}"
             try:
-                if method == 'GET':
+                if method == "GET":
                     response = requests.get(url, timeout=5)
-                elif method == 'POST':
+                elif method == "POST":
                     response = requests.post(url, json={}, timeout=5)
 
                 # We expect various responses, but not connection errors
-                assert response.status_code != 502, f"Gateway not running for {endpoint}"
+                assert (
+                    response.status_code != 502
+                ), f"Gateway not running for {endpoint}"
                 print(f"✓ {method} {endpoint}: {response.status_code}")
 
             except requests.ConnectionError:
@@ -52,14 +54,16 @@ class TestGatewayContractStability:
             health = client.health_check()
 
             # These fields should always be present
-            required_fields = ['status', 'gateway_url', 'response_time_ms']
+            required_fields = ["status", "gateway_url", "response_time_ms"]
             for field in required_fields:
                 assert field in health, f"Health check missing required field: {field}"
 
             # Test stamps list response format (even if empty)
             stamps_response = client.list_stamps()
-            assert 'stamps' in stamps_response, "Stamps response missing 'stamps' field"
-            assert isinstance(stamps_response['stamps'], list), "Stamps field should be a list"
+            assert "stamps" in stamps_response, "Stamps response missing 'stamps' field"
+            assert isinstance(
+                stamps_response["stamps"], list
+            ), "Stamps field should be a list"
 
         except requests.ConnectionError:
             pytest.skip(f"Gateway not available at {gateway_url}")
@@ -92,7 +96,7 @@ class TestMCPFrameworkCompatibility:
 
         server = create_server()
         assert server is not None
-        assert hasattr(server, 'request_handlers')
+        assert hasattr(server, "request_handlers")
 
     async def test_tool_definitions_format_stable(self):
         """Test that tool definitions maintain expected structure."""
@@ -104,26 +108,32 @@ class TestMCPFrameworkCompatibility:
         # Find and test list_tools handler
         list_tools_handler = None
         for handler_name, handler in server.request_handlers.items():
-            if hasattr(handler, '__name__') and 'list_tools' in str(handler):
+            if hasattr(handler, "__name__") and "list_tools" in str(handler):
                 list_tools_handler = handler
                 break
 
         if list_tools_handler:
             result = await list_tools_handler(ListToolsRequest(method="tools/list"))
             # Unwrap ServerResult -> ListToolsResult -> tools list
-            inner = result.root if hasattr(result, 'root') else result
-            tools = inner.tools if hasattr(inner, 'tools') else inner
+            inner = result.root if hasattr(result, "root") else result
+            tools = inner.tools if hasattr(inner, "tools") else inner
 
             for tool in tools:
                 # Each tool must have these attributes
-                assert hasattr(tool, 'name'), "Tool missing name attribute"
-                assert hasattr(tool, 'description'), f"Tool {tool.name} missing description"
-                assert hasattr(tool, 'inputSchema'), f"Tool {tool.name} missing inputSchema"
+                assert hasattr(tool, "name"), "Tool missing name attribute"
+                assert hasattr(
+                    tool, "description"
+                ), f"Tool {tool.name} missing description"
+                assert hasattr(
+                    tool, "inputSchema"
+                ), f"Tool {tool.name} missing inputSchema"
 
                 # Schema must be valid
                 schema = tool.inputSchema
                 assert isinstance(schema, dict), f"Tool {tool.name} schema not a dict"
-                assert schema.get('type') == 'object', f"Tool {tool.name} schema not object type"
+                assert (
+                    schema.get("type") == "object"
+                ), f"Tool {tool.name} schema not object type"
 
 
 class TestDataIntegrityRoundTrip:
@@ -139,18 +149,18 @@ class TestDataIntegrityRoundTrip:
         try:
             # Skip if no stamps available
             stamps = client.list_stamps()
-            if not stamps.get('stamps'):
+            if not stamps.get("stamps"):
                 pytest.skip("No stamps available for upload test")
 
-            stamp_id = stamps['stamps'][0]['batchID']
+            stamp_id = stamps["stamps"][0]["batchID"]
 
             # Upload
             upload_result = client.upload_data(test_data, stamp_id)
-            assert 'reference' in upload_result
+            assert "reference" in upload_result
 
             # Download
-            downloaded = client.download_data(upload_result['reference'])
-            assert downloaded.decode('utf-8') == test_data
+            downloaded = client.download_data(upload_result["reference"])
+            assert downloaded.decode("utf-8") == test_data
 
         except requests.ConnectionError:
             pytest.skip("Gateway not available")
@@ -191,12 +201,12 @@ class TestConfigurationStability:
     def test_required_settings_present(self):
         """Test that all required configuration settings exist."""
         required_settings = [
-            'swarm_gateway_url',
-            'default_stamp_amount',
-            'default_stamp_depth',
-            'payment_mode',
-            'mcp_server_name',
-            'mcp_server_version'
+            "swarm_gateway_url",
+            "default_stamp_amount",
+            "default_stamp_depth",
+            "payment_mode",
+            "mcp_server_name",
+            "mcp_server_version",
         ]
 
         for setting in required_settings:
@@ -207,10 +217,18 @@ class TestConfigurationStability:
 
     def test_default_values_reasonable(self):
         """Test that default configuration values are reasonable."""
-        assert settings.default_stamp_amount > 0, "Default stamp amount should be positive"
-        assert settings.default_stamp_depth > 0, "Default stamp depth should be positive"
-        assert settings.swarm_gateway_url.startswith('http'), "Gateway URL should be HTTP(S)"
-        assert '.' in settings.mcp_server_version, "Version should have format like x.y.z"
+        assert (
+            settings.default_stamp_amount > 0
+        ), "Default stamp amount should be positive"
+        assert (
+            settings.default_stamp_depth > 0
+        ), "Default stamp depth should be positive"
+        assert settings.swarm_gateway_url.startswith(
+            "http"
+        ), "Gateway URL should be HTTP(S)"
+        assert (
+            "." in settings.mcp_server_version
+        ), "Version should have format like x.y.z"
 
 
 class TestErrorHandlingStability:
@@ -232,7 +250,7 @@ class TestErrorHandlingStability:
             try:
                 result = await handle_purchase_stamp(args)
                 # Should return error result, not raise exception
-                if hasattr(result, 'isError'):
+                if hasattr(result, "isError"):
                     # Expected behavior - return error result
                     pass
                 else:
@@ -268,13 +286,13 @@ class TestVersionCompatibilityWarnings:
 
         # Track versions - test will show in output if they change
         versions = {
-            'mcp': getattr(mcp, '__version__', 'unknown'),
-            'requests': requests.__version__,
-            'pydantic': pydantic.__version__,
+            "mcp": getattr(mcp, "__version__", "unknown"),
+            "requests": requests.__version__,
+            "pydantic": pydantic.__version__,
         }
 
         print(f"\nDependency versions: {versions}")
 
         # Warn about known incompatible versions
-        if versions['pydantic'].startswith('1.'):
+        if versions["pydantic"].startswith("1."):
             print("WARNING: Pydantic v1 detected, consider upgrading")

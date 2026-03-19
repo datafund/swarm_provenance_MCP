@@ -69,9 +69,7 @@ class TestChainConfig:
 
     def test_chain_gas_limit_parses_as_int(self):
         """Tests that CHAIN_GAS_LIMIT is parsed as int."""
-        with patch.dict(
-            os.environ, {"CHAIN_GAS_LIMIT": "500000"}, clear=True
-        ):
+        with patch.dict(os.environ, {"CHAIN_GAS_LIMIT": "500000"}, clear=True):
             from swarm_provenance_mcp.config import Settings
 
             s = Settings(
@@ -84,9 +82,7 @@ class TestChainConfig:
     def test_chain_wallet_key_from_env(self):
         """Tests that PROVENANCE_WALLET_KEY env var is loaded."""
         test_key = "0x" + "a" * 64
-        with patch.dict(
-            os.environ, {"PROVENANCE_WALLET_KEY": test_key}, clear=True
-        ):
+        with patch.dict(os.environ, {"PROVENANCE_WALLET_KEY": test_key}, clear=True):
             from swarm_provenance_mcp.config import Settings
 
             s = Settings(

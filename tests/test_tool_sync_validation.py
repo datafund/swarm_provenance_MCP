@@ -17,16 +17,20 @@ class TestToolSynchronization:
     @pytest.fixture
     def server_source_code(self):
         """Load and parse the server.py source code."""
-        server_file = Path(__file__).parent.parent / "swarm_provenance_mcp" / "server.py"
-        with open(server_file, 'r') as f:
+        server_file = (
+            Path(__file__).parent.parent / "swarm_provenance_mcp" / "server.py"
+        )
+        with open(server_file, "r") as f:
             source = f.read()
         return ast.parse(source)
 
     @pytest.fixture
     def gateway_client_source_code(self):
         """Load and parse the gateway_client.py source code."""
-        client_file = Path(__file__).parent.parent / "swarm_provenance_mcp" / "gateway_client.py"
-        with open(client_file, 'r') as f:
+        client_file = (
+            Path(__file__).parent.parent / "swarm_provenance_mcp" / "gateway_client.py"
+        )
+        with open(client_file, "r") as f:
             source = f.read()
         return ast.parse(source)
 
@@ -37,19 +41,23 @@ class TestToolSynchronization:
         class ToolVisitor(ast.NodeVisitor):
             def visit_Call(self, node):
                 # Look for Tool() constructor calls
-                if (isinstance(node.func, ast.Name) and node.func.id == 'Tool'):
+                if isinstance(node.func, ast.Name) and node.func.id == "Tool":
                     tool_def = {}
                     for keyword in node.keywords:
-                        if keyword.arg == 'name' and isinstance(keyword.value, ast.Constant):
-                            tool_def['name'] = keyword.value.value
-                        elif keyword.arg == 'description' and isinstance(keyword.value, ast.Constant):
-                            tool_def['description'] = keyword.value.value
-                        elif keyword.arg == 'inputSchema':
+                        if keyword.arg == "name" and isinstance(
+                            keyword.value, ast.Constant
+                        ):
+                            tool_def["name"] = keyword.value.value
+                        elif keyword.arg == "description" and isinstance(
+                            keyword.value, ast.Constant
+                        ):
+                            tool_def["description"] = keyword.value.value
+                        elif keyword.arg == "inputSchema":
                             # Extract schema info (this would be more complex in practice)
-                            tool_def['has_schema'] = True
+                            tool_def["has_schema"] = True
 
-                    if 'name' in tool_def:
-                        tools[tool_def['name']] = tool_def
+                    if "name" in tool_def:
+                        tools[tool_def["name"]] = tool_def
 
                 self.generic_visit(node)
 
@@ -64,7 +72,7 @@ class TestToolSynchronization:
         class MethodVisitor(ast.NodeVisitor):
             def visit_FunctionDef(self, node):
                 # Only include public methods (not starting with _)
-                if not node.name.startswith('_') and node.name != 'close':
+                if not node.name.startswith("_") and node.name != "close":
                     methods.add(node.name)
                 self.generic_visit(node)
 
@@ -82,17 +90,21 @@ class TestToolSynchronization:
 
             def visit_If(self, node):
                 # Look for if tool_name == "something" patterns
-                if (isinstance(node.test, ast.Compare) and
-                    len(node.test.comparators) == 1 and
-                    isinstance(node.test.comparators[0], ast.Constant)):
+                if (
+                    isinstance(node.test, ast.Compare)
+                    and len(node.test.comparators) == 1
+                    and isinstance(node.test.comparators[0], ast.Constant)
+                ):
 
                     # Check if it's comparing tool_name
-                    if (isinstance(node.test.left, ast.Name) and
-                        node.test.left.id in ('tool_name', 'name')):
+                    if isinstance(node.test.left, ast.Name) and node.test.left.id in (
+                        "tool_name",
+                        "name",
+                    ):
                         tool_name = node.test.comparators[0].value
                         handlers[tool_name] = {
-                            'implemented': True,
-                            'has_error_handling': self._has_try_except(node)
+                            "implemented": True,
+                            "has_error_handling": self._has_try_except(node),
                         }
 
                 self.generic_visit(node)
@@ -113,10 +125,16 @@ class TestToolSynchronization:
         tools = self.extract_tool_definitions(server_source_code)
 
         expected_tools = {
-            'purchase_stamp', 'get_stamp_status', 'list_stamps',
-            'extend_stamp', 'upload_data', 'download_data',
-            'check_stamp_health', 'get_wallet_info', 'get_notary_info',
-            'health_check'
+            "purchase_stamp",
+            "get_stamp_status",
+            "list_stamps",
+            "extend_stamp",
+            "upload_data",
+            "download_data",
+            "check_stamp_health",
+            "get_wallet_info",
+            "get_notary_info",
+            "health_check",
         }
 
         found_tools = set(tools.keys())
@@ -129,20 +147,28 @@ class TestToolSynchronization:
         methods = self.extract_gateway_methods(gateway_client_source_code)
 
         expected_methods = {
-            'purchase_stamp', 'get_stamp_details', 'list_stamps',
-            'extend_stamp', 'upload_data', 'download_data',
-            'check_stamp_health', 'get_wallet_info', 'get_notary_info',
-            'health_check'
+            "purchase_stamp",
+            "get_stamp_details",
+            "list_stamps",
+            "extend_stamp",
+            "upload_data",
+            "download_data",
+            "check_stamp_health",
+            "get_wallet_info",
+            "get_notary_info",
+            "health_check",
         }
 
         missing_methods = expected_methods - methods
-        assert not missing_methods, f"Gateway methods missing from source: {missing_methods}"
+        assert (
+            not missing_methods
+        ), f"Gateway methods missing from source: {missing_methods}"
 
     def test_new_gateway_methods_exist_in_source(self, gateway_client_source_code):
         """Test that new gateway methods exist in source code."""
         methods = self.extract_gateway_methods(gateway_client_source_code)
 
-        new_methods = {'check_stamp_health', 'get_wallet_info', 'get_notary_info'}
+        new_methods = {"check_stamp_health", "get_wallet_info", "get_notary_info"}
         missing = new_methods - methods
         assert not missing, f"New gateway methods missing from source: {missing}"
 
@@ -152,8 +178,12 @@ class TestToolSynchronization:
         tools = self.extract_tool_definitions(server_source_code)
 
         for tool_name in tools:
-            assert tool_name in handlers, f"Tool '{tool_name}' missing handler implementation"
-            assert handlers[tool_name]['implemented'], f"Tool '{tool_name}' handler not properly implemented"
+            assert (
+                tool_name in handlers
+            ), f"Tool '{tool_name}' missing handler implementation"
+            assert handlers[tool_name][
+                "implemented"
+            ], f"Tool '{tool_name}' handler not properly implemented"
 
     def test_error_handling_in_handlers(self, server_source_code):
         """Test that tool handlers include error handling."""
@@ -161,7 +191,7 @@ class TestToolSynchronization:
 
         for tool_name, handler_info in handlers.items():
             # Error handling is recommended for all handlers
-            if not handler_info.get('has_error_handling'):
+            if not handler_info.get("has_error_handling"):
                 print(f"Warning: Tool '{tool_name}' handler may lack error handling")
 
     async def test_runtime_prompt_registration(self):
@@ -172,18 +202,23 @@ class TestToolSynchronization:
 
         list_prompts_handler = None
         for handler_key, handler in server.request_handlers.items():
-            if hasattr(handler, '__name__') and 'list_prompts' in str(handler):
+            if hasattr(handler, "__name__") and "list_prompts" in str(handler):
                 list_prompts_handler = handler
                 break
 
         assert list_prompts_handler is not None, "list_prompts handler not registered"
 
         result = await list_prompts_handler(ListPromptsRequest(method="prompts/list"))
-        inner = result.root if hasattr(result, 'root') else result
-        prompts = inner.prompts if hasattr(inner, 'prompts') else inner
+        inner = result.root if hasattr(result, "root") else result
+        prompts = inner.prompts if hasattr(inner, "prompts") else inner
         prompt_names = {p.name for p in prompts}
 
-        expected_prompts = {'provenance-upload', 'provenance-verify', 'stamp-management', 'provenance-chain-workflow'}
+        expected_prompts = {
+            "provenance-upload",
+            "provenance-verify",
+            "stamp-management",
+            "provenance-chain-workflow",
+        }
         missing = expected_prompts - prompt_names
         assert not missing, f"Prompts not registered at runtime: {missing}"
 
@@ -196,7 +231,7 @@ class TestToolSynchronization:
         # Get the list_tools handler using the type key
         list_tools_handler = None
         for handler_key, handler in server.request_handlers.items():
-            if hasattr(handler, '__name__') and 'list_tools' in str(handler):
+            if hasattr(handler, "__name__") and "list_tools" in str(handler):
                 list_tools_handler = handler
                 break
 
@@ -204,15 +239,21 @@ class TestToolSynchronization:
 
         # Call the handler to get tools
         result = await list_tools_handler(ListToolsRequest(method="tools/list"))
-        inner = result.root if hasattr(result, 'root') else result
-        tools = inner.tools if hasattr(inner, 'tools') else inner
+        inner = result.root if hasattr(result, "root") else result
+        tools = inner.tools if hasattr(inner, "tools") else inner
         tool_names = {tool.name for tool in tools}
 
         expected_tools = {
-            'purchase_stamp', 'get_stamp_status', 'list_stamps',
-            'extend_stamp', 'upload_data', 'download_data',
-            'check_stamp_health', 'get_wallet_info', 'get_notary_info',
-            'health_check'
+            "purchase_stamp",
+            "get_stamp_status",
+            "list_stamps",
+            "extend_stamp",
+            "upload_data",
+            "download_data",
+            "check_stamp_health",
+            "get_wallet_info",
+            "get_notary_info",
+            "health_check",
         }
 
         missing_tools = expected_tools - tool_names
@@ -223,17 +264,28 @@ class TestToolSynchronization:
         client = SwarmGatewayClient()
 
         expected_methods = {
-            'purchase_stamp', 'get_stamp_details', 'list_stamps',
-            'extend_stamp', 'upload_data', 'download_data',
-            'check_stamp_health', 'get_wallet_info', 'get_notary_info',
-            'health_check'
+            "purchase_stamp",
+            "get_stamp_details",
+            "list_stamps",
+            "extend_stamp",
+            "upload_data",
+            "download_data",
+            "check_stamp_health",
+            "get_wallet_info",
+            "get_notary_info",
+            "health_check",
         }
 
-        actual_methods = {name for name, _ in inspect.getmembers(client, inspect.ismethod)
-                         if not name.startswith('_') and name != 'close'}
+        actual_methods = {
+            name
+            for name, _ in inspect.getmembers(client, inspect.ismethod)
+            if not name.startswith("_") and name != "close"
+        }
 
         missing_methods = expected_methods - actual_methods
-        assert not missing_methods, f"Gateway client missing methods at runtime: {missing_methods}"
+        assert (
+            not missing_methods
+        ), f"Gateway client missing methods at runtime: {missing_methods}"
 
 
 class TestCodeChangeDetection:
@@ -244,11 +296,12 @@ class TestCodeChangeDetection:
         from swarm_provenance_mcp import server
 
         # Check that critical imports are available
-        critical_imports = ['Tool', 'TextContent', 'CallToolRequest', 'CallToolResult']
+        critical_imports = ["Tool", "TextContent", "CallToolRequest", "CallToolResult"]
 
         for import_name in critical_imports:
-            assert hasattr(server, import_name) or import_name in dir(server), \
-                f"Critical import '{import_name}' missing from server module"
+            assert hasattr(server, import_name) or import_name in dir(
+                server
+            ), f"Critical import '{import_name}' missing from server module"
 
     def test_gateway_client_interface_stability(self):
         """Test that gateway client interface remains stable."""
@@ -256,14 +309,15 @@ class TestCodeChangeDetection:
 
         # Check that the class exists and has expected structure
         assert SwarmGatewayClient is not None
-        assert hasattr(SwarmGatewayClient, '__init__')
+        assert hasattr(SwarmGatewayClient, "__init__")
 
         # Check constructor signature
         init_sig = inspect.signature(SwarmGatewayClient.__init__)
         # Should accept base_url parameter
         params = list(init_sig.parameters.keys())
-        assert 'base_url' in params or len(params) <= 2, \
-            "Gateway client constructor signature changed unexpectedly"
+        assert (
+            "base_url" in params or len(params) <= 2
+        ), "Gateway client constructor signature changed unexpectedly"
 
     def test_configuration_interface_stability(self):
         """Test that configuration interface remains stable."""
@@ -271,12 +325,15 @@ class TestCodeChangeDetection:
 
         # Check that essential configuration is available
         essential_configs = [
-            'swarm_gateway_url', 'default_stamp_amount', 'default_stamp_depth'
+            "swarm_gateway_url",
+            "default_stamp_amount",
+            "default_stamp_depth",
         ]
 
         for config_name in essential_configs:
-            assert hasattr(settings, config_name), \
-                f"Essential configuration '{config_name}' missing"
+            assert hasattr(
+                settings, config_name
+            ), f"Essential configuration '{config_name}' missing"
 
     def test_mcp_framework_compatibility(self):
         """Test compatibility with MCP framework version."""
@@ -293,7 +350,7 @@ class TestCodeChangeDetection:
             tool = Tool(
                 name="test_tool",
                 description="Test tool",
-                inputSchema={"type": "object", "properties": {}}
+                inputSchema={"type": "object", "properties": {}},
             )
             assert tool is not None
 
@@ -315,23 +372,24 @@ class TestFutureProofing:
         # Get tools using the type-based lookup
         list_tools_handler = None
         for handler_key, handler in server.request_handlers.items():
-            if hasattr(handler, '__name__') and 'list_tools' in str(handler):
+            if hasattr(handler, "__name__") and "list_tools" in str(handler):
                 list_tools_handler = handler
                 break
 
         result = await list_tools_handler(ListToolsRequest(method="tools/list"))
-        inner = result.root if hasattr(result, 'root') else result
-        tools = inner.tools if hasattr(inner, 'tools') else inner
+        inner = result.root if hasattr(result, "root") else result
+        tools = inner.tools if hasattr(inner, "tools") else inner
 
         for tool in tools:
             schema = tool.inputSchema
 
             # Schema should be extensible (allow additional properties)
             # This is important for backward compatibility
-            if 'additionalProperties' in schema:
+            if "additionalProperties" in schema:
                 # If specified, should not be False (which would prevent extension)
-                assert schema['additionalProperties'] is not False, \
-                    f"Tool '{tool.name}' schema prevents extension"
+                assert (
+                    schema["additionalProperties"] is not False
+                ), f"Tool '{tool.name}' schema prevents extension"
 
     def test_error_message_consistency(self):
         """Test that error messages follow consistent patterns."""
@@ -344,18 +402,20 @@ class TestFutureProofing:
         client = SwarmGatewayClient()
 
         # Check that the client can handle RequestException
-        assert hasattr(requests, 'RequestException'), \
-            "requests.RequestException not available for error handling"
+        assert hasattr(
+            requests, "RequestException"
+        ), "requests.RequestException not available for error handling"
 
     def test_version_information_available(self):
         """Test that version information is available for compatibility checking."""
         from swarm_provenance_mcp.config import settings
 
         # Should have version information
-        version_fields = ['mcp_server_version', 'mcp_server_name']
+        version_fields = ["mcp_server_version", "mcp_server_name"]
 
         for field in version_fields:
             assert hasattr(settings, field), f"Version field '{field}' not available"
             value = getattr(settings, field)
-            assert value is not None and str(value).strip(), \
-                f"Version field '{field}' is empty"
+            assert (
+                value is not None and str(value).strip()
+            ), f"Version field '{field}' is empty"

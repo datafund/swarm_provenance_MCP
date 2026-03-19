@@ -335,3 +335,128 @@ class TestSingletonRegistry:
         clear_registry()
         c2 = get_cache("base-sepolia", "0xABC")
         assert c1 is not c2
+
+
+class TestDataMergedEventScanning:
+    """Tests for DataMerged event scanning in the cache."""
+
+    def _make_contract_with_merges(self, transform_events=None, merge_events=None):
+        """Build a mock contract with both event types."""
+        contract = MagicMock()
+        contract.get_all_transformations.return_value = transform_events or []
+        contract.get_all_merge_events.return_value = merge_events or []
+        return contract
+
+    def _make_merge_event(self, source_hashes, new_hash, transformation):
+        """Create a mock DataMerged event."""
+        evt = MagicMock()
+        evt.args.newDataHash = new_hash
+        evt.args.sourceHashes = source_hashes
+        evt.args.transformation = transformation
+        return evt
+
+    def test_merge_events_create_forward_entries(self):
+        """Merge events should create forward entries from each source to new hash."""
+        src_a = bytes.fromhex("aa" * 32)
+        src_b = bytes.fromhex("bb" * 32)
+        merged = bytes.fromhex("cc" * 32)
+
+        merge_evt = self._make_merge_event([src_a, src_b], merged, "Combined datasets")
+        contract = self._make_contract_with_merges(merge_events=[merge_evt])
+
+        cache = TransformationEventCache()
+        forward, reverse = cache.get_maps(contract, deploy_block=0, current_block=100)
+
+        # Forward: each source → merged hash
+        assert "aa" * 32 in forward
+        assert ("cc" * 32, "Combined datasets") in forward["aa" * 32]
+        assert "bb" * 32 in forward
+        assert ("cc" * 32, "Combined datasets") in forward["bb" * 32]
+
+    def test_merge_events_create_reverse_entries(self):
+        """Merge events should create reverse entries from new hash to each source."""
+        src_a = bytes.fromhex("aa" * 32)
+        src_b = bytes.fromhex("bb" * 32)
+        merged = bytes.fromhex("cc" * 32)
+
+        merge_evt = self._make_merge_event([src_a, src_b], merged, "Combined datasets")
+        contract = self._make_contract_with_merges(merge_events=[merge_evt])
+
+        cache = TransformationEventCache()
+        forward, reverse = cache.get_maps(contract, deploy_block=0, current_block=100)
+
+        # Reverse: merged hash → each source
+        assert "cc" * 32 in reverse
+        sources = [src_hex for src_hex, _ in reverse["cc" * 32]]
+        assert "aa" * 32 in sources
+        assert "bb" * 32 in sources
+
+    def test_merge_and_transform_events_combined(self):
+        """Both transform and merge events should populate the same maps."""
+        parent = bytes.fromhex("aa" * 32)
+        child = bytes.fromhex("bb" * 32)
+        src_x = bytes.fromhex("dd" * 32)
+        merged = bytes.fromhex("ee" * 32)
+
+        merge_evt = self._make_merge_event(
+            [parent, src_x], merged, "Merged after transform"
+        )
+        contract = self._make_contract_with_merges(
+            transform_events=[(parent, child, "Step 1")],
+            merge_events=[merge_evt],
+        )
+
+        cache = TransformationEventCache()
+        forward, reverse = cache.get_maps(contract, deploy_block=0, current_block=100)
+
+        # Transform entries
+        assert ("bb" * 32, "Step 1") in forward["aa" * 32]
+        # Merge entries
+        assert ("ee" * 32, "Merged after transform") in forward["aa" * 32]
+        assert ("ee" * 32, "Merged after transform") in forward["dd" * 32]
+
+    def test_merge_scan_failure_is_silently_skipped(self):
+        """If merge event scan fails (v1 contract), it should not crash."""
+        parent = bytes.fromhex("aa" * 32)
+        child = bytes.fromhex("bb" * 32)
+
+        contract = MagicMock()
+        contract.get_all_transformations.return_value = [
+            (parent, child, "Step 1"),
+        ]
+        contract.get_all_merge_events.side_effect = Exception("No DataMerged event")
+
+        cache = TransformationEventCache()
+        forward, reverse = cache.get_maps(contract, deploy_block=0, current_block=100)
+
+        # Transform entries still work
+        assert "aa" * 32 in forward
+        assert "bb" * 32 in reverse
+        # Cache progressed normally
+        assert cache._last_scanned_block == 100
+
+    def test_incremental_merge_scan(self):
+        """Incremental scan should pick up new merge events."""
+        src_a = bytes.fromhex("aa" * 32)
+        merged1 = bytes.fromhex("bb" * 32)
+
+        merge_evt1 = self._make_merge_event(
+            [src_a], merged1, "First merge"  # Only 1 source (edge case)
+        )
+        contract = self._make_contract_with_merges(merge_events=[merge_evt1])
+
+        cache = TransformationEventCache()
+        cache.get_maps(contract, deploy_block=0, current_block=100)
+
+        # Incremental scan with new merge event
+        src_b = bytes.fromhex("cc" * 32)
+        merged2 = bytes.fromhex("dd" * 32)
+        merge_evt2 = self._make_merge_event([src_b, src_a], merged2, "Second merge")
+        contract.get_all_transformations.return_value = []
+        contract.get_all_merge_events.return_value = [merge_evt2]
+
+        forward, reverse = cache.get_maps(contract, deploy_block=0, current_block=200)
+
+        # Both old and new entries present
+        assert "aa" * 32 in forward
+        assert "cc" * 32 in forward

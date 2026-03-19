@@ -72,6 +72,23 @@ class TransformResult(BaseModel):
     description: str = Field(description="Transformation description")
 
 
+class MergeTransformResult(BaseModel):
+    """Result from recording an N-to-1 merge transformation on-chain."""
+
+    tx_hash: str = Field(description="Transaction hash")
+    block_number: int = Field(description="Block number containing the transaction")
+    gas_used: int = Field(description="Gas consumed by the transaction")
+    explorer_url: Optional[str] = Field(
+        default=None, description="Block explorer URL for the transaction"
+    )
+    source_hashes: List[str] = Field(
+        description="Original data hashes that were merged"
+    )
+    new_hash: str = Field(description="New (merged) data hash")
+    description: str = Field(description="Transformation description")
+    new_data_type: str = Field(description="Data type of the merged result")
+
+
 class AccessResult(BaseModel):
     """Result from recording a data access on-chain."""
 

@@ -297,6 +297,7 @@ ALL_TOOL_NAMES = [
     "verify_hash",
     "get_provenance",
     "record_transform",
+    "record_merge_transform",
     "get_provenance_chain",
 ]
 
@@ -706,6 +707,42 @@ def create_server() -> Server:
                         },
                     ),
                     Tool(
+                        name="record_merge_transform",
+                        description="Record an N-to-1 merge transformation on-chain, linking multiple source hashes to a single merged result. All source hashes must be already anchored. The new_hash must NOT be previously anchored — record_merge_transform registers it automatically. Costs gas. Requires v2 contract.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "source_hashes": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string",
+                                        "pattern": "^[a-fA-F0-9]{64}$",
+                                    },
+                                    "minItems": 2,
+                                    "maxItems": 50,
+                                    "description": "Array of 64-character hex Swarm reference hashes of the source data (2-50 items, all must be already anchored)",
+                                },
+                                "new_hash": {
+                                    "type": "string",
+                                    "description": "64-character hex Swarm reference of the merged data",
+                                    "pattern": "^[a-fA-F0-9]{64}$",
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "Description of the merge transformation (e.g., 'Merged datasets A and B'). Max 256 characters.",
+                                    "maxLength": 256,
+                                },
+                                "new_data_type": {
+                                    "type": "string",
+                                    "description": "Data type for the merged result (default: 'merged'). Max 64 characters.",
+                                    "default": "merged",
+                                    "maxLength": 64,
+                                },
+                            },
+                            "required": ["source_hashes", "new_hash"],
+                        },
+                    ),
+                    Tool(
                         name="get_provenance_chain",
                         description="Follow the transformation lineage for a Swarm hash. Walks both directions — from any node it finds parents (originals) and children (derived versions). Can be called on a leaf, middle, or root hash. Read-only, no gas or wallet key required.",
                         inputSchema={
@@ -769,6 +806,8 @@ def create_server() -> Server:
                 return await handle_get_provenance(arguments)
             elif name == "record_transform":
                 return await handle_record_transform(arguments)
+            elif name == "record_merge_transform":
+                return await handle_record_merge_transform(arguments)
             elif name == "get_provenance_chain":
                 return await handle_get_provenance_chain(arguments)
             else:
@@ -2763,6 +2802,226 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
             )
 
         # Generic ChainError or unexpected Exception
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(f"Chain error: {str(e)}", retryable=False),
+                )
+            ],
+            isError=True,
+        )
+
+
+async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolResult:
+    """Handle record_merge_transform requests — record N-to-1 merge on-chain.
+
+    Write operation: requires PROVENANCE_WALLET_KEY and gas. Links multiple
+    source hashes to a single merged result with a transformation description.
+    """
+    if not CHAIN_AVAILABLE:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        "Chain module not available. Reinstall with: pip install -e . (web3/eth-account should be included)",
+                        retryable=False,
+                    ),
+                )
+            ],
+            isError=True,
+        )
+    if not chain_client:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        "record_merge_transform requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                        "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
+                        "work without a wallet.",
+                        retryable=False,
+                        next_tool="chain_health",
+                    ),
+                )
+            ],
+            isError=True,
+        )
+
+    try:
+        source_hashes = arguments.get("source_hashes")
+        if not source_hashes or not isinstance(source_hashes, list):
+            raise ValueError("source_hashes is required and must be an array")
+        if len(source_hashes) < 2:
+            raise ValueError("source_hashes must contain at least 2 items")
+        if len(source_hashes) > 50:
+            raise ValueError("source_hashes must contain at most 50 items")
+        clean_sources = [validate_and_clean_reference_hash(h) for h in source_hashes]
+
+        new_hash = arguments.get("new_hash")
+        if not new_hash:
+            raise ValueError("new_hash is required")
+        clean_new = validate_and_clean_reference_hash(new_hash)
+
+        if clean_new in clean_sources:
+            raise ValueError("new_hash must not be one of the source_hashes")
+
+        description = arguments.get("description", "")
+        if len(description) > 256:
+            raise ValueError("description must be 256 characters or fewer")
+
+        new_data_type = arguments.get("new_data_type", "merged")
+        if len(new_data_type) > 64:
+            raise ValueError("new_data_type must be 64 characters or fewer")
+
+        result = await asyncio.to_thread(
+            chain_client.merge_transform,
+            clean_sources,
+            clean_new,
+            description,
+            new_data_type,
+        )
+
+        response_text = f"⛓️  Merge transformation recorded on-chain\n\n"
+        response_text += f"   Sources ({len(clean_sources)}):\n"
+        for i, src in enumerate(result.source_hashes, 1):
+            response_text += f"     {i}. {src}\n"
+        response_text += f"   Merged: {result.new_hash}\n"
+        if description:
+            response_text += f"   Description: {description}\n"
+        response_text += f"   Data Type: {result.new_data_type}\n"
+        response_text += f"   Tx Hash: {result.tx_hash}\n"
+        response_text += f"   Block: {result.block_number:,}\n"
+        response_text += f"   Gas Used: {result.gas_used:,}"
+        if result.explorer_url:
+            response_text += f"\n   Explorer: {result.explorer_url}"
+
+        # Post-tx balance check
+        try:
+            wallet_info = await asyncio.to_thread(chain_client.balance)
+            guidance = _format_funding_guidance(
+                wallet_info.address, wallet_info.balance_wei, wallet_info.chain
+            )
+            response_text += guidance
+        except Exception:
+            pass
+
+        response_text += _format_hints(
+            "get_provenance_chain", ["get_provenance", "chain_balance"]
+        )
+
+        return CallToolResult(content=[TextContent(type="text", text=response_text)])
+
+    except ValueError as e:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        f"Validation error: {str(e)}",
+                        retryable=False,
+                    ),
+                )
+            ],
+            isError=True,
+        )
+    except Exception as e:
+        try:
+            from .chain.exceptions import (
+                DataNotRegisteredError,
+                ChainTransactionError,
+                ChainConnectionError,
+                ChainValidationError,
+            )
+        except ImportError:
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(f"Chain error: {str(e)}", retryable=False),
+                    )
+                ],
+                isError=True,
+            )
+
+        if isinstance(e, DataNotRegisteredError):
+            response_text = f"⛓️  Source hash is not registered on-chain\n\n"
+            response_text += f"   All source hashes must be anchored before recording a merge transformation.\n"
+            response_text += f"   Hash: {e.data_hash}"
+            response_text += _format_hints(
+                "anchor_hash", ["upload_data", "health_check"]
+            )
+            return CallToolResult(
+                content=[TextContent(type="text", text=response_text)]
+            )
+
+        if isinstance(e, ChainTransactionError):
+            if _is_insufficient_funds_error(e):
+                msg = _format_insufficient_funds_error(
+                    "record_merge_transform", chain_client
+                )
+            else:
+                msg = f"Transaction failed: {str(e)}"
+                if e.tx_hash:
+                    msg += f"\n   Tx Hash: {e.tx_hash}"
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(
+                            msg, retryable=False, next_tool="chain_balance"
+                        ),
+                    )
+                ],
+                isError=True,
+            )
+
+        if isinstance(e, ChainConnectionError):
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(
+                            f"Chain connection error: {str(e)}",
+                            retryable=True,
+                            next_tool="chain_health",
+                        ),
+                    )
+                ],
+                isError=True,
+            )
+
+        if isinstance(e, ChainValidationError):
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(
+                            f"Chain validation error: {str(e)}",
+                            retryable=False,
+                        ),
+                    )
+                ],
+                isError=True,
+            )
+
+        if _is_insufficient_funds_error(e):
+            msg = _format_insufficient_funds_error(
+                "record_merge_transform", chain_client
+            )
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(
+                            msg, retryable=False, next_tool="chain_balance"
+                        ),
+                    )
+                ],
+                isError=True,
+            )
+
         return CallToolResult(
             content=[
                 TextContent(

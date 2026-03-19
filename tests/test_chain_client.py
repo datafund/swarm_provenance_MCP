@@ -22,7 +22,6 @@ from swarm_provenance_mcp.chain.models import (
     TransformResult,
 )
 
-
 # Test constants
 DUMMY_PRIVATE_KEY = "0x" + "a" * 64
 DUMMY_ADDRESS = "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
@@ -346,9 +345,7 @@ class TestABILoading:
         with patch.object(Path, "parent", new_callable=PropertyMock) as mock_parent:
             mock_parent.return_value = Path("/nonexistent")
             # Need to patch at the open level
-            with patch(
-                "builtins.open", side_effect=FileNotFoundError("no such file")
-            ):
+            with patch("builtins.open", side_effect=FileNotFoundError("no such file")):
                 with pytest.raises(ChainConfigurationError) as exc_info:
                     _load_abi()
                 assert "Failed to load" in str(exc_info.value)
@@ -376,10 +373,7 @@ class TestChainProvider:
 
         assert provider.chain == "base-sepolia"
         assert provider.chain_id == 84532
-        assert (
-            provider.contract_address
-            == "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
-        )
+        assert provider.contract_address == "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
 
     def test_custom_rpc_url(self, mock_chain_deps):
         """Tests that custom RPC URL is used."""
@@ -1082,7 +1076,9 @@ class TestChainClientTransaction:
         )
 
         # Make receipt indicate failure
-        mock_chain_deps["web3_instance"].eth.wait_for_transaction_receipt.return_value = {
+        mock_chain_deps[
+            "web3_instance"
+        ].eth.wait_for_transaction_receipt.return_value = {
             "status": 0,
             "transactionHash": DUMMY_TX_HASH_BYTES,
             "blockNumber": 12345679,
@@ -1589,3 +1585,553 @@ class TestBatchSetDataStatus:
 
         assert isinstance(result, AnchorResult)
         assert result.swarm_hash == DUMMY_HASH
+
+
+# --- Contract v2 view function tests ---
+
+
+class TestContractV2ViewFunctions:
+    """Tests for v2 contract view function wrappers."""
+
+    def test_get_transformation_links(self, mock_chain_deps):
+        """Tests forward traversal via getTransformationLinks."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        child_bytes = bytes.fromhex("bb" * 32)
+        mock_chain_deps[
+            "contract"
+        ].functions.getTransformationLinks.return_value.call.return_value = [
+            (child_bytes, "Step 1"),
+        ]
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        links = contract.get_transformation_links(DUMMY_HASH)
+
+        assert len(links) == 1
+        assert links[0][0] == child_bytes
+        assert links[0][1] == "Step 1"
+
+    def test_get_transformation_links_empty(self, mock_chain_deps):
+        """Tests getTransformationLinks with no links."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        mock_chain_deps[
+            "contract"
+        ].functions.getTransformationLinks.return_value.call.return_value = []
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        links = contract.get_transformation_links(DUMMY_HASH)
+        assert links == []
+
+    def test_get_transformation_links_multiple(self, mock_chain_deps):
+        """Tests multiple transformation links."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        child1 = bytes.fromhex("bb" * 32)
+        child2 = bytes.fromhex("cc" * 32)
+        mock_chain_deps[
+            "contract"
+        ].functions.getTransformationLinks.return_value.call.return_value = [
+            (child1, "Step 1"),
+            (child2, "Step 2"),
+        ]
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        links = contract.get_transformation_links(DUMMY_HASH)
+        assert len(links) == 2
+
+    def test_get_child_hashes(self, mock_chain_deps):
+        """Tests lightweight forward traversal via getChildHashes."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        child_bytes = bytes.fromhex("bb" * 32)
+        mock_chain_deps[
+            "contract"
+        ].functions.getChildHashes.return_value.call.return_value = [child_bytes]
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        children = contract.get_child_hashes(DUMMY_HASH)
+        assert children == [child_bytes]
+
+    def test_get_transformation_parents(self, mock_chain_deps):
+        """Tests reverse traversal via getTransformationParents."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        parent_bytes = bytes.fromhex("cc" * 32)
+        mock_chain_deps[
+            "contract"
+        ].functions.getTransformationParents.return_value.call.return_value = [
+            parent_bytes,
+        ]
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        parents = contract.get_transformation_parents(DUMMY_HASH)
+        assert parents == [parent_bytes]
+
+    def test_get_transformation_parents_empty(self, mock_chain_deps):
+        """Tests getTransformationParents for a root node."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        mock_chain_deps[
+            "contract"
+        ].functions.getTransformationParents.return_value.call.return_value = []
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        parents = contract.get_transformation_parents(DUMMY_HASH)
+        assert parents == []
+
+
+class TestSupportsTransformationLinks:
+    """Tests for v2 feature detection."""
+
+    def test_supports_v2_true(self, mock_chain_deps):
+        """Tests feature detection returns True on v2 contract."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        mock_chain_deps[
+            "contract"
+        ].functions.getTransformationLinks.return_value.call.return_value = []
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        contract._supports_v2 = None
+        assert contract.supports_transformation_links() is True
+
+    def test_supports_v2_false_on_revert(self, mock_chain_deps):
+        """Tests feature detection returns False when function reverts."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        mock_chain_deps[
+            "contract"
+        ].functions.getTransformationLinks.return_value.call.side_effect = Exception(
+            "revert"
+        )
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        contract._supports_v2 = None
+        assert contract.supports_transformation_links() is False
+
+    def test_supports_v2_caches_result(self, mock_chain_deps):
+        """Tests that result is cached after first call."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        mock_chain_deps[
+            "contract"
+        ].functions.getTransformationLinks.return_value.call.return_value = []
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        contract._supports_v2 = None
+
+        # First call
+        assert contract.supports_transformation_links() is True
+        # Second call should use cache
+        assert contract.supports_transformation_links() is True
+
+        # Contract function called only once
+        mock_chain_deps[
+            "contract"
+        ].functions.getTransformationLinks.return_value.call.assert_called_once()
+
+
+# --- Merge transformation contract tests ---
+
+
+class TestMergeTransformationContract:
+    """Tests for build_record_merge_transformation_tx."""
+
+    def test_build_merge_tx_success(self, mock_chain_deps):
+        """Tests building a merge transaction with valid inputs."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        mock_chain_deps[
+            "contract"
+        ].functions.recordMergeTransformation.return_value.build_transaction.return_value = {
+            "from": DUMMY_ADDRESS,
+            "to": DUMMY_CONTRACT,
+            "data": "0x",
+        }
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        tx = contract.build_record_merge_transformation_tx(
+            source_hashes=[DUMMY_HASH, "b" * 64],
+            new_hash="c" * 64,
+            description="Merged datasets",
+            new_data_type="merged",
+            sender=DUMMY_ADDRESS,
+        )
+        assert tx["from"] == DUMMY_ADDRESS
+
+    def test_build_merge_tx_too_few_sources(self, mock_chain_deps):
+        """Tests that fewer than 2 sources raises error."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        with pytest.raises(ChainValidationError) as exc_info:
+            contract.build_record_merge_transformation_tx(
+                source_hashes=[DUMMY_HASH],
+                new_hash="b" * 64,
+                description="test",
+                new_data_type="merged",
+                sender=DUMMY_ADDRESS,
+            )
+        assert "at least" in str(exc_info.value)
+
+    def test_build_merge_tx_too_many_sources(self, mock_chain_deps):
+        """Tests that more than 50 sources raises error."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        hashes = [f"{i:064x}" for i in range(51)]
+        with pytest.raises(ChainValidationError) as exc_info:
+            contract.build_record_merge_transformation_tx(
+                source_hashes=hashes,
+                new_hash="b" * 64,
+                description="test",
+                new_data_type="merged",
+                sender=DUMMY_ADDRESS,
+            )
+        assert "exceeds maximum" in str(exc_info.value)
+
+    def test_build_merge_tx_description_too_long(self, mock_chain_deps):
+        """Tests that description exceeding 256 chars raises error."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        with pytest.raises(ChainValidationError):
+            contract.build_record_merge_transformation_tx(
+                source_hashes=[DUMMY_HASH, "b" * 64],
+                new_hash="c" * 64,
+                description="x" * 257,
+                new_data_type="merged",
+                sender=DUMMY_ADDRESS,
+            )
+
+    def test_build_merge_tx_data_type_too_long(self, mock_chain_deps):
+        """Tests that data type exceeding 64 chars raises error."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        with pytest.raises(ChainValidationError):
+            contract.build_record_merge_transformation_tx(
+                source_hashes=[DUMMY_HASH, "b" * 64],
+                new_hash="c" * 64,
+                description="test",
+                new_data_type="x" * 65,
+                sender=DUMMY_ADDRESS,
+            )
+
+    def test_build_merge_tx_invalid_hash(self, mock_chain_deps):
+        """Tests that invalid hash format raises error."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        with pytest.raises(ChainValidationError):
+            contract.build_record_merge_transformation_tx(
+                source_hashes=[DUMMY_HASH, "tooshort"],
+                new_hash="c" * 64,
+                description="test",
+                new_data_type="merged",
+                sender=DUMMY_ADDRESS,
+            )
+
+
+# --- Merge transformation client tests ---
+
+
+class TestChainClientMergeTransform:
+    """Tests for ChainClient.merge_transform()."""
+
+    def test_merge_transform_success(self, mock_chain_deps):
+        """Tests successful merge transformation."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+        from swarm_provenance_mcp.chain.models import MergeTransformResult
+
+        mock_chain_deps[
+            "contract"
+        ].functions.recordMergeTransformation.return_value.build_transaction.return_value = {
+            "from": DUMMY_ADDRESS,
+            "to": DUMMY_CONTRACT,
+            "data": "0x",
+        }
+
+        client = ChainClient(chain="base-sepolia")
+        result = client.merge_transform(
+            source_hashes=[DUMMY_HASH, "b" * 64],
+            new_hash="c" * 64,
+            description="Merged EU and US data",
+            new_data_type="merged-dataset",
+        )
+
+        assert isinstance(result, MergeTransformResult)
+        assert result.source_hashes == [DUMMY_HASH, "b" * 64]
+        assert result.new_hash == "c" * 64
+        assert result.description == "Merged EU and US data"
+        assert result.new_data_type == "merged-dataset"
+        assert result.block_number == 12345679
+        assert result.gas_used == 95_000
+
+    def test_merge_transform_default_data_type(self, mock_chain_deps):
+        """Tests that default data type is 'merged'."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+
+        mock_chain_deps[
+            "contract"
+        ].functions.recordMergeTransformation.return_value.build_transaction.return_value = {
+            "from": DUMMY_ADDRESS,
+            "to": DUMMY_CONTRACT,
+            "data": "0x",
+        }
+
+        client = ChainClient(chain="base-sepolia")
+        result = client.merge_transform(
+            source_hashes=[DUMMY_HASH, "b" * 64],
+            new_hash="c" * 64,
+            description="test",
+        )
+        assert result.new_data_type == "merged"
+
+    def test_merge_transform_explorer_url(self, mock_chain_deps):
+        """Tests that explorer URL is included in result."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+
+        mock_chain_deps[
+            "contract"
+        ].functions.recordMergeTransformation.return_value.build_transaction.return_value = {
+            "from": DUMMY_ADDRESS,
+            "to": DUMMY_CONTRACT,
+            "data": "0x",
+        }
+
+        client = ChainClient(chain="base-sepolia")
+        result = client.merge_transform(
+            source_hashes=[DUMMY_HASH, "b" * 64],
+            new_hash="c" * 64,
+            description="test",
+        )
+        assert "sepolia.basescan.org" in result.explorer_url
+
+    def test_merge_transform_validation_error(self, mock_chain_deps):
+        """Tests that validation errors propagate from contract layer."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+
+        client = ChainClient(chain="base-sepolia")
+        with pytest.raises(ChainValidationError):
+            client.merge_transform(
+                source_hashes=[DUMMY_HASH],  # Too few
+                new_hash="c" * 64,
+                description="test",
+            )
+
+    def test_merge_transform_reverted(self, mock_chain_deps):
+        """Tests that reverted merge transaction raises error."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+
+        mock_chain_deps[
+            "contract"
+        ].functions.recordMergeTransformation.return_value.build_transaction.return_value = {
+            "from": DUMMY_ADDRESS,
+            "to": DUMMY_CONTRACT,
+            "data": "0x",
+        }
+        mock_chain_deps[
+            "web3_instance"
+        ].eth.wait_for_transaction_receipt.return_value = {
+            "status": 0,
+            "transactionHash": DUMMY_TX_HASH_BYTES,
+            "blockNumber": 12345679,
+            "gasUsed": 100_000,
+        }
+
+        client = ChainClient(chain="base-sepolia")
+        with pytest.raises(ChainTransactionError):
+            client.merge_transform(
+                source_hashes=[DUMMY_HASH, "b" * 64],
+                new_hash="c" * 64,
+                description="test",
+            )
+
+
+# --- Get v2 tuple parsing tests ---
+
+
+class TestGetV2TupleParsing:
+    """Tests for ChainClient.get() with v2 TransformationLink tuples."""
+
+    def test_get_with_v2_tuple_transformations(self, mock_chain_deps):
+        """Tests parsing TransformationLink tuples (bytes32, string) from v2 contract."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+
+        child_hash_bytes = bytes.fromhex("bb" * 32)
+        mock_chain_deps[
+            "contract"
+        ].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES,
+            DUMMY_ADDRESS,
+            1700000000,
+            "swarm-provenance",
+            [(child_hash_bytes, "Filtered PII")],
+            [],
+            0,
+        )
+
+        client = ChainClient(chain="base-sepolia")
+        record = client.get(swarm_hash=DUMMY_HASH)
+
+        assert len(record.transformations) == 1
+        assert record.transformations[0].description == "Filtered PII"
+        assert record.transformations[0].new_data_hash == "bb" * 32
+
+    def test_get_with_mixed_transformation_formats(self, mock_chain_deps):
+        """Tests parsing when some entries are tuples and some are strings."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+
+        child_hash_bytes = bytes.fromhex("bb" * 32)
+        mock_chain_deps[
+            "contract"
+        ].functions.getDataRecord.return_value.call.return_value = (
+            DUMMY_HASH_BYTES,
+            DUMMY_ADDRESS,
+            1700000000,
+            "swarm-provenance",
+            [
+                (child_hash_bytes, "v2 transform"),
+                "v1 description only",
+            ],
+            [],
+            0,
+        )
+
+        client = ChainClient(chain="base-sepolia")
+        record = client.get(swarm_hash=DUMMY_HASH)
+
+        assert len(record.transformations) == 2
+        assert record.transformations[0].new_data_hash == "bb" * 32
+        assert record.transformations[0].description == "v2 transform"
+        assert record.transformations[1].new_data_hash is None
+        assert record.transformations[1].description == "v1 description only"
+
+
+# --- Get all merge events tests ---
+
+
+class TestGetAllMergeEvents:
+    """Tests for contract.get_all_merge_events()."""
+
+    def test_returns_events_on_v2(self, mock_chain_deps):
+        """Tests that merge events are returned on v2 contracts."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        mock_event = MagicMock()
+        mock_chain_deps[
+            "contract"
+        ].events.DataMerged.create_filter.return_value.get_all_entries.return_value = [
+            mock_event,
+        ]
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        # Mock _get_logs_chunked to return our events
+        contract._get_logs_chunked = MagicMock(return_value=[mock_event])
+        events = contract.get_all_merge_events(from_block=0, to_block=1000)
+        assert len(events) == 1
+
+    def test_returns_empty_on_v1(self, mock_chain_deps):
+        """Tests that v1 contracts return empty list (no DataMerged event)."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
+        # Make the event access raise (v1 has no DataMerged)
+        contract._get_logs_chunked = MagicMock(
+            side_effect=Exception("no DataMerged event")
+        )
+        events = contract.get_all_merge_events(from_block=0, to_block=1000)
+        assert events == []
+
+
+# --- MergeTransformResult model tests ---
+
+
+class TestMergeTransformResultModel:
+    """Tests for the MergeTransformResult Pydantic model."""
+
+    def test_serialization(self):
+        """Tests model creation and serialization."""
+        from swarm_provenance_mcp.chain.models import MergeTransformResult
+
+        result = MergeTransformResult(
+            tx_hash="0x" + "ab" * 32,
+            block_number=100,
+            gas_used=150_000,
+            explorer_url="https://sepolia.basescan.org/tx/0xab",
+            source_hashes=[DUMMY_HASH, "b" * 64],
+            new_hash="c" * 64,
+            description="Merged",
+            new_data_type="merged-dataset",
+        )
+        data = result.model_dump()
+        assert len(data["source_hashes"]) == 2
+        assert data["new_data_type"] == "merged-dataset"
+
+    def test_optional_explorer_url(self):
+        """Tests that explorer_url defaults to None."""
+        from swarm_provenance_mcp.chain.models import MergeTransformResult
+
+        result = MergeTransformResult(
+            tx_hash="0x" + "ab" * 32,
+            block_number=100,
+            gas_used=150_000,
+            source_hashes=[DUMMY_HASH, "b" * 64],
+            new_hash="c" * 64,
+            description="Merged",
+            new_data_type="merged",
+        )
+        assert result.explorer_url is None

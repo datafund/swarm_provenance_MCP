@@ -89,11 +89,11 @@ AI Agents → MCP Server → Gateway Client → swarm_connect Gateway → Swarm 
 ### Chain Module (`chain/`)
 On-chain provenance module. Dependencies (web3, eth-account) included in default install. Enable with `CHAIN_ENABLED=true`.
 - `chain/__init__.py` — Import guard (`CHAIN_AVAILABLE` flag)
-- `chain/client.py` — High-level facade (anchor, verify, transform, access)
-- `chain/provider.py` — Web3 RPC connection management
+- `chain/client.py` — High-level facade (anchor, verify, transform, merge_transform, access)
+- `chain/provider.py` — Web3 RPC connection management (includes `localhost` preset for local hardhat)
 - `chain/wallet.py` — Private key loading and transaction signing
-- `chain/contract.py` — DataProvenance contract wrapper (build_*_tx, read methods, event queries)
-- `chain/event_cache.py` — In-memory cache for DataTransformed events (singleton per chain+contract, incremental scans)
+- `chain/contract.py` — DataProvenance contract wrapper (build_*_tx, read methods, event queries, v2 state reads, feature detection)
+- `chain/event_cache.py` — In-memory cache for DataTransformed and DataMerged events (singleton per chain+contract, incremental scans)
 - `chain/models.py` — Pydantic models (AnchorResult, ChainProvenanceRecord, etc.)
 - `chain/exceptions.py` — Standalone exception hierarchy (ChainError base)
 - `chain/abi/DataProvenance.json` — Contract ABI
@@ -121,11 +121,12 @@ On-chain provenance module. Dependencies (web3, eth-account) included in default
 | `chain_balance` | **required** | no | Check wallet ETH balance with funding guidance |
 | `verify_hash` | not needed | no | Check if hash is registered on-chain |
 | `get_provenance` | not needed | no | Retrieve full on-chain provenance record |
-| `get_provenance_chain` | not needed | no | Follow transformation lineage tree bidirectionally via event logs |
+| `get_provenance_chain` | not needed | no | Follow transformation lineage tree bidirectionally (state reads on v2, event logs on v1) |
 | `anchor_hash` | **required** | **yes** | Register Swarm hash on-chain |
 | `record_transform` | **required** | **yes** | Record data transformation, link original → new hash |
+| `record_merge_transform` | **required** | **yes** | Record N-to-1 merge transformation (2–50 sources → new hash) |
 
-Blockchain dependencies (web3, eth-account) are included in the default install. Set `CHAIN_ENABLED=true` to activate chain tools. Read-only tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `chain_health`) work without `PROVENANCE_WALLET_KEY` by creating a temporary provider + contract for direct contract reads. Write tools (`anchor_hash`, `record_transform`) and `chain_balance` require a funded wallet. Default RPC is `https://sepolia.base.org` (public, no API key needed); override with `CHAIN_RPC_URL`.
+Blockchain dependencies (web3, eth-account) are included in the default install. Set `CHAIN_ENABLED=true` to activate chain tools. Read-only tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `chain_health`) work without `PROVENANCE_WALLET_KEY` by creating a temporary provider + contract for direct contract reads. Write tools (`anchor_hash`, `record_transform`, `record_merge_transform`) and `chain_balance` require a funded wallet. Default RPC is `https://sepolia.base.org` (public, no API key needed); override with `CHAIN_RPC_URL`. The contract supports both v1 (event-log only) and v2 (state-based traversal with `TransformationLink` struct) — version is auto-detected via `supports_transformation_links()`.
 
 ### Dependencies Architecture
 - **MCP Framework**: Uses `mcp>=1.0.0` for protocol implementation
@@ -153,7 +154,7 @@ Blockchain dependencies (web3, eth-account) are included in the default install.
 - `MCP_SERVER_NAME`: Server identification (default: `swarm-provenance-mcp`)
 - `MCP_SERVER_VERSION`: Server version (default: `0.1.0`)
 - `CHAIN_ENABLED`: Enable on-chain provenance anchoring (default: `false`)
-- `CHAIN_NAME`: Blockchain network (`base-sepolia` or `base`, default: `base-sepolia`)
+- `CHAIN_NAME`: Blockchain network (`base-sepolia`, `base`, or `localhost`, default: `base-sepolia`)
 - `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x)
 - `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set)
 - `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs, tried in order after `CHAIN_RPC_URL`
@@ -170,7 +171,7 @@ The `config.py` module uses Pydantic Settings for type-safe configuration with a
 - Comprehensive error handling for HTTP requests with user-friendly messages
 - Proper MCP error responses with structured error information
 - Request timeout handling and retry logic in gateway client
-- Chain-specific error handling: insufficient funds detection with faucet/bridge guidance, "already registered" revert catch, duplicate transformation detection via event cache, proactive balance warnings in health_check
+- Chain-specific error handling: insufficient funds detection with faucet/bridge guidance, "already registered" revert catch, duplicate transformation detection via state read (v2) or event cache (v1), proactive balance warnings in health_check
 
 ### Agent Guidance (MCP Design Guidelines)
 - **Adaptive health_check**: Returns `ready` boolean, `_recommendations`, `_companion_servers`, and contextual `_next` based on stamp availability
@@ -181,7 +182,7 @@ The `config.py` module uses Pydantic Settings for type-safe configuration with a
 - **MCP Resources**: `provenance://skills` resource (SKILLS.md content) via `@server.list_resources()` / `@server.read_resource()`
 - **Cross-server coordination**: health_check reports companion servers (swarm_connect gateway status, fds-id MCP availability)
 - **Insufficient funds**: `_is_insufficient_funds_error()` and `_format_insufficient_funds_error()` provide faucet/bridge URLs
-- **Event-based lineage**: `get_provenance_chain` uses `DataTransformed` contract events bidirectionally (forward via `originalDataHash`, reverse via `newDataHash`) for accurate transformation traversal from any node. Events are cached in-memory (`chain/event_cache.py`): full scan on first call, incremental scans on subsequent calls (<1s vs ~20s)
+- **Provenance lineage**: `get_provenance_chain` uses state reads on v2 contracts (`getTransformationLinks`/`getTransformationParents`) or `DataTransformed` event logs on v1 contracts for bidirectional traversal from any node. Events are cached in-memory (`chain/event_cache.py`): full scan on first call, incremental scans on subsequent calls (<1s vs ~20s). Also scans `DataMerged` events for merge traversal.
 - Helper functions: `_format_hints()`, `_format_error()`, `_is_retryable_error()`, `_suggest_tool_name()`
 
 ### Code Quality

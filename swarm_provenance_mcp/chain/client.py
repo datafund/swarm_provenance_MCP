@@ -25,6 +25,7 @@ from .models import (
     ChainTransformation,
     ChainWalletInfo,
     DataStatusEnum,
+    MergeTransformResult,
     TransformResult,
 )
 
@@ -353,17 +354,18 @@ class ChainClient:
             description,
         )
 
-        # Pre-check: avoid wasting gas on duplicate transformations
-        deploy_block = self._provider.deploy_block
-        if deploy_block is not None:
+        # Pre-check: avoid wasting gas on duplicate transformations.
+        # Prefer state read on v2 contracts, fall back to event cache.
+        if self._contract.supports_transformation_links():
             try:
-                from .event_cache import get_cache
-
-                cache = get_cache(self._provider.chain, self._provider.contract_address)
-                current_block = self._provider.web3.eth.block_number
-                forward, _ = cache.get_maps(self._contract, deploy_block, current_block)
-                for existing_new, existing_desc in forward.get(original_hash, []):
-                    if existing_new == new_hash:
+                links = self._contract.get_transformation_links(original_hash)
+                for existing_new, existing_desc in links:
+                    existing_hex = (
+                        existing_new.hex()
+                        if isinstance(existing_new, bytes)
+                        else str(existing_new)
+                    )
+                    if existing_hex == new_hash:
                         raise TransformationAlreadyExistsError(
                             f"Transformation {original_hash[:16]}… → {new_hash[:16]}… already exists",
                             original_hash=original_hash,
@@ -373,7 +375,32 @@ class ChainClient:
             except TransformationAlreadyExistsError:
                 raise
             except Exception as e:
-                logger.warning("Duplicate check failed, proceeding: %s", e)
+                logger.warning("State-based duplicate check failed: %s", e)
+        else:
+            deploy_block = self._provider.deploy_block
+            if deploy_block is not None:
+                try:
+                    from .event_cache import get_cache
+
+                    cache = get_cache(
+                        self._provider.chain, self._provider.contract_address
+                    )
+                    current_block = self._provider.web3.eth.block_number
+                    forward, _ = cache.get_maps(
+                        self._contract, deploy_block, current_block
+                    )
+                    for existing_new, existing_desc in forward.get(original_hash, []):
+                        if existing_new == new_hash:
+                            raise TransformationAlreadyExistsError(
+                                f"Transformation {original_hash[:16]}… → {new_hash[:16]}… already exists",
+                                original_hash=original_hash,
+                                new_hash=new_hash,
+                                existing_description=existing_desc,
+                            )
+                except TransformationAlreadyExistsError:
+                    raise
+                except Exception as e:
+                    logger.warning("Duplicate check failed, proceeding: %s", e)
 
         tx = self._contract.build_record_transformation_tx(
             original_hash=original_hash,
@@ -592,6 +619,55 @@ class ChainClient:
             owner=self._wallet.address,
         )
 
+    def merge_transform(
+        self,
+        source_hashes: List[str],
+        new_hash: str,
+        description: str,
+        new_data_type: str = "merged",
+    ) -> MergeTransformResult:
+        """
+        Record an N-to-1 merge transformation on-chain.
+
+        All source hashes must be registered. The new_hash is registered
+        automatically by the contract.
+
+        Args:
+            source_hashes: List of original data hashes (2-50).
+            new_hash: Hash of the merged data.
+            description: Transformation description (max 256 chars).
+            new_data_type: Data type for merged result (max 64 chars).
+
+        Returns:
+            MergeTransformResult with transaction details.
+        """
+        logger.debug(
+            "Merge transform: sources=%d new=%s desc=%s",
+            len(source_hashes),
+            new_hash,
+            description,
+        )
+
+        tx = self._contract.build_record_merge_transformation_tx(
+            source_hashes=source_hashes,
+            new_hash=new_hash,
+            description=description,
+            new_data_type=new_data_type,
+            sender=self._wallet.address,
+        )
+        receipt = self._send_transaction(tx)
+
+        return MergeTransformResult(
+            tx_hash=receipt["transactionHash"].hex(),
+            block_number=receipt["blockNumber"],
+            gas_used=receipt["gasUsed"],
+            explorer_url=self._receipt_to_explorer_url(receipt),
+            source_hashes=source_hashes,
+            new_hash=new_hash,
+            description=description,
+            new_data_type=new_data_type,
+        )
+
     # --- Read operations ---
 
     def get(
@@ -634,14 +710,19 @@ class ChainClient:
                 data_hash=swarm_hash,
             )
 
-        # Parse transformations -- contract returns string[] (description only)
+        # Parse transformations — v2 contracts return TransformationLink[]
+        # (list of (bytes32, string) tuples), v1 returns string[].
         chain_transformations = []
         for t in transformations:
-            chain_transformations.append(
-                ChainTransformation(
-                    description=str(t),
+            if isinstance(t, (tuple, list)) and len(t) >= 2:
+                # V2 contract: TransformationLink(newDataHash, description)
+                new_hash = t[0].hex() if isinstance(t[0], bytes) else str(t[0])
+                chain_transformations.append(
+                    ChainTransformation(description=str(t[1]), new_data_hash=new_hash)
                 )
-            )
+            else:
+                # V1 contract: plain string description
+                chain_transformations.append(ChainTransformation(description=str(t)))
 
         logger.debug(
             "Record: owner=%s type=%s status=%s accessors=%d",
@@ -736,10 +817,10 @@ class ChainClient:
         """
         Get the provenance chain for a data hash.
 
-        Scans ALL DataTransformed events from the contract's deploy block
-        to build an in-memory index, then performs BFS traversal using
-        local lookups (no per-node event queries).  Falls back to
-        per-node event scanning when the deploy block is unknown.
+        On v2 contracts, uses state reads (``getTransformationLinks`` /
+        ``getTransformationParents``) for traversal — no event scanning.
+        On v1 contracts, falls back to the cached event scan path.
+        Falls back to per-node event scanning when the deploy block is unknown.
 
         Args:
             swarm_hash: Starting Swarm reference hash.
@@ -755,28 +836,35 @@ class ChainClient:
 
         effective_max = max_depth if max_depth is not None else 50
 
-        # Build in-memory transformation index via cached event scan.
-        # First call does a full scan; subsequent calls are incremental.
+        # Detect contract version — state reads are much faster than event scans
+        use_state_reads = False
+        try:
+            if self._contract.supports_transformation_links():
+                use_state_reads = True
+        except Exception:
+            pass
+
+        # Fall back to event cache for v1 contracts
         from .event_cache import get_cache
 
         forward = {}  # original_hex -> [(new_hex, desc)]
         reverse = {}  # new_hex -> [(original_hex, desc)]
         deploy_block = self._provider.deploy_block
+        use_local_index = False
 
-        if deploy_block is not None:
+        if not use_state_reads and deploy_block is not None:
             try:
                 cache = get_cache(self._provider.chain, self._provider.contract_address)
                 current_block = self._provider.web3.eth.block_number
                 forward, reverse = cache.get_maps(
                     self._contract, deploy_block, current_block
                 )
+                use_local_index = True
             except Exception as e:
                 logger.warning(
-                    "Full event scan failed, falling back to per-node queries: %s", e
+                    "Full event scan failed, falling back to per-node queries: %s",
+                    e,
                 )
-                deploy_block = None  # triggers per-node fallback below
-
-        use_local_index = deploy_block is not None
 
         chain = []
         visited = set()
@@ -797,8 +885,45 @@ class ChainClient:
                 logger.debug("Hash %s not registered, skipping", current_hash)
                 continue
 
-            if use_local_index:
-                # Use pre-built index — no RPC calls
+            if use_state_reads:
+                # V2 contract: state-based traversal
+                try:
+                    links = self._contract.get_transformation_links(current_hash)
+                    if links:
+                        record.transformations = [
+                            ChainTransformation(
+                                description=desc,
+                                new_data_hash=(
+                                    nh.hex() if isinstance(nh, bytes) else str(nh)
+                                ),
+                            )
+                            for nh, desc in links
+                        ]
+                        for nh, _ in links:
+                            nh_hex = nh.hex() if isinstance(nh, bytes) else str(nh)
+                            if nh_hex not in visited:
+                                to_visit.append((nh_hex, current_depth + 1))
+                except Exception as e:
+                    logger.warning(
+                        "State-based forward read failed for %s: %s",
+                        current_hash,
+                        e,
+                    )
+                # Reverse: parents via state
+                try:
+                    parents = self._contract.get_transformation_parents(current_hash)
+                    for p in parents:
+                        p_hex = p.hex() if isinstance(p, bytes) else str(p)
+                        if p_hex not in visited:
+                            to_visit.append((p_hex, current_depth + 1))
+                except Exception as e:
+                    logger.warning(
+                        "State-based reverse read failed for %s: %s",
+                        current_hash,
+                        e,
+                    )
+            elif use_local_index:
+                # V1 contract: use pre-built event cache index
                 fwd = forward.get(current_hash, [])
                 if fwd:
                     record.transformations = [
@@ -851,7 +976,9 @@ class ChainClient:
                             to_visit.append((orig_hash, current_depth + 1))
                 except Exception as e:
                     logger.warning(
-                        "Reverse event query failed for %s: %s", current_hash, e
+                        "Reverse event query failed for %s: %s",
+                        current_hash,
+                        e,
                     )
 
             chain.append(record)

@@ -8,7 +8,6 @@ from typing import Dict, Any
 from mcp.types import CallToolRequest, CallToolResult, TextContent
 from swarm_provenance_mcp.server import create_server
 
-
 # Valid 64-char hex IDs for tests
 TEST_STAMP_ID = "a" * 64
 TEST_REFERENCE = "b" * 64
@@ -20,12 +19,24 @@ async def call_tool_directly(server, name: str, arguments: Dict[str, Any]):
     Mirrors the server's call_tool wrapper including catch-all error handling.
     """
     from swarm_provenance_mcp.server import (
-        handle_purchase_stamp, handle_get_stamp_status, handle_list_stamps,
-        handle_extend_stamp, handle_upload_data, handle_download_data,
-        handle_check_stamp_health, handle_get_wallet_info, handle_get_notary_info,
-        handle_health_check, handle_chain_balance, handle_chain_health,
-        handle_anchor_hash, handle_verify_hash, handle_get_provenance,
-        handle_record_transform, handle_get_provenance_chain,
+        handle_purchase_stamp,
+        handle_get_stamp_status,
+        handle_list_stamps,
+        handle_extend_stamp,
+        handle_upload_data,
+        handle_download_data,
+        handle_check_stamp_health,
+        handle_get_wallet_info,
+        handle_get_notary_info,
+        handle_health_check,
+        handle_chain_balance,
+        handle_chain_health,
+        handle_anchor_hash,
+        handle_verify_hash,
+        handle_get_provenance,
+        handle_record_transform,
+        handle_record_merge_transform,
+        handle_get_provenance_chain,
     )
 
     handlers = {
@@ -45,6 +56,7 @@ async def call_tool_directly(server, name: str, arguments: Dict[str, Any]):
         "verify_hash": handle_verify_hash,
         "get_provenance": handle_get_provenance,
         "record_transform": handle_record_transform,
+        "record_merge_transform": handle_record_merge_transform,
         "get_provenance_chain": handle_get_provenance_chain,
     }
 
@@ -54,12 +66,14 @@ async def call_tool_directly(server, name: str, arguments: Dict[str, Any]):
         else:
             return CallToolResult(
                 content=[TextContent(type="text", text=f"Unknown tool: {name}")],
-                isError=True
+                isError=True,
             )
     except Exception as e:
         return CallToolResult(
-            content=[TextContent(type="text", text=f"Error executing {name}: {str(e)}")],
-            isError=True
+            content=[
+                TextContent(type="text", text=f"Error executing {name}: {str(e)}")
+            ],
+            isError=True,
         )
 
 
@@ -74,11 +88,11 @@ class TestToolExecution:
     @pytest.fixture
     def mock_gateway_client(self):
         """Mock gateway client for testing tool execution."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             # Configure mock responses for different methods
             mock_client.purchase_stamp.return_value = {
                 "batchID": TEST_STAMP_ID,
-                "message": "Stamp purchased successfully"
+                "message": "Stamp purchased successfully",
             }
             mock_client.get_stamp_details.return_value = {
                 "batchID": TEST_STAMP_ID,
@@ -89,7 +103,7 @@ class TestToolExecution:
                 "immutableFlag": False,
                 "exists": True,
                 "usable": True,
-                "batchTTL": 123456
+                "batchTTL": 123456,
             }
             mock_client.list_stamps.return_value = {
                 "stamps": [
@@ -102,15 +116,15 @@ class TestToolExecution:
                         "accessMode": "owned",
                     }
                 ],
-                "total_count": 1
+                "total_count": 1,
             }
             mock_client.extend_stamp.return_value = {
                 "batchID": TEST_STAMP_ID,
-                "message": "Stamp extended successfully"
+                "message": "Stamp extended successfully",
             }
             mock_client.upload_data.return_value = {
                 "reference": TEST_REFERENCE,
-                "message": "Upload successful"
+                "message": "Upload successful",
             }
             mock_client.download_data.return_value = b'{"test": "data content"}'
             mock_client.check_stamp_health.return_value = {
@@ -125,24 +139,24 @@ class TestToolExecution:
                     "utilizationPercent": 12.5,
                     "utilizationStatus": "ok",
                     "batchTTL": 86400,
-                    "expectedExpiration": "2026-04-10-12-00"
-                }
+                    "expectedExpiration": "2026-04-10-12-00",
+                },
             }
             mock_client.get_wallet_info.return_value = {
                 "walletAddress": "0x1234567890abcdef1234567890abcdef12345678",
-                "bzzBalance": "5000000000000000"
+                "bzzBalance": "5000000000000000",
             }
             mock_client.get_notary_info.return_value = {
                 "enabled": True,
                 "available": True,
                 "address": "0xabcdef1234567890abcdef1234567890abcdef12",
-                "message": "Notary service is operational"
+                "message": "Notary service is operational",
             }
             mock_client.health_check.return_value = {
                 "status": "healthy",
                 "gateway_url": "http://localhost:8000",
                 "response_time_ms": 15.5,
-                "gateway_response": {"version": "1.0.0"}
+                "gateway_response": {"version": "1.0.0"},
             }
 
             yield mock_client
@@ -163,11 +177,9 @@ class TestToolExecution:
         # Test with custom parameters
         mock_gateway_client.reset_mock()
         result_with_params = await call_tool_directly(
-            server, "purchase_stamp", {
-                "amount": 5000000000,
-                "depth": 18,
-                "label": "test-stamp"
-            }
+            server,
+            "purchase_stamp",
+            {"amount": 5000000000, "depth": 18, "label": "test-stamp"},
         )
         assert not result_with_params.isError
         mock_gateway_client.purchase_stamp.assert_called_once_with(
@@ -206,10 +218,7 @@ class TestToolExecution:
     async def test_extend_stamp_tool(self, server, mock_gateway_client):
         """Test extend_stamp tool execution."""
         result = await call_tool_directly(
-            server, "extend_stamp", {
-                "stamp_id": TEST_STAMP_ID,
-                "amount": 2000000000
-            }
+            server, "extend_stamp", {"stamp_id": TEST_STAMP_ID, "amount": 2000000000}
         )
 
         assert isinstance(result, CallToolResult)
@@ -221,11 +230,13 @@ class TestToolExecution:
     async def test_upload_data_tool(self, server, mock_gateway_client):
         """Test upload_data tool execution."""
         result = await call_tool_directly(
-            server, "upload_data", {
+            server,
+            "upload_data",
+            {
                 "data": "test data content",
                 "stamp_id": TEST_STAMP_ID,
-                "content_type": "text/plain"
-            }
+                "content_type": "text/plain",
+            },
         )
 
         assert isinstance(result, CallToolResult)
@@ -260,9 +271,15 @@ class TestToolExecution:
         mock_gateway_client.check_stamp_health.return_value = {
             "stamp_id": TEST_STAMP_ID,
             "can_upload": False,
-            "errors": [{"code": "EXPIRED", "message": "Stamp has expired", "suggestion": "Purchase a new stamp"}],
+            "errors": [
+                {
+                    "code": "EXPIRED",
+                    "message": "Stamp has expired",
+                    "suggestion": "Purchase a new stamp",
+                }
+            ],
             "warnings": [],
-            "status": {"exists": True, "usable": False}
+            "status": {"exists": True, "usable": False},
         }
 
         result = await call_tool_directly(
@@ -304,7 +321,7 @@ class TestToolExecution:
             "enabled": False,
             "available": False,
             "address": None,
-            "message": "Notary service is not configured"
+            "message": "Notary service is not configured",
         }
 
         result = await call_tool_directly(server, "get_notary_info", {})
@@ -324,7 +341,9 @@ class TestToolExecution:
 
         # Verify response contains expected information
         content_text = result.content[0].text
-        assert "operational" in content_text.lower() or "healthy" in content_text.lower()
+        assert (
+            "operational" in content_text.lower() or "healthy" in content_text.lower()
+        )
 
     async def test_invalid_tool_name(self, server, mock_gateway_client):
         """Test handling of invalid tool names."""
@@ -346,8 +365,10 @@ class TestToolExecution:
 
     async def test_gateway_error_handling(self, server):
         """Test error handling when gateway client raises exceptions."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
-            mock_client.purchase_stamp.side_effect = Exception("Gateway connection failed")
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.purchase_stamp.side_effect = Exception(
+                "Gateway connection failed"
+            )
 
             result = await call_tool_directly(server, "purchase_stamp", {})
 
@@ -368,7 +389,7 @@ class TestToolExecution:
             ("check_stamp_health", {"stamp_id": TEST_STAMP_ID}),
             ("get_wallet_info", {}),
             ("get_notary_info", {}),
-            ("health_check", {})
+            ("health_check", {}),
         ]
 
         for tool_name, arguments in tools_to_test:
@@ -384,11 +405,13 @@ class TestToolExecution:
             assert len(content_text) > 0
 
             # If it's JSON, it should parse correctly
-            if content_text.strip().startswith('{'):
+            if content_text.strip().startswith("{"):
                 try:
                     json.loads(content_text)
                 except json.JSONDecodeError:
-                    pytest.fail(f"Tool {tool_name} returned invalid JSON: {content_text}")
+                    pytest.fail(
+                        f"Tool {tool_name} returned invalid JSON: {content_text}"
+                    )
 
 
 class TestResponseHints:
@@ -401,29 +424,29 @@ class TestResponseHints:
     @pytest.fixture
     def mock_gateway_client(self):
         """Mock gateway client with standard responses."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.purchase_stamp.return_value = {
                 "batchID": TEST_STAMP_ID,
-                "message": "Stamp purchased successfully"
+                "message": "Stamp purchased successfully",
             }
             mock_client.get_stamp_details.return_value = {
                 "batchID": TEST_STAMP_ID,
                 "amount": "2000000000",
                 "depth": 17,
                 "usable": True,
-                "batchTTL": 123456
+                "batchTTL": 123456,
             }
             mock_client.list_stamps.return_value = {
                 "stamps": [{"batchID": TEST_STAMP_ID, "usable": True}],
-                "total_count": 1
+                "total_count": 1,
             }
             mock_client.extend_stamp.return_value = {
                 "batchID": TEST_STAMP_ID,
-                "message": "Stamp extended"
+                "message": "Stamp extended",
             }
             mock_client.upload_data.return_value = {
                 "reference": TEST_REFERENCE,
-                "message": "Upload successful"
+                "message": "Upload successful",
             }
             mock_client.download_data.return_value = b'{"test": "data"}'
             mock_client.check_stamp_health.return_value = {
@@ -431,26 +454,28 @@ class TestResponseHints:
                 "can_upload": True,
                 "errors": [],
                 "warnings": [],
-                "status": {"utilizationPercent": 10, "batchTTL": 86400}
+                "status": {"utilizationPercent": 10, "batchTTL": 86400},
             }
             mock_client.get_wallet_info.return_value = {
                 "walletAddress": "0x1234",
-                "bzzBalance": "5000"
+                "bzzBalance": "5000",
             }
             mock_client.get_notary_info.return_value = {
                 "enabled": True,
                 "available": True,
                 "address": "0xabcdef",
-                "message": "Operational"
+                "message": "Operational",
             }
             mock_client.health_check.return_value = {
                 "status": "healthy",
                 "gateway_url": "http://localhost:8000",
-                "response_time_ms": 15
+                "response_time_ms": 15,
             }
             yield mock_client
 
-    async def test_all_success_responses_have_next_hint(self, server, mock_gateway_client):
+    async def test_all_success_responses_have_next_hint(
+        self, server, mock_gateway_client
+    ):
         """Every successful tool response must include a _next hint."""
         tools_to_test = [
             ("purchase_stamp", {}),
@@ -468,8 +493,9 @@ class TestResponseHints:
         for tool_name, arguments in tools_to_test:
             result = await call_tool_directly(server, tool_name, arguments)
             content_text = result.content[0].text
-            assert "_next:" in content_text, \
-                f"Tool '{tool_name}' success response missing _next hint"
+            assert (
+                "_next:" in content_text
+            ), f"Tool '{tool_name}' success response missing _next hint"
 
     async def test_purchase_stamp_hints(self, server, mock_gateway_client):
         """purchase_stamp should suggest check_stamp_health next."""
@@ -502,7 +528,10 @@ class TestResponseHints:
     async def test_get_stamp_status_hints_not_usable(self, server, mock_gateway_client):
         """get_stamp_status for non-usable stamp should suggest purchase_stamp."""
         mock_gateway_client.get_stamp_details.return_value = {
-            "batchID": TEST_STAMP_ID, "usable": False, "amount": "0", "depth": 17
+            "batchID": TEST_STAMP_ID,
+            "usable": False,
+            "amount": "0",
+            "depth": 17,
         }
         result = await call_tool_directly(
             server, "get_stamp_status", {"stamp_id": TEST_STAMP_ID}
@@ -526,14 +555,16 @@ class TestResponseHints:
         text = result.content[0].text
         assert "_next: upload_data" in text
 
-    async def test_check_stamp_health_hints_unhealthy(self, server, mock_gateway_client):
+    async def test_check_stamp_health_hints_unhealthy(
+        self, server, mock_gateway_client
+    ):
         """Unhealthy stamp should suggest purchase_stamp."""
         mock_gateway_client.check_stamp_health.return_value = {
             "stamp_id": TEST_STAMP_ID,
             "can_upload": False,
             "errors": [{"code": "EXPIRED", "message": "Expired"}],
             "warnings": [],
-            "status": {}
+            "status": {},
         }
         result = await call_tool_directly(
             server, "check_stamp_health", {"stamp_id": TEST_STAMP_ID}
@@ -551,7 +582,7 @@ class TestPropagationFields:
 
     async def test_health_check_shows_propagation_status(self, server):
         """check_stamp_health should display propagationStatus and timing."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.check_stamp_health.return_value = {
                 "stamp_id": TEST_STAMP_ID,
                 "can_upload": False,
@@ -573,7 +604,7 @@ class TestPropagationFields:
 
     async def test_health_check_propagating_uses_estimated_ready(self, server):
         """Propagating stamp should show estimated ready time in hint."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.check_stamp_health.return_value = {
                 "stamp_id": TEST_STAMP_ID,
                 "can_upload": False,
@@ -594,7 +625,7 @@ class TestPropagationFields:
 
     async def test_health_check_no_propagation_fields(self, server):
         """Older gateway without propagation fields should fall back to heuristic."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.check_stamp_health.return_value = {
                 "stamp_id": TEST_STAMP_ID,
                 "can_upload": False,
@@ -612,7 +643,7 @@ class TestPropagationFields:
 
     async def test_stamp_status_shows_propagation(self, server):
         """get_stamp_status should display propagation fields when present."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.get_stamp_details.return_value = {
                 "amount": "2000000000",
                 "depth": 17,
@@ -639,7 +670,7 @@ class TestPropagationFields:
 
     async def test_purchase_stamp_propagating(self, server):
         """purchase_stamp should show estimated ready when propagating."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.purchase_stamp.return_value = {
                 "batchID": TEST_STAMP_ID,
                 "propagationStatus": "propagating",
@@ -653,7 +684,7 @@ class TestPropagationFields:
 
     async def test_purchase_stamp_ready_immediately(self, server):
         """purchase_stamp from pool should show ready immediately."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.purchase_stamp.return_value = {
                 "batchID": TEST_STAMP_ID,
                 "propagationStatus": "ready",
@@ -673,7 +704,7 @@ class TestStampAccessMode:
 
     async def test_list_stamps_shows_access_mode_owned(self, server):
         """Stamp with accessMode 'owned' should display 'owned' in output."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.list_stamps.return_value = {
                 "stamps": [
                     {
@@ -692,7 +723,7 @@ class TestStampAccessMode:
 
     async def test_list_stamps_shows_access_mode_shared(self, server):
         """Stamp with accessMode 'shared' should display 'shared' in output."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.list_stamps.return_value = {
                 "stamps": [
                     {
@@ -710,7 +741,7 @@ class TestStampAccessMode:
 
     async def test_list_stamps_propagation_status(self, server):
         """Stamp with propagationStatus should display it in output."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.list_stamps.return_value = {
                 "stamps": [
                     {
@@ -729,7 +760,7 @@ class TestStampAccessMode:
 
     async def test_list_stamps_public_only_hint(self, server):
         """When all stamps are shared (public), show guidance about dedicated stamps."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.list_stamps.return_value = {
                 "stamps": [
                     {
@@ -753,7 +784,7 @@ class TestStampAccessMode:
 
     async def test_list_stamps_owned_no_public_hint(self, server):
         """When at least one stamp is owned, do NOT show the public-only hint."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.list_stamps.return_value = {
                 "stamps": [
                     {
@@ -784,7 +815,7 @@ class TestStructuredErrors:
 
     async def test_validation_error_not_retryable(self, server):
         """Validation errors should be marked retryable: false."""
-        with patch('swarm_provenance_mcp.server.gateway_client'):
+        with patch("swarm_provenance_mcp.server.gateway_client"):
             result = await call_tool_directly(
                 server, "get_stamp_status", {"stamp_id": "invalid!"}
             )
@@ -795,7 +826,8 @@ class TestStructuredErrors:
     async def test_network_error_retryable(self, server):
         """Network/connection errors should be marked retryable: true."""
         from requests.exceptions import ConnectionError
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.list_stamps.side_effect = ConnectionError("Connection refused")
             result = await call_tool_directly(server, "list_stamps", {})
             assert result.isError
@@ -805,7 +837,8 @@ class TestStructuredErrors:
     async def test_error_includes_next_hint(self, server):
         """Error responses should include _next recovery hint."""
         from requests.exceptions import ConnectionError
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.purchase_stamp.side_effect = ConnectionError("timeout")
             result = await call_tool_directly(server, "purchase_stamp", {})
             assert result.isError
@@ -814,7 +847,7 @@ class TestStructuredErrors:
 
     async def test_validation_error_suggests_correct_tool(self, server):
         """Validation errors should suggest the right recovery tool."""
-        with patch('swarm_provenance_mcp.server.gateway_client'):
+        with patch("swarm_provenance_mcp.server.gateway_client"):
             # Bad stamp ID → should suggest list_stamps to find valid IDs
             result = await call_tool_directly(
                 server, "get_stamp_status", {"stamp_id": "bad"}
@@ -833,12 +866,13 @@ class TestTypoCorrection:
 
     @pytest.fixture
     def mock_gateway_client(self):
-        with patch('swarm_provenance_mcp.server.gateway_client'):
+        with patch("swarm_provenance_mcp.server.gateway_client"):
             yield
 
     async def test_close_typo_suggests_correction(self, server, mock_gateway_client):
         """Close typos should get 'Did you mean' suggestions."""
         from swarm_provenance_mcp.server import _suggest_tool_name
+
         msg = _suggest_tool_name("purchse_stamp")
         assert "Did you mean" in msg
         assert "purchase_stamp" in msg
@@ -846,6 +880,7 @@ class TestTypoCorrection:
     async def test_multiple_close_matches(self, server, mock_gateway_client):
         """When multiple tools are close, suggest all of them."""
         from swarm_provenance_mcp.server import _suggest_tool_name
+
         msg = _suggest_tool_name("list_stamp")
         assert "Did you mean" in msg
         assert "list_stamps" in msg
@@ -853,12 +888,16 @@ class TestTypoCorrection:
     async def test_no_close_match_lists_all(self, server, mock_gateway_client):
         """Completely wrong name should list all available tools."""
         from swarm_provenance_mcp.server import _suggest_tool_name
+
         msg = _suggest_tool_name("xyzzy_foobar_baz")
         assert "Available tools:" in msg
 
-    async def test_chain_tool_typo_suggests_correction(self, server, mock_gateway_client):
+    async def test_chain_tool_typo_suggests_correction(
+        self, server, mock_gateway_client
+    ):
         """Chain tool typos should also get 'Did you mean' suggestions."""
         from swarm_provenance_mcp.server import _suggest_tool_name
+
         msg = _suggest_tool_name("anchor_has")
         assert "Did you mean" in msg
         assert "anchor_hash" in msg
@@ -867,11 +906,14 @@ class TestTypoCorrection:
         assert "Did you mean" in msg
         assert "get_provenance" in msg
 
-    async def test_unknown_tool_error_includes_suggestion(self, server, mock_gateway_client):
+    async def test_unknown_tool_error_includes_suggestion(
+        self, server, mock_gateway_client
+    ):
         """Unknown tool via call_tool should include suggestion and retryable: false."""
         # call_tool_directly doesn't go through create_server's call_tool wrapper,
         # so test _suggest_tool_name and _format_error directly
         from swarm_provenance_mcp.server import _suggest_tool_name, _format_error
+
         msg = _format_error(_suggest_tool_name("helth_check"), retryable=False)
         assert "health_check" in msg
         assert "retryable: false" in msg
@@ -886,15 +928,15 @@ class TestAdaptiveHealthCheck:
 
     async def test_healthy_with_usable_stamps(self, server):
         """Healthy gateway + usable stamps → ready: true, _next: upload_data."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.health_check.return_value = {
                 "status": "healthy",
                 "gateway_url": "http://localhost:8000",
-                "response_time_ms": 10
+                "response_time_ms": 10,
             }
             mock_client.list_stamps.return_value = {
                 "stamps": [{"batchID": TEST_STAMP_ID, "usable": True}],
-                "total_count": 1
+                "total_count": 1,
             }
             result = await call_tool_directly(server, "health_check", {})
             text = result.content[0].text
@@ -903,11 +945,11 @@ class TestAdaptiveHealthCheck:
 
     async def test_healthy_no_stamps(self, server):
         """Healthy gateway + no stamps → ready: false, _next: purchase_stamp."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.health_check.return_value = {
                 "status": "healthy",
                 "gateway_url": "http://localhost:8000",
-                "response_time_ms": 10
+                "response_time_ms": 10,
             }
             mock_client.list_stamps.return_value = {"stamps": [], "total_count": 0}
             result = await call_tool_directly(server, "health_check", {})
@@ -918,15 +960,15 @@ class TestAdaptiveHealthCheck:
 
     async def test_healthy_no_usable_stamps(self, server):
         """Healthy gateway + stamps but none usable → ready: false, recommends purchase."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.health_check.return_value = {
                 "status": "healthy",
                 "gateway_url": "http://localhost:8000",
-                "response_time_ms": 10
+                "response_time_ms": 10,
             }
             mock_client.list_stamps.return_value = {
                 "stamps": [{"batchID": TEST_STAMP_ID, "usable": False}],
-                "total_count": 1
+                "total_count": 1,
             }
             result = await call_tool_directly(server, "health_check", {})
             text = result.content[0].text
@@ -935,11 +977,11 @@ class TestAdaptiveHealthCheck:
 
     async def test_unhealthy_gateway(self, server):
         """Unhealthy gateway → ready: false with gateway recommendation."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.health_check.return_value = {
                 "status": "unhealthy",
                 "gateway_url": "http://localhost:8000",
-                "response_time_ms": 5000
+                "response_time_ms": 5000,
             }
             result = await call_tool_directly(server, "health_check", {})
             text = result.content[0].text
@@ -949,7 +991,8 @@ class TestAdaptiveHealthCheck:
     async def test_gateway_connection_failure(self, server):
         """Connection failure → isError with retryable flag."""
         from requests.exceptions import ConnectionError
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.health_check.side_effect = ConnectionError("refused")
             result = await call_tool_directly(server, "health_check", {})
             assert result.isError
@@ -958,15 +1001,15 @@ class TestAdaptiveHealthCheck:
 
     async def test_response_has_related_tools(self, server):
         """health_check response should list related tools."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.health_check.return_value = {
                 "status": "healthy",
                 "gateway_url": "http://localhost:8000",
-                "response_time_ms": 10
+                "response_time_ms": 10,
             }
             mock_client.list_stamps.return_value = {
                 "stamps": [{"batchID": TEST_STAMP_ID, "usable": True}],
-                "total_count": 1
+                "total_count": 1,
             }
             result = await call_tool_directly(server, "health_check", {})
             text = result.content[0].text
@@ -984,34 +1027,38 @@ class TestMCPPrompts:
         """list_prompts should return all 4 workflow prompts."""
         handler = None
         for h in server.request_handlers.values():
-            if hasattr(h, '__name__') and 'list_prompts' in str(h):
+            if hasattr(h, "__name__") and "list_prompts" in str(h):
                 handler = h
                 break
 
         assert handler is not None, "list_prompts handler not registered"
         from mcp.types import ListPromptsRequest
+
         result = await handler(ListPromptsRequest(method="prompts/list"))
-        inner = result.root if hasattr(result, 'root') else result
-        prompts = inner.prompts if hasattr(inner, 'prompts') else inner
+        inner = result.root if hasattr(result, "root") else result
+        prompts = inner.prompts if hasattr(inner, "prompts") else inner
 
         prompt_names = {p.name for p in prompts}
         assert prompt_names == {
-            "provenance-upload", "provenance-verify",
-            "stamp-management", "provenance-chain-workflow",
+            "provenance-upload",
+            "provenance-verify",
+            "stamp-management",
+            "provenance-chain-workflow",
         }
 
     async def test_provenance_upload_prompt_has_arguments(self, server):
         """provenance-upload prompt should require data argument."""
         handler = None
         for h in server.request_handlers.values():
-            if hasattr(h, '__name__') and 'list_prompts' in str(h):
+            if hasattr(h, "__name__") and "list_prompts" in str(h):
                 handler = h
                 break
 
         from mcp.types import ListPromptsRequest
+
         result = await handler(ListPromptsRequest(method="prompts/list"))
-        inner = result.root if hasattr(result, 'root') else result
-        prompts = inner.prompts if hasattr(inner, 'prompts') else inner
+        inner = result.root if hasattr(result, "root") else result
+        prompts = inner.prompts if hasattr(inner, "prompts") else inner
 
         upload_prompt = next(p for p in prompts if p.name == "provenance-upload")
         arg_names = [a.name for a in upload_prompt.arguments]
@@ -1023,17 +1070,23 @@ class TestMCPPrompts:
         """get_prompt for provenance-upload should return step-by-step instructions."""
         handler = None
         for h in server.request_handlers.values():
-            if hasattr(h, '__name__') and 'get_prompt' in str(h):
+            if hasattr(h, "__name__") and "get_prompt" in str(h):
                 handler = h
                 break
 
         assert handler is not None, "get_prompt handler not registered"
         from mcp.types import GetPromptRequest
-        result = await handler(GetPromptRequest(
-            method="prompts/get",
-            params={"name": "provenance-upload", "arguments": {"data": "test data"}}
-        ))
-        inner = result.root if hasattr(result, 'root') else result
+
+        result = await handler(
+            GetPromptRequest(
+                method="prompts/get",
+                params={
+                    "name": "provenance-upload",
+                    "arguments": {"data": "test data"},
+                },
+            )
+        )
+        inner = result.root if hasattr(result, "root") else result
         messages = inner.messages
 
         assert len(messages) >= 1
@@ -1046,16 +1099,16 @@ class TestMCPPrompts:
         """get_prompt for stamp-management should include stamp review steps."""
         handler = None
         for h in server.request_handlers.values():
-            if hasattr(h, '__name__') and 'get_prompt' in str(h):
+            if hasattr(h, "__name__") and "get_prompt" in str(h):
                 handler = h
                 break
 
         from mcp.types import GetPromptRequest
-        result = await handler(GetPromptRequest(
-            method="prompts/get",
-            params={"name": "stamp-management"}
-        ))
-        inner = result.root if hasattr(result, 'root') else result
+
+        result = await handler(
+            GetPromptRequest(method="prompts/get", params={"name": "stamp-management"})
+        )
+        inner = result.root if hasattr(result, "root") else result
         text = inner.messages[0].content.text
         assert "list_stamps" in text
         assert "check_stamp_health" in text
@@ -1070,15 +1123,15 @@ class TestCompanionServers:
 
     async def test_health_check_includes_companion_servers(self, server):
         """health_check response should list companion servers."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.health_check.return_value = {
                 "status": "healthy",
                 "gateway_url": "http://localhost:8000",
-                "response_time_ms": 10
+                "response_time_ms": 10,
             }
             mock_client.list_stamps.return_value = {
                 "stamps": [{"batchID": TEST_STAMP_ID, "usable": True}],
-                "total_count": 1
+                "total_count": 1,
             }
             result = await call_tool_directly(server, "health_check", {})
             text = result.content[0].text
@@ -1088,11 +1141,11 @@ class TestCompanionServers:
 
     async def test_companion_server_status_reflects_gateway(self, server):
         """Companion server status should reflect actual gateway connectivity."""
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.health_check.return_value = {
                 "status": "healthy",
                 "gateway_url": "http://localhost:8000",
-                "response_time_ms": 10
+                "response_time_ms": 10,
             }
             mock_client.list_stamps.return_value = {"stamps": [], "total_count": 0}
             result = await call_tool_directly(server, "health_check", {})
@@ -1110,7 +1163,7 @@ class TestToolParameterValidation:
 
     async def test_parameter_type_validation(self, server):
         """Test that tools validate parameter types correctly."""
-        with patch('swarm_provenance_mcp.server.gateway_client'):
+        with patch("swarm_provenance_mcp.server.gateway_client"):
             # Test invalid amount type for purchase_stamp
             result = await call_tool_directly(
                 server, "purchase_stamp", {"amount": "not_a_number", "depth": 17}
@@ -1121,7 +1174,7 @@ class TestToolParameterValidation:
 
     async def test_parameter_range_validation(self, server):
         """Test parameter range validation where applicable."""
-        with patch('swarm_provenance_mcp.server.gateway_client'):
+        with patch("swarm_provenance_mcp.server.gateway_client"):
             # Test negative amount (should be handled gracefully)
             result = await call_tool_directly(
                 server, "purchase_stamp", {"amount": -1000, "depth": 17}
@@ -1133,7 +1186,7 @@ class TestToolParameterValidation:
 
     async def test_empty_string_parameters(self, server):
         """Test handling of empty string parameters."""
-        with patch('swarm_provenance_mcp.server.gateway_client'):
+        with patch("swarm_provenance_mcp.server.gateway_client"):
             # Test empty stamp_id
             result = await call_tool_directly(
                 server, "get_stamp_status", {"stamp_id": ""}
@@ -1143,7 +1196,11 @@ class TestToolParameterValidation:
             assert isinstance(result, CallToolResult)
             if result.isError:
                 error_text = result.content[0].text.lower()
-                assert "stamp_id" in error_text or "empty" in error_text or "required" in error_text
+                assert (
+                    "stamp_id" in error_text
+                    or "empty" in error_text
+                    or "required" in error_text
+                )
 
 
 class TestChainBalance:
@@ -1170,8 +1227,10 @@ class TestChainBalance:
         mock_client._provider = MagicMock()
         mock_client._provider.rpc_url = "https://sepolia.base.org"
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
             result = await call_tool_directly(server, "chain_balance", {})
 
         assert not result.isError
@@ -1185,12 +1244,16 @@ class TestChainBalance:
     async def test_chain_balance_low(self, server):
         """Balance below LOW threshold should show warning."""
         mock_client = MagicMock()
-        mock_client.balance.return_value = self._mock_wallet_info(balance_wei=5 * 10**14)
+        mock_client.balance.return_value = self._mock_wallet_info(
+            balance_wei=5 * 10**14
+        )
         mock_client._provider = MagicMock()
         mock_client._provider.rpc_url = "https://sepolia.base.org"
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
             result = await call_tool_directly(server, "chain_balance", {})
 
         assert not result.isError
@@ -1205,8 +1268,10 @@ class TestChainBalance:
         mock_client._provider = MagicMock()
         mock_client._provider.rpc_url = "https://sepolia.base.org"
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
             result = await call_tool_directly(server, "chain_balance", {})
 
         assert not result.isError
@@ -1223,8 +1288,10 @@ class TestChainBalance:
         mock_client._provider = MagicMock()
         mock_client._provider.rpc_url = "https://mainnet.base.org"
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
             result = await call_tool_directly(server, "chain_balance", {})
 
         assert not result.isError
@@ -1233,7 +1300,7 @@ class TestChainBalance:
 
     async def test_chain_balance_not_available(self, server):
         """CHAIN_AVAILABLE=False should return error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', False):
+        with patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", False):
             result = await call_tool_directly(server, "chain_balance", {})
 
         assert result.isError
@@ -1242,8 +1309,10 @@ class TestChainBalance:
 
     async def test_chain_balance_no_client(self, server):
         """chain_client=None should return error suggesting chain_health."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', None):
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", None),
+        ):
             result = await call_tool_directly(server, "chain_balance", {})
 
         assert result.isError
@@ -1257,8 +1326,10 @@ class TestChainBalance:
         mock_client._provider = MagicMock()
         mock_client._provider.rpc_url = "https://sepolia.base.org"
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
             result = await call_tool_directly(server, "chain_balance", {})
 
         text = result.content[0].text
@@ -1270,8 +1341,10 @@ class TestChainBalance:
         mock_client = MagicMock()
         mock_client.balance.side_effect = Exception("RPC connection refused")
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
             result = await call_tool_directly(server, "chain_balance", {})
 
         assert result.isError
@@ -1283,8 +1356,10 @@ class TestChainBalance:
         """Chain tools should appear in list_tools when chain is enabled."""
         from mcp.types import ListToolsRequest
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.settings') as mock_settings:
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.settings") as mock_settings,
+        ):
             mock_settings.chain_enabled = True
             mock_settings.mcp_server_name = "test"
             mock_settings.mcp_server_version = "0.1.0"
@@ -1295,13 +1370,13 @@ class TestChainBalance:
             # Find the list_tools handler
             handler = None
             for h in test_server.request_handlers.values():
-                if hasattr(h, '__name__') and 'list_tools' in str(h):
+                if hasattr(h, "__name__") and "list_tools" in str(h):
                     handler = h
                     break
             assert handler is not None
             result = await handler(ListToolsRequest(method="tools/list"))
-            inner = result.root if hasattr(result, 'root') else result
-            tools = inner.tools if hasattr(inner, 'tools') else inner
+            inner = result.root if hasattr(result, "root") else result
+            tools = inner.tools if hasattr(inner, "tools") else inner
             tool_names = {t.name for t in tools}
             assert "chain_balance" in tool_names
             assert "chain_health" in tool_names
@@ -1321,12 +1396,16 @@ class TestChainHealth:
         mock_client._provider.chain = "base-sepolia"
         mock_client._provider.chain_id = 84532
         mock_client._provider.rpc_url = "https://sepolia.base.org"
-        mock_client._provider.contract_address = "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
+        mock_client._provider.contract_address = (
+            "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
+        )
         mock_client._provider.health_check.return_value = True
         mock_client._provider.get_block_number.return_value = 12345678
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
             result = await call_tool_directly(server, "chain_health", {})
 
         assert not result.isError
@@ -1342,8 +1421,10 @@ class TestChainHealth:
         mock_client._provider = MagicMock()
         mock_client._provider.health_check.side_effect = Exception("Connection refused")
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
             result = await call_tool_directly(server, "chain_health", {})
 
         assert result.isError
@@ -1352,7 +1433,7 @@ class TestChainHealth:
 
     async def test_chain_health_not_available(self, server):
         """CHAIN_AVAILABLE=False should return error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', False):
+        with patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", False):
             result = await call_tool_directly(server, "chain_health", {})
 
         assert result.isError
@@ -1369,9 +1450,14 @@ class TestChainHealth:
         mock_provider.health_check.return_value = True
         mock_provider.get_block_number.return_value = 99999
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', None), \
-             patch('swarm_provenance_mcp.chain.provider.ChainProvider', return_value=mock_provider):
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", None),
+            patch(
+                "swarm_provenance_mcp.chain.provider.ChainProvider",
+                return_value=mock_provider,
+            ),
+        ):
             result = await call_tool_directly(server, "chain_health", {})
 
         assert not result.isError
@@ -1389,8 +1475,10 @@ class TestChainHealth:
         mock_client._provider.health_check.return_value = True
         mock_client._provider.get_block_number.return_value = 100
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
             result = await call_tool_directly(server, "chain_health", {})
 
         text = result.content[0].text
@@ -1408,8 +1496,10 @@ class TestChainHealth:
         mock_client._provider.health_check.return_value = True
         mock_client._provider.get_block_number.return_value = 100
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
             result = await call_tool_directly(server, "chain_health", {})
 
         text = result.content[0].text
@@ -1418,9 +1508,11 @@ class TestChainHealth:
 
     async def test_chain_health_provider_creation_fails(self, server):
         """Failing to create temp provider (e.g. missing contract) should return error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', None), \
-             patch('swarm_provenance_mcp.server.settings') as mock_settings:
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", None),
+            patch("swarm_provenance_mcp.server.settings") as mock_settings,
+        ):
             mock_settings.chain_name = "base"
             mock_settings.chain_rpc_url = None
             mock_settings.chain_contract_address = None
@@ -1439,15 +1531,21 @@ class TestChainHealth:
         mock_provider_instance.chain = "base-sepolia"
         mock_provider_instance.chain_id = 84532
         mock_provider_instance.rpc_url = "https://sepolia.base.org"
-        mock_provider_instance.contract_address = "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
+        mock_provider_instance.contract_address = (
+            "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
+        )
         mock_provider_instance.health_check.return_value = True
         mock_provider_instance.get_block_number.return_value = 12345678
         mock_provider_cls.return_value = mock_provider_instance
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', None), \
-             patch('swarm_provenance_mcp.server.settings') as mock_settings, \
-             patch('swarm_provenance_mcp.chain.provider.ChainProvider', mock_provider_cls):
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", None),
+            patch("swarm_provenance_mcp.server.settings") as mock_settings,
+            patch(
+                "swarm_provenance_mcp.chain.provider.ChainProvider", mock_provider_cls
+            ),
+        ):
             mock_settings.chain_name = "base-sepolia"
             mock_settings.chain_rpc_url = None
             mock_settings.chain_contract_address = None
@@ -1469,21 +1567,29 @@ class TestFundingGuidance:
 
     def test_healthy_balance_returns_empty(self):
         """Balance above LOW threshold should return empty string."""
-        from swarm_provenance_mcp.server import _format_funding_guidance, _LOW_BALANCE_WEI
+        from swarm_provenance_mcp.server import (
+            _format_funding_guidance,
+            _LOW_BALANCE_WEI,
+        )
+
         result = _format_funding_guidance("0xabc", _LOW_BALANCE_WEI, "base-sepolia")
         assert result == ""
 
     def test_well_above_threshold_returns_empty(self):
         """Large balance should return empty string."""
         from swarm_provenance_mcp.server import _format_funding_guidance
+
         result = _format_funding_guidance("0xabc", 10**18, "base-sepolia")
         assert result == ""
 
     def test_low_balance_returns_warning(self):
         """Balance between MIN and LOW should return WARNING."""
         from swarm_provenance_mcp.server import (
-            _format_funding_guidance, _MIN_BALANCE_WEI, _LOW_BALANCE_WEI,
+            _format_funding_guidance,
+            _MIN_BALANCE_WEI,
+            _LOW_BALANCE_WEI,
         )
+
         balance = (_MIN_BALANCE_WEI + _LOW_BALANCE_WEI) // 2
         result = _format_funding_guidance("0xabc", balance, "base-sepolia")
         assert "WARNING" in result
@@ -1493,6 +1599,7 @@ class TestFundingGuidance:
     def test_insufficient_balance_returns_critical(self):
         """Balance below MIN should return CRITICAL."""
         from swarm_provenance_mcp.server import _format_funding_guidance
+
         result = _format_funding_guidance("0xabc", 100, "base-sepolia")
         assert "CRITICAL" in result
         assert "0xabc" in result
@@ -1500,24 +1607,28 @@ class TestFundingGuidance:
     def test_zero_balance_returns_critical(self):
         """Zero balance should return CRITICAL."""
         from swarm_provenance_mcp.server import _format_funding_guidance
+
         result = _format_funding_guidance("0xabc", 0, "base-sepolia")
         assert "CRITICAL" in result
 
     def test_testnet_shows_faucet(self):
         """Testnet chain should include faucet URL."""
         from swarm_provenance_mcp.server import _format_funding_guidance
+
         result = _format_funding_guidance("0xabc", 100, "base-sepolia")
         assert "faucet" in result.lower() or "alchemy" in result.lower()
 
     def test_mainnet_shows_bridge(self):
         """Mainnet chain should include bridge URL."""
         from swarm_provenance_mcp.server import _format_funding_guidance
+
         result = _format_funding_guidance("0xabc", 100, "base")
         assert "bridge.base.org" in result
 
     def test_unknown_chain_shows_bridge(self):
         """Unknown chain (not in faucet list) should show bridge URL."""
         from swarm_provenance_mcp.server import _format_funding_guidance
+
         result = _format_funding_guidance("0xabc", 100, "base-mainnet-custom")
         assert "bridge.base.org" in result
 
@@ -1554,7 +1665,9 @@ class TestParseRpcFallbacks:
         from swarm_provenance_mcp.server import _parse_rpc_fallbacks
 
         with patch("swarm_provenance_mcp.server.settings") as mock_settings:
-            mock_settings.chain_rpc_urls = "https://fb1.io,https://fb2.io,https://fb3.io"
+            mock_settings.chain_rpc_urls = (
+                "https://fb1.io,https://fb2.io,https://fb3.io"
+            )
             assert _parse_rpc_fallbacks() == [
                 "https://fb1.io",
                 "https://fb2.io",
@@ -1583,25 +1696,30 @@ class TestMaskRpcUrl:
 
     def test_standard_url(self):
         from swarm_provenance_mcp.server import _mask_rpc_url
+
         assert _mask_rpc_url("https://sepolia.base.org") == "sepolia.base.org"
 
     def test_url_with_path_and_key(self):
         from swarm_provenance_mcp.server import _mask_rpc_url
+
         result = _mask_rpc_url("https://rpc.example.com/v1/secret-key-123")
         assert result == "rpc.example.com"
 
     def test_url_with_port(self):
         from swarm_provenance_mcp.server import _mask_rpc_url
+
         result = _mask_rpc_url("http://localhost:8545")
         assert result == "localhost"
 
     def test_empty_string(self):
         from swarm_provenance_mcp.server import _mask_rpc_url
+
         result = _mask_rpc_url("")
         assert isinstance(result, str)
 
     def test_garbage_input(self):
         from swarm_provenance_mcp.server import _mask_rpc_url
+
         result = _mask_rpc_url("not-a-url")
         assert isinstance(result, str)
 
@@ -1613,7 +1731,12 @@ class TestAnchorHash:
     def server(self):
         return create_server()
 
-    def _mock_anchor_result(self, swarm_hash=TEST_REFERENCE, data_type="swarm-provenance", owner="0x1234567890abcdef1234567890abcdef12345678"):
+    def _mock_anchor_result(
+        self,
+        swarm_hash=TEST_REFERENCE,
+        data_type="swarm-provenance",
+        owner="0x1234567890abcdef1234567890abcdef12345678",
+    ):
         """Create a mock AnchorResult."""
         mock_result = MagicMock()
         mock_result.swarm_hash = swarm_hash
@@ -1641,11 +1764,17 @@ class TestAnchorHash:
         mock_client.anchor.return_value = self._mock_anchor_result()
         mock_client.balance.return_value = self._mock_wallet_info()
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "anchor_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "anchor_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -1662,12 +1791,18 @@ class TestAnchorHash:
         mock_client.anchor.return_value = self._mock_anchor_result(data_type="document")
         mock_client.balance.return_value = self._mock_wallet_info()
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "anchor_hash", {
-                "swarm_hash": TEST_REFERENCE,
-                "data_type": "document",
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "anchor_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                    "data_type": "document",
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -1678,15 +1813,23 @@ class TestAnchorHash:
         """Providing owner should trigger anchor_for."""
         delegate_owner = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
         mock_client = MagicMock()
-        mock_client.anchor_for.return_value = self._mock_anchor_result(owner=delegate_owner)
+        mock_client.anchor_for.return_value = self._mock_anchor_result(
+            owner=delegate_owner
+        )
         mock_client.balance.return_value = self._mock_wallet_info()
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "anchor_hash", {
-                "swarm_hash": TEST_REFERENCE,
-                "owner": delegate_owner,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "anchor_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                    "owner": delegate_owner,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -1709,11 +1852,17 @@ class TestAnchorHash:
             data_type="swarm-provenance",
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "anchor_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "anchor_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -1731,11 +1880,17 @@ class TestAnchorHash:
             "Transaction reverted", tx_hash="cd" * 32
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "anchor_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "anchor_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -1752,11 +1907,17 @@ class TestAnchorHash:
             "RPC unreachable", rpc_url="https://sepolia.base.org"
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "anchor_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "anchor_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -1765,10 +1926,14 @@ class TestAnchorHash:
 
     async def test_anchor_not_available(self, server):
         """CHAIN_AVAILABLE=False should return error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', False):
-            result = await call_tool_directly(server, "anchor_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", False):
+            result = await call_tool_directly(
+                server,
+                "anchor_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -1776,11 +1941,17 @@ class TestAnchorHash:
 
     async def test_anchor_no_client(self, server):
         """chain_client=None should return error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', None):
-            result = await call_tool_directly(server, "anchor_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", None),
+        ):
+            result = await call_tool_directly(
+                server,
+                "anchor_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -1788,11 +1959,17 @@ class TestAnchorHash:
 
     async def test_anchor_invalid_hash(self, server):
         """Invalid hash format should return validation error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
-            result = await call_tool_directly(server, "anchor_hash", {
-                "swarm_hash": "not-a-valid-hash",
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
+            result = await call_tool_directly(
+                server,
+                "anchor_hash",
+                {
+                    "swarm_hash": "not-a-valid-hash",
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -1800,8 +1977,10 @@ class TestAnchorHash:
 
     async def test_anchor_missing_hash(self, server):
         """Missing swarm_hash should return validation error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
             result = await call_tool_directly(server, "anchor_hash", {})
 
         assert result.isError
@@ -1810,12 +1989,18 @@ class TestAnchorHash:
 
     async def test_anchor_data_type_too_long(self, server):
         """data_type > 64 chars should return validation error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
-            result = await call_tool_directly(server, "anchor_hash", {
-                "swarm_hash": TEST_REFERENCE,
-                "data_type": "x" * 65,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
+            result = await call_tool_directly(
+                server,
+                "anchor_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                    "data_type": "x" * 65,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -1828,11 +2013,17 @@ class TestAnchorHash:
         mock_client = MagicMock()
         mock_client.anchor.side_effect = ChainValidationError("Invalid hash length")
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "anchor_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "anchor_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -1845,11 +2036,17 @@ class TestAnchorHash:
         mock_client.anchor.return_value = self._mock_anchor_result()
         mock_client.balance.side_effect = Exception("RPC down")
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "anchor_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "anchor_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -1865,13 +2062,19 @@ class TestAnchorHash:
         )
         mock_client.balance.return_value = self._mock_wallet_info()
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "anchor_hash", {
-                "swarm_hash": TEST_REFERENCE,
-                "owner": delegate_owner,
-                "data_type": "document",
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "anchor_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                    "owner": delegate_owner,
+                    "data_type": "document",
+                },
+            )
 
         assert not result.isError
         mock_client.anchor_for.assert_called_once_with(
@@ -1885,11 +2088,17 @@ class TestAnchorHash:
         mock_client = MagicMock()
         mock_client.anchor.side_effect = ChainError("Something unexpected")
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "anchor_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "anchor_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -1899,13 +2108,21 @@ class TestAnchorHash:
         """Post-tx balance warning should appear when balance is low."""
         mock_client = MagicMock()
         mock_client.anchor.return_value = self._mock_anchor_result()
-        mock_client.balance.return_value = self._mock_wallet_info(balance_wei=5 * 10**14)
+        mock_client.balance.return_value = self._mock_wallet_info(
+            balance_wei=5 * 10**14
+        )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "anchor_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "anchor_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -1918,11 +2135,17 @@ class TestAnchorHash:
         mock_client.anchor.return_value = self._mock_anchor_result()
         mock_client.balance.return_value = self._mock_wallet_info()
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "anchor_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "anchor_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         text = result.content[0].text
         assert "_next: download_data" in text
@@ -1933,8 +2156,10 @@ class TestAnchorHash:
         """anchor_hash should appear in list_tools when chain is enabled."""
         from mcp.types import ListToolsRequest
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.settings') as mock_settings:
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.settings") as mock_settings,
+        ):
             mock_settings.chain_enabled = True
             mock_settings.mcp_server_name = "test"
             mock_settings.mcp_server_version = "0.1.0"
@@ -1944,13 +2169,13 @@ class TestAnchorHash:
             test_server = create_server()
             handler = None
             for h in test_server.request_handlers.values():
-                if hasattr(h, '__name__') and 'list_tools' in str(h):
+                if hasattr(h, "__name__") and "list_tools" in str(h):
                     handler = h
                     break
             assert handler is not None
             result = await handler(ListToolsRequest(method="tools/list"))
-            inner = result.root if hasattr(result, 'root') else result
-            tools = inner.tools if hasattr(inner, 'tools') else inner
+            inner = result.root if hasattr(result, "root") else result
+            tools = inner.tools if hasattr(inner, "tools") else inner
             tool_names = {t.name for t in tools}
             assert "anchor_hash" in tool_names
 
@@ -1978,11 +2203,17 @@ class TestVerifyHash:
         mock_client.verify.return_value = True
         mock_client.get.return_value = self._mock_record()
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "verify_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "verify_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2001,11 +2232,17 @@ class TestVerifyHash:
         mock_rec.timestamp = 0
         mock_client.get.return_value = mock_rec
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "verify_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "verify_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2017,11 +2254,17 @@ class TestVerifyHash:
         mock_client = MagicMock()
         mock_client.verify.return_value = False
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "verify_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "verify_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2034,11 +2277,17 @@ class TestVerifyHash:
         mock_client.verify.return_value = True
         mock_client.get.return_value = self._mock_record()
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "verify_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "verify_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         text = result.content[0].text
         assert "_next: download_data" in text
@@ -2049,21 +2298,31 @@ class TestVerifyHash:
         mock_client = MagicMock()
         mock_client.verify.return_value = False
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "verify_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "verify_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         text = result.content[0].text
         assert "_next: anchor_hash" in text
 
     async def test_verify_not_available(self, server):
         """CHAIN_AVAILABLE=False should return error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', False):
-            result = await call_tool_directly(server, "verify_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", False):
+            result = await call_tool_directly(
+                server,
+                "verify_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -2079,16 +2338,33 @@ class TestVerifyHash:
         zero_address = "0x" + "0" * 40
         mock_contract.get_data_record.return_value = (
             bytes.fromhex(TEST_REFERENCE),
-            zero_address, 0, "", [], [], 0,
+            zero_address,
+            0,
+            "",
+            [],
+            [],
+            0,
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', None), \
-             patch('swarm_provenance_mcp.chain.provider.ChainProvider', return_value=mock_provider), \
-             patch('swarm_provenance_mcp.chain.contract.DataProvenanceContract', return_value=mock_contract):
-            result = await call_tool_directly(server, "verify_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", None),
+            patch(
+                "swarm_provenance_mcp.chain.provider.ChainProvider",
+                return_value=mock_provider,
+            ),
+            patch(
+                "swarm_provenance_mcp.chain.contract.DataProvenanceContract",
+                return_value=mock_contract,
+            ),
+        ):
+            result = await call_tool_directly(
+                server,
+                "verify_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2111,13 +2387,25 @@ class TestVerifyHash:
             0,
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', None), \
-             patch('swarm_provenance_mcp.chain.provider.ChainProvider', return_value=mock_provider), \
-             patch('swarm_provenance_mcp.chain.contract.DataProvenanceContract', return_value=mock_contract):
-            result = await call_tool_directly(server, "verify_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", None),
+            patch(
+                "swarm_provenance_mcp.chain.provider.ChainProvider",
+                return_value=mock_provider,
+            ),
+            patch(
+                "swarm_provenance_mcp.chain.contract.DataProvenanceContract",
+                return_value=mock_contract,
+            ),
+        ):
+            result = await call_tool_directly(
+                server,
+                "verify_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2126,11 +2414,17 @@ class TestVerifyHash:
 
     async def test_verify_invalid_hash(self, server):
         """Invalid hash format should return validation error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
-            result = await call_tool_directly(server, "verify_hash", {
-                "swarm_hash": "bad-hash",
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
+            result = await call_tool_directly(
+                server,
+                "verify_hash",
+                {
+                    "swarm_hash": "bad-hash",
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -2138,8 +2432,10 @@ class TestVerifyHash:
 
     async def test_verify_missing_hash(self, server):
         """Missing swarm_hash should return validation error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
             result = await call_tool_directly(server, "verify_hash", {})
 
         assert result.isError
@@ -2153,11 +2449,17 @@ class TestVerifyHash:
             "RPC unreachable", rpc_url="https://sepolia.base.org"
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "verify_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "verify_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -2168,8 +2470,10 @@ class TestVerifyHash:
         """verify_hash should appear in list_tools when chain is enabled."""
         from mcp.types import ListToolsRequest
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.settings') as mock_settings:
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.settings") as mock_settings,
+        ):
             mock_settings.chain_enabled = True
             mock_settings.mcp_server_name = "test"
             mock_settings.mcp_server_version = "0.1.0"
@@ -2179,13 +2483,13 @@ class TestVerifyHash:
             test_server = create_server()
             handler = None
             for h in test_server.request_handlers.values():
-                if hasattr(h, '__name__') and 'list_tools' in str(h):
+                if hasattr(h, "__name__") and "list_tools" in str(h):
                     handler = h
                     break
             assert handler is not None
             result = await handler(ListToolsRequest(method="tools/list"))
-            inner = result.root if hasattr(result, 'root') else result
-            tools = inner.tools if hasattr(inner, 'tools') else inner
+            inner = result.root if hasattr(result, "root") else result
+            tools = inner.tools if hasattr(inner, "tools") else inner
             tool_names = {t.name for t in tools}
             assert "verify_hash" in tool_names
 
@@ -2217,11 +2521,17 @@ class TestGetProvenance:
         mock_client = MagicMock()
         mock_client.get.return_value = self._mock_record()
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2244,11 +2554,17 @@ class TestGetProvenance:
             transformations=[mock_t1, mock_t2],
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2265,11 +2581,17 @@ class TestGetProvenance:
         mock_client = MagicMock()
         mock_client.get.return_value = self._mock_record(accessors=accessors)
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2283,14 +2605,21 @@ class TestGetProvenance:
 
         mock_client = MagicMock()
         mock_client.get.side_effect = DataNotRegisteredError(
-            "Not registered", data_hash=TEST_REFERENCE,
+            "Not registered",
+            data_hash=TEST_REFERENCE,
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2302,11 +2631,17 @@ class TestGetProvenance:
         mock_client = MagicMock()
         mock_client.get.return_value = self._mock_record(status_value=1)
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2317,11 +2652,17 @@ class TestGetProvenance:
         mock_client = MagicMock()
         mock_client.get.return_value = self._mock_record(status_value=2)
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2332,11 +2673,17 @@ class TestGetProvenance:
         mock_client = MagicMock()
         mock_client.get.return_value = self._mock_record(status_value=99)
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2347,11 +2694,17 @@ class TestGetProvenance:
         mock_client = MagicMock()
         mock_client.get.return_value = self._mock_record(timestamp=0)
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2359,10 +2712,14 @@ class TestGetProvenance:
 
     async def test_get_provenance_not_available(self, server):
         """CHAIN_AVAILABLE=False should return error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', False):
-            result = await call_tool_directly(server, "get_provenance", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", False):
+            result = await call_tool_directly(
+                server,
+                "get_provenance",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -2385,13 +2742,25 @@ class TestGetProvenance:
             0,
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', None), \
-             patch('swarm_provenance_mcp.chain.provider.ChainProvider', return_value=mock_provider), \
-             patch('swarm_provenance_mcp.chain.contract.DataProvenanceContract', return_value=mock_contract):
-            result = await call_tool_directly(server, "get_provenance", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", None),
+            patch(
+                "swarm_provenance_mcp.chain.provider.ChainProvider",
+                return_value=mock_provider,
+            ),
+            patch(
+                "swarm_provenance_mcp.chain.contract.DataProvenanceContract",
+                return_value=mock_contract,
+            ),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2408,16 +2777,33 @@ class TestGetProvenance:
         zero_address = "0x" + "0" * 40
         mock_contract.get_data_record.return_value = (
             bytes.fromhex(TEST_REFERENCE),
-            zero_address, 0, "", [], [], 0,
+            zero_address,
+            0,
+            "",
+            [],
+            [],
+            0,
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', None), \
-             patch('swarm_provenance_mcp.chain.provider.ChainProvider', return_value=mock_provider), \
-             patch('swarm_provenance_mcp.chain.contract.DataProvenanceContract', return_value=mock_contract):
-            result = await call_tool_directly(server, "get_provenance", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", None),
+            patch(
+                "swarm_provenance_mcp.chain.provider.ChainProvider",
+                return_value=mock_provider,
+            ),
+            patch(
+                "swarm_provenance_mcp.chain.contract.DataProvenanceContract",
+                return_value=mock_contract,
+            ),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2426,11 +2812,17 @@ class TestGetProvenance:
 
     async def test_get_provenance_invalid_hash(self, server):
         """Invalid hash format should return validation error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
-            result = await call_tool_directly(server, "get_provenance", {
-                "swarm_hash": "not-valid",
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance",
+                {
+                    "swarm_hash": "not-valid",
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -2438,8 +2830,10 @@ class TestGetProvenance:
 
     async def test_get_provenance_missing_hash(self, server):
         """Missing swarm_hash should return validation error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
             result = await call_tool_directly(server, "get_provenance", {})
 
         assert result.isError
@@ -2453,11 +2847,17 @@ class TestGetProvenance:
             "RPC unreachable", rpc_url="https://sepolia.base.org"
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -2471,11 +2871,17 @@ class TestGetProvenance:
         mock_client = MagicMock()
         mock_client.get.side_effect = ChainError("Something unexpected")
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -2486,11 +2892,17 @@ class TestGetProvenance:
         mock_client = MagicMock()
         mock_client.get.return_value = self._mock_record()
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         text = result.content[0].text
         assert "_next: download_data" in text
@@ -2501,8 +2913,10 @@ class TestGetProvenance:
         """get_provenance should appear in list_tools when chain is enabled."""
         from mcp.types import ListToolsRequest
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.settings') as mock_settings:
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.settings") as mock_settings,
+        ):
             mock_settings.chain_enabled = True
             mock_settings.mcp_server_name = "test"
             mock_settings.mcp_server_version = "0.1.0"
@@ -2512,13 +2926,13 @@ class TestGetProvenance:
             test_server = create_server()
             handler = None
             for h in test_server.request_handlers.values():
-                if hasattr(h, '__name__') and 'list_tools' in str(h):
+                if hasattr(h, "__name__") and "list_tools" in str(h):
                     handler = h
                     break
             assert handler is not None
             result = await handler(ListToolsRequest(method="tools/list"))
-            inner = result.root if hasattr(result, 'root') else result
-            tools = inner.tools if hasattr(inner, 'tools') else inner
+            inner = result.root if hasattr(result, "root") else result
+            tools = inner.tools if hasattr(inner, "tools") else inner
             tool_names = {t.name for t in tools}
             assert "get_provenance" in tool_names
 
@@ -2554,13 +2968,19 @@ class TestRecordTransform:
             address="0x1234", balance_wei=10**18, chain="base-sepolia"
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_NEW_HASH,
-                "description": "Anonymized PII",
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_NEW_HASH,
+                    "description": "Anonymized PII",
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2585,21 +3005,25 @@ class TestRecordTransform:
             address="0x1234", balance_wei=10**18, chain="base-sepolia"
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_NEW_HASH,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_NEW_HASH,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
         assert "Transformation recorded" in text
         # Description line should not appear when empty
         assert "Description:" not in text
-        mock_client.transform.assert_called_once_with(
-            TEST_REFERENCE, TEST_NEW_HASH, ""
-        )
+        mock_client.transform.assert_called_once_with(TEST_REFERENCE, TEST_NEW_HASH, "")
 
     async def test_transform_with_restrict(self, server):
         """restrict_original=True should call set_status after transform."""
@@ -2610,14 +3034,20 @@ class TestRecordTransform:
             address="0x1234", balance_wei=10**18, chain="base-sepolia"
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_NEW_HASH,
-                "description": "Filtered for EU",
-                "restrict_original": True,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_NEW_HASH,
+                    "description": "Filtered for EU",
+                    "restrict_original": True,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2633,13 +3063,19 @@ class TestRecordTransform:
             address="0x1234", balance_wei=10**18, chain="base-sepolia"
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_NEW_HASH,
-                "restrict_original": True,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_NEW_HASH,
+                    "restrict_original": True,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2649,12 +3085,18 @@ class TestRecordTransform:
 
     async def test_transform_same_hash_rejected(self, server):
         """original_hash == new_hash should be rejected."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_REFERENCE,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -2666,15 +3108,22 @@ class TestRecordTransform:
 
         mock_client = MagicMock()
         mock_client.transform.side_effect = DataNotRegisteredError(
-            "Not registered", data_hash=TEST_REFERENCE,
+            "Not registered",
+            data_hash=TEST_REFERENCE,
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_NEW_HASH,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_NEW_HASH,
+                },
+            )
 
         # Intentionally NOT isError — guides agent to anchor first
         assert not result.isError
@@ -2691,12 +3140,18 @@ class TestRecordTransform:
             "Reverted", tx_hash="0xfailed"
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_NEW_HASH,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_NEW_HASH,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -2713,12 +3168,18 @@ class TestRecordTransform:
             "RPC unreachable", rpc_url="https://sepolia.base.org"
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_NEW_HASH,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_NEW_HASH,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -2727,11 +3188,15 @@ class TestRecordTransform:
 
     async def test_transform_not_available(self, server):
         """CHAIN_AVAILABLE=False should return error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', False):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_NEW_HASH,
-            })
+        with patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", False):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_NEW_HASH,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -2739,12 +3204,18 @@ class TestRecordTransform:
 
     async def test_transform_no_client(self, server):
         """chain_client=None should return error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', None):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_NEW_HASH,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", None),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_NEW_HASH,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -2752,12 +3223,18 @@ class TestRecordTransform:
 
     async def test_transform_invalid_original_hash(self, server):
         """Invalid original_hash format should return validation error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": "bad-hash",
-                "new_hash": TEST_NEW_HASH,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": "bad-hash",
+                    "new_hash": TEST_NEW_HASH,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -2765,12 +3242,18 @@ class TestRecordTransform:
 
     async def test_transform_invalid_new_hash(self, server):
         """Invalid new_hash format should return validation error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": "not-valid",
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": "not-valid",
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -2778,33 +3261,51 @@ class TestRecordTransform:
 
     async def test_transform_missing_original_hash(self, server):
         """Missing original_hash should return validation error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
-            result = await call_tool_directly(server, "record_transform", {
-                "new_hash": TEST_NEW_HASH,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "new_hash": TEST_NEW_HASH,
+                },
+            )
 
         assert result.isError
 
     async def test_transform_missing_new_hash(self, server):
         """Missing new_hash should return validation error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                },
+            )
 
         assert result.isError
 
     async def test_transform_description_too_long(self, server):
         """Description over 256 chars should return validation error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_NEW_HASH,
-                "description": "x" * 257,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_NEW_HASH,
+                    "description": "x" * 257,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -2819,12 +3320,18 @@ class TestRecordTransform:
             "Invalid on-chain data"
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_NEW_HASH,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_NEW_HASH,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -2837,12 +3344,18 @@ class TestRecordTransform:
         mock_client = MagicMock()
         mock_client.transform.side_effect = ChainError("Something unexpected")
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_NEW_HASH,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_NEW_HASH,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -2856,12 +3369,18 @@ class TestRecordTransform:
             address="0x1234", balance_wei=10**18, chain="base-sepolia"
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_NEW_HASH,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_NEW_HASH,
+                },
+            )
 
         text = result.content[0].text
         assert "_next: get_provenance" in text
@@ -2874,12 +3393,18 @@ class TestRecordTransform:
         mock_client.transform.return_value = self._mock_transform_result()
         mock_client.balance.side_effect = Exception("RPC down")
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_NEW_HASH,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_NEW_HASH,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2895,12 +3420,18 @@ class TestRecordTransform:
             address="0x1234", balance_wei=10**18, chain="base-sepolia"
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_NEW_HASH,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_NEW_HASH,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2915,12 +3446,18 @@ class TestRecordTransform:
             address="0x1234", balance_wei=10**14, chain="base-sepolia"
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_NEW_HASH,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_NEW_HASH,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2930,8 +3467,10 @@ class TestRecordTransform:
         """record_transform should appear in list_tools when chain is enabled."""
         from mcp.types import ListToolsRequest
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.settings') as mock_settings:
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.settings") as mock_settings,
+        ):
             mock_settings.chain_enabled = True
             mock_settings.mcp_server_name = "test"
             mock_settings.mcp_server_version = "0.1.0"
@@ -2941,19 +3480,21 @@ class TestRecordTransform:
             test_server = create_server()
             handler = None
             for h in test_server.request_handlers.values():
-                if hasattr(h, '__name__') and 'list_tools' in str(h):
+                if hasattr(h, "__name__") and "list_tools" in str(h):
                     handler = h
                     break
             assert handler is not None
             result = await handler(ListToolsRequest(method="tools/list"))
-            inner = result.root if hasattr(result, 'root') else result
-            tools = inner.tools if hasattr(inner, 'tools') else inner
+            inner = result.root if hasattr(result, "root") else result
+            tools = inner.tools if hasattr(inner, "tools") else inner
             tool_names = {t.name for t in tools}
             assert "record_transform" in tool_names
 
     async def test_transform_already_exists(self, server):
         """TransformationAlreadyExistsError should NOT be isError (idempotent)."""
-        from swarm_provenance_mcp.chain.exceptions import TransformationAlreadyExistsError
+        from swarm_provenance_mcp.chain.exceptions import (
+            TransformationAlreadyExistsError,
+        )
 
         mock_client = MagicMock()
         mock_client.transform.side_effect = TransformationAlreadyExistsError(
@@ -2963,13 +3504,19 @@ class TestRecordTransform:
             existing_description="Anonymized PII",
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_NEW_HASH,
-                "description": "Anonymized PII",
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_NEW_HASH,
+                    "description": "Anonymized PII",
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -2983,7 +3530,9 @@ class TestRecordTransform:
 
     async def test_transform_already_exists_no_description(self, server):
         """TransformationAlreadyExistsError with no description should omit the line."""
-        from swarm_provenance_mcp.chain.exceptions import TransformationAlreadyExistsError
+        from swarm_provenance_mcp.chain.exceptions import (
+            TransformationAlreadyExistsError,
+        )
 
         mock_client = MagicMock()
         mock_client.transform.side_effect = TransformationAlreadyExistsError(
@@ -2993,12 +3542,18 @@ class TestRecordTransform:
             existing_description=None,
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_NEW_HASH,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_NEW_HASH,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -3037,11 +3592,17 @@ class TestGetProvenanceChain:
             self._mock_record(),
         ]
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance_chain", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance_chain",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -3068,11 +3629,17 @@ class TestGetProvenanceChain:
             ),
         ]
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance_chain", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance_chain",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -3086,12 +3653,18 @@ class TestGetProvenanceChain:
         mock_client = MagicMock()
         mock_client.get_provenance_chain.return_value = [self._mock_record()]
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance_chain", {
-                "swarm_hash": TEST_REFERENCE,
-                "max_depth": 5,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance_chain",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                    "max_depth": 5,
+                },
+            )
 
         assert not result.isError
         mock_client.get_provenance_chain.assert_called_once_with(
@@ -3103,11 +3676,17 @@ class TestGetProvenanceChain:
         mock_client = MagicMock()
         mock_client.get_provenance_chain.return_value = []
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance_chain", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance_chain",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -3116,12 +3695,18 @@ class TestGetProvenanceChain:
 
     async def test_chain_max_depth_too_low(self, server):
         """max_depth < 1 should return validation error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
-            result = await call_tool_directly(server, "get_provenance_chain", {
-                "swarm_hash": TEST_REFERENCE,
-                "max_depth": 0,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance_chain",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                    "max_depth": 0,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -3129,12 +3714,18 @@ class TestGetProvenanceChain:
 
     async def test_chain_max_depth_too_high(self, server):
         """max_depth > 50 should return validation error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
-            result = await call_tool_directly(server, "get_provenance_chain", {
-                "swarm_hash": TEST_REFERENCE,
-                "max_depth": 51,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance_chain",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                    "max_depth": 51,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -3142,10 +3733,14 @@ class TestGetProvenanceChain:
 
     async def test_chain_not_available(self, server):
         """CHAIN_AVAILABLE=False should return error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', False):
-            result = await call_tool_directly(server, "get_provenance_chain", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", False):
+            result = await call_tool_directly(
+                server,
+                "get_provenance_chain",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -3168,13 +3763,25 @@ class TestGetProvenanceChain:
             0,
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', None), \
-             patch('swarm_provenance_mcp.chain.provider.ChainProvider', return_value=mock_provider), \
-             patch('swarm_provenance_mcp.chain.contract.DataProvenanceContract', return_value=mock_contract):
-            result = await call_tool_directly(server, "get_provenance_chain", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", None),
+            patch(
+                "swarm_provenance_mcp.chain.provider.ChainProvider",
+                return_value=mock_provider,
+            ),
+            patch(
+                "swarm_provenance_mcp.chain.contract.DataProvenanceContract",
+                return_value=mock_contract,
+            ),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance_chain",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -3191,16 +3798,33 @@ class TestGetProvenanceChain:
         zero_address = "0x" + "0" * 40
         mock_contract.get_data_record.return_value = (
             bytes.fromhex(TEST_REFERENCE),
-            zero_address, 0, "", [], [], 0,
+            zero_address,
+            0,
+            "",
+            [],
+            [],
+            0,
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', None), \
-             patch('swarm_provenance_mcp.chain.provider.ChainProvider', return_value=mock_provider), \
-             patch('swarm_provenance_mcp.chain.contract.DataProvenanceContract', return_value=mock_contract):
-            result = await call_tool_directly(server, "get_provenance_chain", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", None),
+            patch(
+                "swarm_provenance_mcp.chain.provider.ChainProvider",
+                return_value=mock_provider,
+            ),
+            patch(
+                "swarm_provenance_mcp.chain.contract.DataProvenanceContract",
+                return_value=mock_contract,
+            ),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance_chain",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -3208,11 +3832,17 @@ class TestGetProvenanceChain:
 
     async def test_chain_invalid_hash(self, server):
         """Invalid hash format should return validation error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
-            result = await call_tool_directly(server, "get_provenance_chain", {
-                "swarm_hash": "bad-hash",
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance_chain",
+                {
+                    "swarm_hash": "bad-hash",
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -3220,8 +3850,10 @@ class TestGetProvenanceChain:
 
     async def test_chain_missing_hash(self, server):
         """Missing swarm_hash should return validation error."""
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', MagicMock()):
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
             result = await call_tool_directly(server, "get_provenance_chain", {})
 
         assert result.isError
@@ -3235,11 +3867,17 @@ class TestGetProvenanceChain:
             "RPC unreachable", rpc_url="https://sepolia.base.org"
         )
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance_chain", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance_chain",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -3253,11 +3891,17 @@ class TestGetProvenanceChain:
         mock_client = MagicMock()
         mock_client.get_provenance_chain.side_effect = ChainError("Unexpected")
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance_chain", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance_chain",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -3268,11 +3912,17 @@ class TestGetProvenanceChain:
         mock_client = MagicMock()
         mock_client.get_provenance_chain.return_value = [self._mock_record()]
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance_chain", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance_chain",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         text = result.content[0].text
         assert "_next: get_provenance" in text
@@ -3292,20 +3942,29 @@ class TestGetProvenanceChain:
         # chain_client returns both parent and leaf when queried from leaf
         mock_client.get_provenance_chain.return_value = [
             self._mock_record(
-                data_hash=leaf_hash, data_hash_val=leaf_hash,
+                data_hash=leaf_hash,
+                data_hash_val=leaf_hash,
                 data_type="derived",
             ),
             self._mock_record(
-                data_hash=parent_hash, data_hash_val=parent_hash,
-                data_type="original", transformations=[mock_t],
+                data_hash=parent_hash,
+                data_hash_val=parent_hash,
+                data_type="original",
+                transformations=[mock_t],
             ),
         ]
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance_chain", {
-                "swarm_hash": leaf_hash,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance_chain",
+                {
+                    "swarm_hash": leaf_hash,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -3323,11 +3982,17 @@ class TestGetProvenanceChain:
             self._mock_record(timestamp=0),
         ]
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance_chain", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance_chain",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -3340,11 +4005,17 @@ class TestGetProvenanceChain:
             self._mock_record(status_value=1),
         ]
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance_chain", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance_chain",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -3354,8 +4025,10 @@ class TestGetProvenanceChain:
         """get_provenance_chain should appear in list_tools when chain is enabled."""
         from mcp.types import ListToolsRequest
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.settings') as mock_settings:
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.settings") as mock_settings,
+        ):
             mock_settings.chain_enabled = True
             mock_settings.mcp_server_name = "test"
             mock_settings.mcp_server_version = "0.1.0"
@@ -3365,13 +4038,13 @@ class TestGetProvenanceChain:
             test_server = create_server()
             handler = None
             for h in test_server.request_handlers.values():
-                if hasattr(h, '__name__') and 'list_tools' in str(h):
+                if hasattr(h, "__name__") and "list_tools" in str(h):
                     handler = h
                     break
             assert handler is not None
             result = await handler(ListToolsRequest(method="tools/list"))
-            inner = result.root if hasattr(result, 'root') else result
-            tools = inner.tools if hasattr(inner, 'tools') else inner
+            inner = result.root if hasattr(result, "root") else result
+            tools = inner.tools if hasattr(inner, "tools") else inner
             tool_names = {t.name for t in tools}
             assert "get_provenance_chain" in tool_names
 
@@ -3381,18 +4054,23 @@ class TestInsufficientFundsHelpers:
 
     def test_detects_insufficient_funds(self):
         from swarm_provenance_mcp.server import _is_insufficient_funds_error
-        assert _is_insufficient_funds_error(Exception("insufficient funds for transfer"))
+
+        assert _is_insufficient_funds_error(
+            Exception("insufficient funds for transfer")
+        )
         assert _is_insufficient_funds_error(Exception("Insufficient funds for gas"))
         assert _is_insufficient_funds_error(Exception("insufficient balance"))
 
     def test_ignores_unrelated_errors(self):
         from swarm_provenance_mcp.server import _is_insufficient_funds_error
+
         assert not _is_insufficient_funds_error(Exception("reverted"))
         assert not _is_insufficient_funds_error(Exception("nonce too low"))
         assert not _is_insufficient_funds_error(Exception(""))
 
     def test_format_with_chain_client(self):
         from swarm_provenance_mcp.server import _format_insufficient_funds_error
+
         mock_client = MagicMock()
         mock_client.address = "0xABC"
         mock_client.chain = "base-sepolia"
@@ -3404,7 +4082,8 @@ class TestInsufficientFundsHelpers:
 
     def test_format_without_chain_client(self):
         from swarm_provenance_mcp.server import _format_insufficient_funds_error
-        with patch('swarm_provenance_mcp.server.settings') as mock_settings:
+
+        with patch("swarm_provenance_mcp.server.settings") as mock_settings:
             mock_settings.chain_name = "base"
             msg = _format_insufficient_funds_error("record_transform", None)
         assert "record_transform" in msg
@@ -3412,6 +4091,7 @@ class TestInsufficientFundsHelpers:
 
     def test_format_testnet_shows_faucet(self):
         from swarm_provenance_mcp.server import _format_insufficient_funds_error
+
         mock_client = MagicMock()
         mock_client.address = "0x1234"
         mock_client.chain = "base-sepolia"
@@ -3420,6 +4100,7 @@ class TestInsufficientFundsHelpers:
 
     def test_format_mainnet_shows_bridge(self):
         from swarm_provenance_mcp.server import _format_insufficient_funds_error
+
         mock_client = MagicMock()
         mock_client.address = "0x1234"
         mock_client.chain = "base"
@@ -3445,11 +4126,17 @@ class TestAnchorInsufficientFunds:
         mock_client.address = "0xWALLET"
         mock_client.chain = "base-sepolia"
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "anchor_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "anchor_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -3459,17 +4146,21 @@ class TestAnchorInsufficientFunds:
     async def test_generic_error_insufficient_funds(self, server):
         """Generic exception with 'insufficient funds' also gets special formatting."""
         mock_client = MagicMock()
-        mock_client.anchor.side_effect = Exception(
-            "insufficient funds for gas"
-        )
+        mock_client.anchor.side_effect = Exception("insufficient funds for gas")
         mock_client.address = "0xWALLET"
         mock_client.chain = "base-sepolia"
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "anchor_hash", {
-                "swarm_hash": TEST_REFERENCE,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "anchor_hash",
+                {
+                    "swarm_hash": TEST_REFERENCE,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -3494,12 +4185,18 @@ class TestTransformInsufficientFunds:
         mock_client.address = "0xWALLET"
         mock_client.chain = "base-sepolia"
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "record_transform", {
-                "original_hash": TEST_REFERENCE,
-                "new_hash": TEST_NEW_HASH,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_transform",
+                {
+                    "original_hash": TEST_REFERENCE,
+                    "new_hash": TEST_NEW_HASH,
+                },
+            )
 
         assert result.isError
         text = result.content[0].text
@@ -3531,9 +4228,11 @@ class TestHealthCheckBalanceWarning:
         mock_balance.chain = "base-sepolia"
         mock_chain.balance.return_value = mock_balance
 
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_gw, \
-             patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_chain):
+        with (
+            patch("swarm_provenance_mcp.server.gateway_client") as mock_gw,
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_chain),
+        ):
             mock_gw.health_check.return_value = {
                 "status": "healthy",
                 "gateway_url": "http://localhost",
@@ -3563,9 +4262,11 @@ class TestHealthCheckBalanceWarning:
         mock_chain._provider.chain_id = 84532
         mock_chain.balance.side_effect = Exception("RPC timeout")
 
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_gw, \
-             patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_chain):
+        with (
+            patch("swarm_provenance_mcp.server.gateway_client") as mock_gw,
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_chain),
+        ):
             mock_gw.health_check.return_value = {
                 "status": "healthy",
                 "gateway_url": "http://localhost",
@@ -3589,7 +4290,9 @@ class TestAnchorAlreadyRegisteredRevert:
         """When pre-check misses but tx reverts, should raise DataAlreadyRegisteredError."""
         from swarm_provenance_mcp.chain.client import ChainClient
         from swarm_provenance_mcp.chain.exceptions import (
-            ChainTransactionError, DataAlreadyRegisteredError, DataNotRegisteredError,
+            ChainTransactionError,
+            DataAlreadyRegisteredError,
+            DataNotRegisteredError,
         )
 
         client = ChainClient.__new__(ChainClient)
@@ -3601,9 +4304,11 @@ class TestAnchorAlreadyRegisteredRevert:
         client._gas_limit_multiplier = 1.2
 
         # Pre-check: hash not found (stale read)
-        mock_record_not_found = MagicMock(side_effect=[
-            DataNotRegisteredError("not found", data_hash="ab" * 32),
-        ])
+        mock_record_not_found = MagicMock(
+            side_effect=[
+                DataNotRegisteredError("not found", data_hash="ab" * 32),
+            ]
+        )
 
         # After revert: hash IS found
         mock_record_found = MagicMock()
@@ -3612,6 +4317,7 @@ class TestAnchorAlreadyRegisteredRevert:
         mock_record_found.data_type = "test"
 
         call_count = [0]
+
         def get_side_effect(h):
             call_count[0] += 1
             if call_count[0] == 1:
@@ -3642,8 +4348,8 @@ class TestGetTransformationsFrom:
         contract._contract = MagicMock()
 
         mock_event = MagicMock()
-        mock_event.args.originalDataHash = b'\xab' * 32
-        mock_event.args.newDataHash = b'\xcd' * 32
+        mock_event.args.originalDataHash = b"\xab" * 32
+        mock_event.args.newDataHash = b"\xcd" * 32
         mock_event.args.transformation = "Anonymized"
 
         contract._contract.events.DataTransformed.get_logs.return_value = [mock_event]
@@ -3652,8 +4358,8 @@ class TestGetTransformationsFrom:
 
         assert len(results) == 1
         orig, new, desc = results[0]
-        assert orig == b'\xab' * 32
-        assert new == b'\xcd' * 32
+        assert orig == b"\xab" * 32
+        assert new == b"\xcd" * 32
         assert desc == "Anonymized"
 
     def test_empty_events(self):
@@ -3712,7 +4418,9 @@ class TestGetTransformationsFrom:
         contract.get_transformations_from("ab" * 32)
 
         # Chunked scanning — first chunk starts at from_block=50000
-        first_call = contract._contract.events.DataTransformed.get_logs.call_args_list[0]
+        first_call = contract._contract.events.DataTransformed.get_logs.call_args_list[
+            0
+        ]
         assert first_call.kwargs["from_block"] == 50_000
 
 
@@ -3728,8 +4436,8 @@ class TestGetTransformationsTo:
         contract._contract = MagicMock()
 
         mock_event = MagicMock()
-        mock_event.args.originalDataHash = b'\xab' * 32
-        mock_event.args.newDataHash = b'\xcd' * 32
+        mock_event.args.originalDataHash = b"\xab" * 32
+        mock_event.args.newDataHash = b"\xcd" * 32
         mock_event.args.transformation = "Anonymized"
 
         contract._contract.events.DataTransformed.get_logs.return_value = [mock_event]
@@ -3738,8 +4446,8 @@ class TestGetTransformationsTo:
 
         assert len(results) == 1
         orig, new, desc = results[0]
-        assert orig == b'\xab' * 32
-        assert new == b'\xcd' * 32
+        assert orig == b"\xab" * 32
+        assert new == b"\xcd" * 32
         assert desc == "Anonymized"
 
         # Verify filter used newDataHash, not originalDataHash
@@ -3786,7 +4494,9 @@ class TestGetTransformationsTo:
         contract.get_transformations_to("cd" * 32)
 
         # Chunked scanning — first chunk starts at from_block=50000
-        first_call = contract._contract.events.DataTransformed.get_logs.call_args_list[0]
+        first_call = contract._contract.events.DataTransformed.get_logs.call_args_list[
+            0
+        ]
         assert first_call.kwargs["from_block"] == 50_000
 
 
@@ -3805,7 +4515,9 @@ class TestProvenanceChainEventTraversal:
         mock_rec1.timestamp = 1700000000
         mock_rec1.data_type = "original"
         mock_rec1.status = MagicMock(value=0)
-        mock_rec1.transformations = [MagicMock(description="Step 1", new_data_hash="bb" * 32)]
+        mock_rec1.transformations = [
+            MagicMock(description="Step 1", new_data_hash="bb" * 32)
+        ]
 
         mock_rec2 = MagicMock()
         mock_rec2.data_hash = "bb" * 32
@@ -3818,11 +4530,17 @@ class TestProvenanceChainEventTraversal:
         mock_client = MagicMock()
         mock_client.get_provenance_chain.return_value = [mock_rec1, mock_rec2]
 
-        with patch('swarm_provenance_mcp.server.CHAIN_AVAILABLE', True), \
-             patch('swarm_provenance_mcp.server.chain_client', mock_client):
-            result = await call_tool_directly(server, "get_provenance_chain", {
-                "swarm_hash": "aa" * 32,
-            })
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "get_provenance_chain",
+                {
+                    "swarm_hash": "aa" * 32,
+                },
+            )
 
         assert not result.isError
         text = result.content[0].text
@@ -3835,13 +4553,17 @@ class TestProvenanceChainEventTraversal:
         from swarm_provenance_mcp.chain.client import ChainClient
         from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
         from swarm_provenance_mcp.chain.models import (
-            ChainProvenanceRecord, ChainTransformation, DataStatusEnum,
+            ChainProvenanceRecord,
+            ChainTransformation,
+            DataStatusEnum,
         )
 
         client = ChainClient.__new__(ChainClient)
         client._contract = MagicMock()
         client._provider = MagicMock()
         client._provider.deploy_block = None  # Force per-node fallback path
+        # V1 contract — no state-based traversal
+        client._contract.supports_transformation_links.return_value = False
         # Event query fails
         client._contract.get_transformations_from.side_effect = Exception("RPC error")
         client._contract.get_transformations_to.side_effect = Exception("RPC error")
@@ -3875,13 +4597,17 @@ class TestProvenanceChainEventTraversal:
         from swarm_provenance_mcp.chain.client import ChainClient
         from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
         from swarm_provenance_mcp.chain.models import (
-            ChainProvenanceRecord, ChainTransformation, DataStatusEnum,
+            ChainProvenanceRecord,
+            ChainTransformation,
+            DataStatusEnum,
         )
 
         client = ChainClient.__new__(ChainClient)
         client._contract = MagicMock()
         client._provider = MagicMock()
         client._provider.deploy_block = None  # Force per-node scanning path
+        # V1 contract — no state-based traversal
+        client._contract.supports_transformation_links.return_value = False
 
         parent_hash = "aa" * 32
         leaf_hash = "bb" * 32
@@ -3917,6 +4643,7 @@ class TestProvenanceChainEventTraversal:
         # Forward: leaf has no children
         def fwd_side_effect(h):
             return []
+
         client._contract.get_transformations_from = MagicMock(
             side_effect=fwd_side_effect
         )
@@ -3924,11 +4651,12 @@ class TestProvenanceChainEventTraversal:
         # Reverse: leaf was produced from parent
         def rev_side_effect(h):
             if h == leaf_hash:
-                return [(bytes.fromhex(parent_hash), bytes.fromhex(leaf_hash), "Step 1")]
+                return [
+                    (bytes.fromhex(parent_hash), bytes.fromhex(leaf_hash), "Step 1")
+                ]
             return []
-        client._contract.get_transformations_to = MagicMock(
-            side_effect=rev_side_effect
-        )
+
+        client._contract.get_transformations_to = MagicMock(side_effect=rev_side_effect)
 
         chain = client.get_provenance_chain(leaf_hash)
         hashes = [r.data_hash for r in chain]
@@ -3941,9 +4669,12 @@ class TestProvenanceChainEventTraversal:
         from swarm_provenance_mcp.chain.client import ChainClient
         from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
         from swarm_provenance_mcp.chain.models import (
-            ChainProvenanceRecord, ChainTransformation, DataStatusEnum,
+            ChainProvenanceRecord,
+            ChainTransformation,
+            DataStatusEnum,
         )
         from swarm_provenance_mcp.chain.event_cache import clear_registry
+
         clear_registry()
 
         parent_hash = "aa" * 32
@@ -3951,6 +4682,7 @@ class TestProvenanceChainEventTraversal:
 
         client = ChainClient.__new__(ChainClient)
         client._contract = MagicMock()
+        client._contract.supports_transformation_links.return_value = False
         client._provider = MagicMock()
         client._provider.deploy_block = 37_562_100  # Known deploy block
         client._provider.chain = "base-sepolia"
@@ -4009,9 +4741,12 @@ class TestProvenanceChainEventTraversal:
         from swarm_provenance_mcp.chain.client import ChainClient
         from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
         from swarm_provenance_mcp.chain.models import (
-            ChainProvenanceRecord, ChainTransformation, DataStatusEnum,
+            ChainProvenanceRecord,
+            ChainTransformation,
+            DataStatusEnum,
         )
         from swarm_provenance_mcp.chain.event_cache import clear_registry
+
         clear_registry()
 
         root_hash = "aa" * 32
@@ -4019,6 +4754,7 @@ class TestProvenanceChainEventTraversal:
 
         client = ChainClient.__new__(ChainClient)
         client._contract = MagicMock()
+        client._contract.supports_transformation_links.return_value = False
         client._provider = MagicMock()
         client._provider.deploy_block = 100
         client._provider.chain = "base-sepolia"
@@ -4058,15 +4794,19 @@ class TestProvenanceChainEventTraversal:
         from swarm_provenance_mcp.chain.client import ChainClient
         from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
         from swarm_provenance_mcp.chain.models import (
-            ChainProvenanceRecord, ChainTransformation, DataStatusEnum,
+            ChainProvenanceRecord,
+            ChainTransformation,
+            DataStatusEnum,
         )
         from swarm_provenance_mcp.chain.event_cache import clear_registry
+
         clear_registry()
 
         hash_a = "aa" * 32
 
         client = ChainClient.__new__(ChainClient)
         client._contract = MagicMock()
+        client._contract.supports_transformation_links.return_value = False
         client._provider = MagicMock()
         client._provider.deploy_block = 100  # Deploy block set but scan fails
         client._provider.chain = "base-sepolia"
@@ -4104,7 +4844,9 @@ class TestProvenanceChainEventTraversal:
     async def test_transform_duplicate_check_uses_cache(self):
         """Pre-check should raise TransformationAlreadyExistsError when cache has matching pair."""
         from swarm_provenance_mcp.chain.client import ChainClient
-        from swarm_provenance_mcp.chain.exceptions import TransformationAlreadyExistsError
+        from swarm_provenance_mcp.chain.exceptions import (
+            TransformationAlreadyExistsError,
+        )
         from swarm_provenance_mcp.chain.event_cache import clear_registry
 
         clear_registry()
@@ -4114,6 +4856,7 @@ class TestProvenanceChainEventTraversal:
 
         client = ChainClient.__new__(ChainClient)
         client._contract = MagicMock()
+        client._contract.supports_transformation_links.return_value = False
         client._wallet = MagicMock()
         client._wallet.address = "0xTEST"
         client._provider = MagicMock()
@@ -4126,7 +4869,11 @@ class TestProvenanceChainEventTraversal:
 
         # Populate cache with existing transformation
         client._contract.get_all_transformations.return_value = [
-            (bytes.fromhex(original_hash), bytes.fromhex(new_hash), "Existing transform"),
+            (
+                bytes.fromhex(original_hash),
+                bytes.fromhex(new_hash),
+                "Existing transform",
+            ),
         ]
 
         with pytest.raises(TransformationAlreadyExistsError) as exc_info:
@@ -4150,6 +4897,7 @@ class TestProvenanceChainEventTraversal:
 
         client = ChainClient.__new__(ChainClient)
         client._contract = MagicMock()
+        client._contract.supports_transformation_links.return_value = False
         client._wallet = MagicMock()
         client._wallet.address = "0xTEST"
         client._provider = MagicMock()
@@ -4173,7 +4921,9 @@ class TestProvenanceChainEventTraversal:
         }
         client._provider.web3.eth.get_transaction_count.return_value = 0
         client._provider.web3.eth.send_raw_transaction.return_value = b"\xab\xc0"
-        client._provider.web3.eth.wait_for_transaction_receipt.return_value = mock_receipt
+        client._provider.web3.eth.wait_for_transaction_receipt.return_value = (
+            mock_receipt
+        )
         client._wallet.sign_transaction.return_value = b"\x00"
         client._provider.get_explorer_tx_url.return_value = None
 
@@ -4196,17 +4946,18 @@ class TestGetAllTransformations:
         contract._contract = MagicMock()
 
         mock_event1 = MagicMock()
-        mock_event1.args.originalDataHash = b'\xaa' * 32
-        mock_event1.args.newDataHash = b'\xbb' * 32
+        mock_event1.args.originalDataHash = b"\xaa" * 32
+        mock_event1.args.newDataHash = b"\xbb" * 32
         mock_event1.args.transformation = "Step 1"
 
         mock_event2 = MagicMock()
-        mock_event2.args.originalDataHash = b'\xbb' * 32
-        mock_event2.args.newDataHash = b'\xcc' * 32
+        mock_event2.args.originalDataHash = b"\xbb" * 32
+        mock_event2.args.newDataHash = b"\xcc" * 32
         mock_event2.args.transformation = "Step 2"
 
         contract._contract.events.DataTransformed.get_logs.return_value = [
-            mock_event1, mock_event2,
+            mock_event1,
+            mock_event2,
         ]
 
         results = contract.get_all_transformations(from_block=0, to_block=5000)
@@ -4249,14 +5000,17 @@ class TestDeployBlock:
 
     def test_base_sepolia_has_deploy_block(self):
         from swarm_provenance_mcp.chain.provider import CHAIN_PRESETS
+
         assert CHAIN_PRESETS["base-sepolia"]["deploy_block"] == 37_562_100
 
     def test_base_deploy_block_is_none(self):
         from swarm_provenance_mcp.chain.provider import CHAIN_PRESETS
+
         assert CHAIN_PRESETS["base"]["deploy_block"] is None
 
     def test_provider_exposes_deploy_block(self):
         from swarm_provenance_mcp.chain.provider import ChainProvider
+
         with patch("swarm_provenance_mcp.chain.provider._import_web3") as mock_w3:
             mock_web3_cls = MagicMock()
             mock_w3.return_value = mock_web3_cls
@@ -4278,17 +5032,23 @@ class TestProvenanceChainWorkflowPrompt:
         """provenance-chain-workflow prompt should return anchoring steps."""
         handler = None
         for h in server.request_handlers.values():
-            if hasattr(h, '__name__') and 'get_prompt' in str(h):
+            if hasattr(h, "__name__") and "get_prompt" in str(h):
                 handler = h
                 break
 
         assert handler is not None, "get_prompt handler not registered"
         from mcp.types import GetPromptRequest
-        result = await handler(GetPromptRequest(
-            method="prompts/get",
-            params={"name": "provenance-chain-workflow", "arguments": {"data": "test data"}}
-        ))
-        inner = result.root if hasattr(result, 'root') else result
+
+        result = await handler(
+            GetPromptRequest(
+                method="prompts/get",
+                params={
+                    "name": "provenance-chain-workflow",
+                    "arguments": {"data": "test data"},
+                },
+            )
+        )
+        inner = result.root if hasattr(result, "root") else result
         text = inner.messages[0].content.text
 
         assert "health_check" in text
@@ -4302,22 +5062,25 @@ class TestProvenanceChainWorkflowPrompt:
         """provenance-chain-workflow with transform_description should include transform steps."""
         handler = None
         for h in server.request_handlers.values():
-            if hasattr(h, '__name__') and 'get_prompt' in str(h):
+            if hasattr(h, "__name__") and "get_prompt" in str(h):
                 handler = h
                 break
 
         from mcp.types import GetPromptRequest
-        result = await handler(GetPromptRequest(
-            method="prompts/get",
-            params={
-                "name": "provenance-chain-workflow",
-                "arguments": {
-                    "data": "original data",
-                    "transform_description": "Anonymized PII",
+
+        result = await handler(
+            GetPromptRequest(
+                method="prompts/get",
+                params={
+                    "name": "provenance-chain-workflow",
+                    "arguments": {
+                        "data": "original data",
+                        "transform_description": "Anonymized PII",
+                    },
                 },
-            }
-        ))
-        inner = result.root if hasattr(result, 'root') else result
+            )
+        )
+        inner = result.root if hasattr(result, "root") else result
         text = inner.messages[0].content.text
 
         assert "record_transform" in text
@@ -4329,21 +5092,24 @@ class TestProvenanceChainWorkflowPrompt:
         """provenance-chain-workflow should have data (required) and transform_description (optional)."""
         handler = None
         for h in server.request_handlers.values():
-            if hasattr(h, '__name__') and 'list_prompts' in str(h):
+            if hasattr(h, "__name__") and "list_prompts" in str(h):
                 handler = h
                 break
 
         from mcp.types import ListPromptsRequest
+
         result = await handler(ListPromptsRequest(method="prompts/list"))
-        inner = result.root if hasattr(result, 'root') else result
-        prompts = inner.prompts if hasattr(inner, 'prompts') else inner
+        inner = result.root if hasattr(result, "root") else result
+        prompts = inner.prompts if hasattr(inner, "prompts") else inner
 
         chain_prompt = next(p for p in prompts if p.name == "provenance-chain-workflow")
         arg_names = {a.name for a in chain_prompt.arguments}
         assert arg_names == {"data", "transform_description"}
         data_arg = next(a for a in chain_prompt.arguments if a.name == "data")
         assert data_arg.required is True
-        transform_arg = next(a for a in chain_prompt.arguments if a.name == "transform_description")
+        transform_arg = next(
+            a for a in chain_prompt.arguments if a.name == "transform_description"
+        )
         assert transform_arg.required is False
 
 
@@ -4358,20 +5124,23 @@ class TestMCPResources:
         """list_resources should include the provenance://skills resource."""
         handler = None
         for h in server.request_handlers.values():
-            if hasattr(h, '__name__') and 'list_resources' in str(h):
+            if hasattr(h, "__name__") and "list_resources" in str(h):
                 handler = h
                 break
 
         assert handler is not None, "list_resources handler not registered"
         from mcp.types import ListResourcesRequest
+
         result = await handler(ListResourcesRequest(method="resources/list"))
-        inner = result.root if hasattr(result, 'root') else result
-        resources = inner.resources if hasattr(inner, 'resources') else inner
+        inner = result.root if hasattr(result, "root") else result
+        resources = inner.resources if hasattr(inner, "resources") else inner
 
         uris = [str(r.uri) for r in resources]
         assert "provenance://skills" in uris
 
-        skills_resource = next(r for r in resources if str(r.uri) == "provenance://skills")
+        skills_resource = next(
+            r for r in resources if str(r.uri) == "provenance://skills"
+        )
         assert skills_resource.mimeType == "text/markdown"
         assert "provenance" in skills_resource.description.lower()
 
@@ -4379,22 +5148,31 @@ class TestMCPResources:
         """read_resource for provenance://skills should return SKILLS.md content."""
         handler = None
         for h in server.request_handlers.values():
-            if hasattr(h, '__name__') and 'read_resource' in str(h):
+            if hasattr(h, "__name__") and "read_resource" in str(h):
                 handler = h
                 break
 
         assert handler is not None, "read_resource handler not registered"
         from pydantic import AnyUrl
         from mcp.types import ReadResourceRequest
-        result = await handler(ReadResourceRequest(
-            method="resources/read",
-            params={"uri": "provenance://skills"},
-        ))
-        inner = result.root if hasattr(result, 'root') else result
-        contents = inner if isinstance(inner, list) else inner.contents if hasattr(inner, 'contents') else [inner]
+
+        result = await handler(
+            ReadResourceRequest(
+                method="resources/read",
+                params={"uri": "provenance://skills"},
+            )
+        )
+        inner = result.root if hasattr(result, "root") else result
+        contents = (
+            inner
+            if isinstance(inner, list)
+            else inner.contents if hasattr(inner, "contents") else [inner]
+        )
 
         assert len(contents) >= 1
-        text = contents[0].content if hasattr(contents[0], 'content') else str(contents[0])
+        text = (
+            contents[0].content if hasattr(contents[0], "content") else str(contents[0])
+        )
         assert len(text) > 100
         # Check for key sections from SKILLS.md
         assert "Critical Rules" in text or "critical" in text.lower()
@@ -4404,14 +5182,656 @@ class TestMCPResources:
         """read_resource for unknown URI should raise ValueError."""
         handler = None
         for h in server.request_handlers.values():
-            if hasattr(h, '__name__') and 'read_resource' in str(h):
+            if hasattr(h, "__name__") and "read_resource" in str(h):
                 handler = h
                 break
 
         assert handler is not None
         from mcp.types import ReadResourceRequest
+
         with pytest.raises((ValueError, Exception)):
-            await handler(ReadResourceRequest(
-                method="resources/read",
-                params={"uri": "provenance://unknown"},
-            ))
+            await handler(
+                ReadResourceRequest(
+                    method="resources/read",
+                    params={"uri": "provenance://unknown"},
+                )
+            )
+
+
+# --- Contract V2 integration tests ---
+
+TEST_SOURCE_A = "d" * 64
+TEST_SOURCE_B = "e" * 64
+TEST_MERGED = "f" * 64
+
+
+class TestContractV2StateBased:
+    """Test state-based traversal and feature detection for v2 contracts."""
+
+    async def test_get_provenance_chain_state_reads(self):
+        """When supports_transformation_links=True, use state reads instead of events."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+        from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
+        from swarm_provenance_mcp.chain.models import (
+            ChainProvenanceRecord,
+            ChainTransformation,
+            DataStatusEnum,
+        )
+
+        client = ChainClient.__new__(ChainClient)
+        client._contract = MagicMock()
+        client._provider = MagicMock()
+        client._provider.deploy_block = 0
+        client._provider.chain = "localhost"
+        client._provider.contract_address = "0xTest"
+
+        # V2 contract
+        client._contract.supports_transformation_links.return_value = True
+        client._contract.get_transformation_links.return_value = [
+            (bytes.fromhex("bb" * 32), "Step 1"),
+        ]
+        client._contract.get_transformation_parents.return_value = []
+
+        parent = ChainProvenanceRecord(
+            data_hash="aa" * 32,
+            owner="0xOWNER",
+            timestamp=1700000000,
+            data_type="test",
+            status=DataStatusEnum(0),
+            transformations=[],
+            accessors=[],
+        )
+        child = ChainProvenanceRecord(
+            data_hash="bb" * 32,
+            owner="0xOWNER",
+            timestamp=1700001000,
+            data_type="derived",
+            status=DataStatusEnum(0),
+            transformations=[],
+            accessors=[],
+        )
+
+        def get_side(h):
+            if h == "aa" * 32:
+                return parent
+            if h == "bb" * 32:
+                return child
+            raise DataNotRegisteredError("not found", data_hash=h)
+
+        client.get = MagicMock(side_effect=get_side)
+
+        chain = client.get_provenance_chain("aa" * 32)
+        assert len(chain) == 2
+        # Verify state reads were used, not event cache
+        client._contract.get_transformation_links.assert_called()
+        client._contract.get_transformation_parents.assert_called()
+
+    async def test_get_provenance_chain_state_reads_fallback(self):
+        """When state reads fail, fall back to event cache path."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+        from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
+        from swarm_provenance_mcp.chain.models import (
+            ChainProvenanceRecord,
+            DataStatusEnum,
+        )
+
+        client = ChainClient.__new__(ChainClient)
+        client._contract = MagicMock()
+        client._provider = MagicMock()
+        client._provider.deploy_block = 0
+        client._provider.chain = "base-sepolia"
+        client._provider.contract_address = "0xTest"
+        client._provider.web3 = MagicMock()
+        client._provider.web3.eth.block_number = 100
+
+        # V2 detection fails
+        client._contract.supports_transformation_links.side_effect = Exception(
+            "RPC fail"
+        )
+
+        record = ChainProvenanceRecord(
+            data_hash="aa" * 32,
+            owner="0xOWNER",
+            timestamp=1700000000,
+            data_type="test",
+            status=DataStatusEnum(0),
+            transformations=[],
+            accessors=[],
+        )
+
+        def get_side(h):
+            if h == "aa" * 32:
+                return record
+            raise DataNotRegisteredError("not found", data_hash=h)
+
+        client.get = MagicMock(side_effect=get_side)
+
+        # Mock event cache to return empty
+        with patch("swarm_provenance_mcp.chain.event_cache.get_cache") as mock_cache:
+            mock_cache.return_value.get_maps.return_value = ({}, {})
+            chain = client.get_provenance_chain("aa" * 32)
+
+        assert len(chain) == 1
+
+    async def test_transform_duplicate_check_state_read(self):
+        """Duplicate detection should use getTransformationLinks on v2 contracts."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+        from swarm_provenance_mcp.chain.exceptions import (
+            TransformationAlreadyExistsError,
+        )
+
+        client = ChainClient.__new__(ChainClient)
+        client._contract = MagicMock()
+        client._provider = MagicMock()
+        client._wallet = MagicMock()
+        client._wallet.address = "0xSENDER"
+        client._gas_limit = None
+        client._gas_limit_multiplier = 1.2
+
+        # V2 contract: state read finds existing link
+        client._contract.supports_transformation_links.return_value = True
+        client._contract.get_transformation_links.return_value = [
+            (bytes.fromhex("cc" * 32), "Already done"),
+        ]
+
+        with pytest.raises(TransformationAlreadyExistsError) as exc_info:
+            client.transform("aa" * 32, "cc" * 32, "test")
+
+        assert exc_info.value.original_hash == "aa" * 32
+        assert exc_info.value.new_hash == "cc" * 32
+
+    async def test_supports_transformation_links_true(self):
+        """Feature detection should return True when function succeeds."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract.__new__(DataProvenanceContract)
+        contract._web3 = MagicMock()
+        contract._contract = MagicMock()
+        contract._supports_v2 = None
+        # Mock the function call to succeed
+        contract._contract.functions.getTransformationLinks.return_value.call.return_value = (
+            []
+        )
+
+        assert contract.supports_transformation_links() is True
+        # Second call should use cache
+        assert contract.supports_transformation_links() is True
+        # Only one actual call
+        contract._contract.functions.getTransformationLinks.return_value.call.assert_called_once()
+
+    async def test_supports_transformation_links_false(self):
+        """Feature detection should return False when function reverts."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract.__new__(DataProvenanceContract)
+        contract._web3 = MagicMock()
+        contract._contract = MagicMock()
+        contract._supports_v2 = None
+        # Mock the function call to fail (v1 contract)
+        contract._contract.functions.getTransformationLinks.return_value.call.side_effect = Exception(
+            "revert"
+        )
+
+        assert contract.supports_transformation_links() is False
+        # Cached
+        assert contract.supports_transformation_links() is False
+
+    async def test_get_data_record_v2_parsing(self):
+        """get() should parse TransformationLink tuples from v2 contract."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+        from swarm_provenance_mcp.chain.models import DataStatusEnum
+
+        client = ChainClient.__new__(ChainClient)
+        client._contract = MagicMock()
+        client._provider = MagicMock()
+
+        # V2 contract returns TransformationLink tuples
+        link_a = (bytes.fromhex("bb" * 32), "Step 1")
+        link_b = (bytes.fromhex("cc" * 32), "Step 2")
+        client._contract.get_data_record.return_value = (
+            bytes.fromhex("aa" * 32),  # dataHash
+            "0x1234567890abcdef1234567890abcdef12345678",  # owner
+            1700000000,  # timestamp
+            "swarm-provenance",  # dataType
+            [link_a, link_b],  # transformationLinks (v2 tuples)
+            [],  # accessors
+            0,  # status
+        )
+
+        record = client.get("aa" * 32)
+        assert len(record.transformations) == 2
+        assert record.transformations[0].description == "Step 1"
+        assert record.transformations[0].new_data_hash == "bb" * 32
+        assert record.transformations[1].description == "Step 2"
+        assert record.transformations[1].new_data_hash == "cc" * 32
+
+
+class TestStateReadPartialFailures:
+    """Test edge cases where state reads partially fail in get_provenance_chain."""
+
+    async def test_forward_succeeds_reverse_fails(self):
+        """Forward state read works but reverse fails — should still traverse forward."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+        from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
+        from swarm_provenance_mcp.chain.models import (
+            ChainProvenanceRecord,
+            ChainTransformation,
+            DataStatusEnum,
+        )
+
+        parent_hash = "aa" * 32
+        child_hash = "bb" * 32
+
+        client = ChainClient.__new__(ChainClient)
+        client._contract = MagicMock()
+        client._contract.supports_transformation_links.return_value = True
+        client._contract.get_transformation_links.return_value = [
+            (bytes.fromhex(child_hash), "Step 1"),
+        ]
+        client._contract.get_transformation_parents.side_effect = Exception(
+            "RPC timeout on parents"
+        )
+        client._provider = MagicMock()
+        client._provider.deploy_block = 0
+        client._provider.chain = "base-sepolia"
+        client._provider.contract_address = "0xTest"
+        client._provider.web3 = MagicMock()
+        client._provider.web3.eth.block_number = 100
+
+        parent_record = ChainProvenanceRecord(
+            data_hash=parent_hash,
+            owner="0xOWNER",
+            timestamp=1700000000,
+            data_type="test",
+            status=DataStatusEnum(0),
+            transformations=[],
+            accessors=[],
+        )
+        child_record = ChainProvenanceRecord(
+            data_hash=child_hash,
+            owner="0xOWNER",
+            timestamp=1700001000,
+            data_type="derived",
+            status=DataStatusEnum(0),
+            transformations=[],
+            accessors=[],
+        )
+
+        def get_side(h):
+            if h == parent_hash:
+                return parent_record
+            if h == child_hash:
+                return child_record
+            raise DataNotRegisteredError("not found", data_hash=h)
+
+        client.get = MagicMock(side_effect=get_side)
+
+        chain = client.get_provenance_chain(parent_hash)
+        # Forward worked: parent → child
+        hashes = [r.data_hash for r in chain]
+        assert parent_hash in hashes
+        assert child_hash in hashes
+        assert len(chain) == 2
+
+    async def test_reverse_succeeds_forward_fails(self):
+        """Reverse state read works but forward fails — should still traverse backward."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+        from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
+        from swarm_provenance_mcp.chain.models import (
+            ChainProvenanceRecord,
+            DataStatusEnum,
+        )
+
+        parent_hash = "aa" * 32
+        child_hash = "bb" * 32
+
+        client = ChainClient.__new__(ChainClient)
+        client._contract = MagicMock()
+        client._contract.supports_transformation_links.return_value = True
+        # Forward fails for child
+        client._contract.get_transformation_links.side_effect = Exception(
+            "RPC timeout on links"
+        )
+        # Reverse works for child → parent
+        client._contract.get_transformation_parents.return_value = [
+            bytes.fromhex(parent_hash),
+        ]
+        client._provider = MagicMock()
+        client._provider.deploy_block = 0
+        client._provider.chain = "base-sepolia"
+        client._provider.contract_address = "0xTest"
+        client._provider.web3 = MagicMock()
+        client._provider.web3.eth.block_number = 100
+
+        parent_record = ChainProvenanceRecord(
+            data_hash=parent_hash,
+            owner="0xOWNER",
+            timestamp=1700000000,
+            data_type="test",
+            status=DataStatusEnum(0),
+            transformations=[],
+            accessors=[],
+        )
+        child_record = ChainProvenanceRecord(
+            data_hash=child_hash,
+            owner="0xOWNER",
+            timestamp=1700001000,
+            data_type="derived",
+            status=DataStatusEnum(0),
+            transformations=[],
+            accessors=[],
+        )
+
+        def get_side(h):
+            if h == parent_hash:
+                return parent_record
+            if h == child_hash:
+                return child_record
+            raise DataNotRegisteredError("not found", data_hash=h)
+
+        client.get = MagicMock(side_effect=get_side)
+
+        # Start from child — reverse should find parent
+        chain = client.get_provenance_chain(child_hash)
+        hashes = [r.data_hash for r in chain]
+        assert child_hash in hashes
+        assert parent_hash in hashes
+
+    async def test_both_state_reads_fail_still_returns_record(self):
+        """If both forward and reverse fail, should still return the queried record."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+        from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
+        from swarm_provenance_mcp.chain.models import (
+            ChainProvenanceRecord,
+            DataStatusEnum,
+        )
+
+        test_hash = "aa" * 32
+
+        client = ChainClient.__new__(ChainClient)
+        client._contract = MagicMock()
+        client._contract.supports_transformation_links.return_value = True
+        client._contract.get_transformation_links.side_effect = Exception("fail")
+        client._contract.get_transformation_parents.side_effect = Exception("fail")
+        client._provider = MagicMock()
+        client._provider.deploy_block = 0
+        client._provider.chain = "base-sepolia"
+        client._provider.contract_address = "0xTest"
+        client._provider.web3 = MagicMock()
+        client._provider.web3.eth.block_number = 100
+
+        record = ChainProvenanceRecord(
+            data_hash=test_hash,
+            owner="0xOWNER",
+            timestamp=1700000000,
+            data_type="test",
+            status=DataStatusEnum(0),
+            transformations=[],
+            accessors=[],
+        )
+
+        def get_side(h):
+            if h == test_hash:
+                return record
+            raise DataNotRegisteredError("not found", data_hash=h)
+
+        client.get = MagicMock(side_effect=get_side)
+
+        chain = client.get_provenance_chain(test_hash)
+        # Should still return the queried record
+        assert len(chain) == 1
+        assert chain[0].data_hash == test_hash
+
+
+class TestRecordMergeTransform:
+    """Test record_merge_transform tool execution."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    def _mock_merge_result(self):
+        """Create a mock MergeTransformResult."""
+        mock_res = MagicMock()
+        mock_res.source_hashes = [TEST_SOURCE_A, TEST_SOURCE_B]
+        mock_res.new_hash = TEST_MERGED
+        mock_res.description = "Merged datasets"
+        mock_res.new_data_type = "merged"
+        mock_res.tx_hash = "0xmerge123"
+        mock_res.block_number = 54321
+        mock_res.gas_used = 120000
+        mock_res.explorer_url = "https://sepolia.basescan.org/tx/0xmerge123"
+        return mock_res
+
+    async def test_merge_transform_success(self, server):
+        """Basic merge with 2 sources should record and show details."""
+        mock_client = MagicMock()
+        mock_client.merge_transform.return_value = self._mock_merge_result()
+        mock_client.balance.return_value = MagicMock(
+            address="0x1234", balance_wei=10**18, chain="base-sepolia"
+        )
+
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_merge_transform",
+                {
+                    "source_hashes": [TEST_SOURCE_A, TEST_SOURCE_B],
+                    "new_hash": TEST_MERGED,
+                    "description": "Merged datasets",
+                },
+            )
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "Merge transformation recorded" in text
+        assert TEST_SOURCE_A in text
+        assert TEST_SOURCE_B in text
+        assert TEST_MERGED in text
+        assert "Merged datasets" in text
+        assert "0xmerge123" in text
+        assert "54,321" in text
+        assert "120,000" in text
+        mock_client.merge_transform.assert_called_once_with(
+            [TEST_SOURCE_A, TEST_SOURCE_B], TEST_MERGED, "Merged datasets", "merged"
+        )
+
+    async def test_merge_transform_too_few_sources(self, server):
+        """Should reject with <2 sources."""
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_merge_transform",
+                {
+                    "source_hashes": [TEST_SOURCE_A],
+                    "new_hash": TEST_MERGED,
+                },
+            )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "at least 2" in text
+
+    async def test_merge_transform_too_many_sources(self, server):
+        """Should reject with >50 sources."""
+        sources = [f"{i:064x}" for i in range(51)]
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_merge_transform",
+                {
+                    "source_hashes": sources,
+                    "new_hash": TEST_MERGED,
+                },
+            )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "at most 50" in text
+
+    async def test_merge_transform_insufficient_funds(self, server):
+        """Should show funding guidance on insufficient funds."""
+        mock_client = MagicMock()
+        mock_client.address = "0xWALLET"
+        mock_client.chain = "base-sepolia"
+
+        from swarm_provenance_mcp.chain.exceptions import ChainTransactionError
+
+        mock_client.merge_transform.side_effect = ChainTransactionError(
+            "insufficient funds for gas", tx_hash=None
+        )
+
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_merge_transform",
+                {
+                    "source_hashes": [TEST_SOURCE_A, TEST_SOURCE_B],
+                    "new_hash": TEST_MERGED,
+                    "description": "test",
+                },
+            )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "insufficient funds" in text.lower()
+
+    async def test_merge_transform_not_registered(self, server):
+        """Should guide to anchor_hash when source not registered."""
+        mock_client = MagicMock()
+
+        from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
+
+        mock_client.merge_transform.side_effect = DataNotRegisteredError(
+            f"not registered", data_hash=TEST_SOURCE_A
+        )
+
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_merge_transform",
+                {
+                    "source_hashes": [TEST_SOURCE_A, TEST_SOURCE_B],
+                    "new_hash": TEST_MERGED,
+                    "description": "test",
+                },
+            )
+
+        assert not result.isError  # Not isError — guides agent
+        text = result.content[0].text
+        assert "not registered" in text.lower()
+        assert "anchor_hash" in text
+
+    async def test_merge_transform_hints(self, server):
+        """Success response should include correct _next and _related hints."""
+        mock_client = MagicMock()
+        mock_client.merge_transform.return_value = self._mock_merge_result()
+        mock_client.balance.return_value = MagicMock(
+            address="0x1234", balance_wei=10**18, chain="base-sepolia"
+        )
+
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", mock_client),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_merge_transform",
+                {
+                    "source_hashes": [TEST_SOURCE_A, TEST_SOURCE_B],
+                    "new_hash": TEST_MERGED,
+                    "description": "test",
+                },
+            )
+
+        text = result.content[0].text
+        assert "_next: get_provenance_chain" in text
+        assert "_related:" in text
+        assert "get_provenance" in text
+
+    async def test_merge_transform_no_chain_available(self, server):
+        """Should error when chain module not available."""
+        with patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", False):
+            result = await call_tool_directly(
+                server,
+                "record_merge_transform",
+                {
+                    "source_hashes": [TEST_SOURCE_A, TEST_SOURCE_B],
+                    "new_hash": TEST_MERGED,
+                },
+            )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "not available" in text.lower()
+
+    async def test_merge_transform_no_wallet(self, server):
+        """Should error when no wallet configured."""
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", None),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_merge_transform",
+                {
+                    "source_hashes": [TEST_SOURCE_A, TEST_SOURCE_B],
+                    "new_hash": TEST_MERGED,
+                },
+            )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "wallet" in text.lower()
+
+    async def test_merge_new_hash_same_as_source(self, server):
+        """Should reject when new_hash is in source_hashes."""
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", MagicMock()),
+        ):
+            result = await call_tool_directly(
+                server,
+                "record_merge_transform",
+                {
+                    "source_hashes": [TEST_SOURCE_A, TEST_MERGED],
+                    "new_hash": TEST_MERGED,
+                },
+            )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "must not be one of" in text.lower()
+
+
+class TestLocalhostChainPreset:
+    """Test localhost chain preset in provider."""
+
+    def test_localhost_preset_exists(self):
+        """CHAIN_PRESETS should include localhost."""
+        from swarm_provenance_mcp.chain.provider import CHAIN_PRESETS
+
+        assert "localhost" in CHAIN_PRESETS
+        preset = CHAIN_PRESETS["localhost"]
+        assert preset["chain_id"] == 31337
+        assert preset["rpc_url"] == "http://127.0.0.1:8545"
+        assert preset["explorer_url"] is None
+        assert (
+            preset["contract_address"] == "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9"
+        )
+        assert preset["deploy_block"] == 0

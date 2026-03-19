@@ -4,7 +4,9 @@ End-to-end workflow test for the complete stamp lifecycle.
 Tests: purchase → wait for usability → upload → extend → wait for propagation → verify extension → download
 """
 
+import os
 import pytest
+import requests
 import time
 import json
 from typing import Dict, Any, Optional
@@ -122,8 +124,8 @@ class StampWorkflowTester:
 @pytest.fixture
 def workflow_tester():
     """Create a workflow tester instance."""
-    # Use public gateway for integration tests since local gateway may not be running
-    tester = StampWorkflowTester("https://provenance-gateway.datafund.io")
+    # Use SWARM_GATEWAY_URL env var if set, otherwise fall back to public gateway
+    tester = StampWorkflowTester(os.environ.get("SWARM_GATEWAY_URL", "https://provenance-gateway.datafund.io"))
     yield tester
     tester.close()
 
@@ -336,23 +338,27 @@ class TestEndToEndWorkflow:
         try:
             immediate_details = workflow_tester.client.get_stamp_details(stamp_id)
             immediately_usable = immediate_details.get("usable", False)
-
-            print(f"Stamp usable immediately after purchase: {immediately_usable}")
-
-            # If it's immediately usable, that's actually fine - just note it
-            if immediately_usable:
-                print("ℹ️  Stamp was immediately usable (fast propagation)")
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                # Stamp not yet visible — expected during early propagation
+                immediately_usable = False
+                print("Stamp not yet visible (404) — expected during propagation")
             else:
-                print("✅ Stamp requires propagation time (expected)")
+                pytest.fail(f"Timing validation failed: {e}")
+                return
 
-                # Try to wait for it to become usable
-                became_usable = workflow_tester.wait_for_stamp_usable(
-                    stamp_id, max_wait_seconds=120
-                )
-                assert became_usable, "Stamp never became usable"
+        print(f"Stamp usable immediately after purchase: {immediately_usable}")
 
-        except Exception as e:
-            pytest.fail(f"Timing validation failed: {e}")
+        if immediately_usable:
+            print("ℹ️  Stamp was immediately usable (fast propagation)")
+        else:
+            print("✅ Stamp requires propagation time (expected)")
+
+            # Try to wait for it to become usable
+            became_usable = workflow_tester.wait_for_stamp_usable(
+                stamp_id, max_wait_seconds=120
+            )
+            assert became_usable, "Stamp never became usable"
 
 
 if __name__ == "__main__":

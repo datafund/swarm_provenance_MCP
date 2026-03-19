@@ -32,6 +32,8 @@ Not every setup has all features. What you can do depends on your configuration:
 
 Check your mode: run `health_check` — it reports both gateway and chain status.
 
+> **Note:** `record_merge_transform` and `get_provenance_chain` state-based traversal require a v2 contract. The default Base Sepolia deployment is v2. On v1 contracts, `get_provenance_chain` falls back to event log scanning automatically.
+
 ---
 
 ## Critical Rules

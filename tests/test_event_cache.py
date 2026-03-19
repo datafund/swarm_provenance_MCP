@@ -351,7 +351,7 @@ class TestDataMergedEventScanning:
         """Create a mock DataMerged event."""
         evt = MagicMock()
         evt.args.newDataHash = new_hash
-        evt.args.sourceHashes = source_hashes
+        evt.args.sourceDataHashes = source_hashes
         evt.args.transformation = transformation
         return evt
 

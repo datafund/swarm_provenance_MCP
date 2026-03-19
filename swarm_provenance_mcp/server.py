@@ -102,6 +102,9 @@ _SKILLS_CONTENT = _load_skills_content()
 MCP_INSTRUCTIONS = """
 Swarm Provenance MCP — decentralized storage with cryptographic provenance on the Swarm network.
 
+DISCLAIMER:
+This software is in beta and provided as-is, without warranties of any kind. On-chain provenance features use Base Sepolia (testnet) by default — testnet tokens have no monetary value and testnet state may be reset. Do not rely on testnet anchoring for production data integrity.
+
 PAYMENT MODEL:
 This server uses the free tier by default (rate limit: 3 write requests/minute, reads unlimited). Paid x402 support is not yet integrated.
 
@@ -1697,6 +1700,11 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 try:
                     chain_client.health_check()
                     response_text += f"\n\n⛓️  Chain: {chain_client.chain} (connected)"
+                    if chain_client.chain in ("base-sepolia", "localhost"):
+                        response_text += (
+                            "\n   ⚠️  Testnet — tokens have no value, "
+                            "state may be reset"
+                        )
                     response_text += f"\n   Contract: {chain_client.contract_address}"
                     response_text += f"\n   Wallet: {chain_client.address}"
                     # Proactive balance check — warn if wallet can't transact
@@ -2032,6 +2040,11 @@ async def handle_chain_health(arguments: Dict[str, Any]) -> CallToolResult:
         response_text = f"⛓️  Chain RPC Health\n\n"
         response_text += f"   Connected: true\n"
         response_text += f"   Chain: {provider.chain}\n"
+        if provider.chain in ("base-sepolia", "localhost"):
+            response_text += (
+                "   ⚠️  Testnet — tokens have no value, state may be reset\n"
+            )
+
         response_text += f"   Chain ID: {provider.chain_id}\n"
         response_text += f"   Latest Block: {block_number:,}\n"
         response_text += f"   RPC Response: {elapsed_ms:.0f}ms\n"

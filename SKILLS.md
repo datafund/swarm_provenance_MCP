@@ -2,6 +2,8 @@
 
 A practical guide for AI agents and developers working with the Swarm Provenance MCP server. Covers concepts, workflows, critical rules, and error recovery for decentralized data provenance.
 
+> **Testnet notice:** On-chain features use Base Sepolia (testnet) by default. Testnet tokens have no monetary value and state may be reset. This software is in beta — no warranties provided.
+
 ---
 
 ## What is Data Provenance?

@@ -1745,7 +1745,7 @@ class TestAnchorHash:
         mock_result.tx_hash = "ab" * 32
         mock_result.block_number = 12345678
         mock_result.gas_used = 65000
-        mock_result.explorer_url = "https://sepolia.basescan.org/tx/0x" + "ab" * 32
+        mock_result.explorer_url = "https://base-sepolia.blockscout.com/tx/0x" + "ab" * 32
         return mock_result
 
     def _mock_wallet_info(self, balance_wei=10**17):
@@ -1782,7 +1782,7 @@ class TestAnchorHash:
         assert "swarm-provenance" in text
         assert "12,345,678" in text
         assert "65,000" in text
-        assert "basescan" in text
+        assert "blockscout" in text
         mock_client.anchor.assert_called_once_with(TEST_REFERENCE, "swarm-provenance")
 
     async def test_anchor_with_data_type(self, server):
@@ -2957,7 +2957,7 @@ class TestRecordTransform:
         mock_res.tx_hash = "0xabc123"
         mock_res.block_number = 12345
         mock_res.gas_used = 85000
-        mock_res.explorer_url = "https://sepolia.basescan.org/tx/0xabc123"
+        mock_res.explorer_url = "https://base-sepolia.blockscout.com/tx/0xabc123"
         return mock_res
 
     async def test_transform_success(self, server):
@@ -5001,7 +5001,7 @@ class TestDeployBlock:
     def test_base_sepolia_has_deploy_block(self):
         from swarm_provenance_mcp.chain.provider import CHAIN_PRESETS
 
-        assert CHAIN_PRESETS["base-sepolia"]["deploy_block"] == 37_562_100
+        assert CHAIN_PRESETS["base-sepolia"]["deploy_block"] == 39_075_766
 
     def test_base_deploy_block_is_none(self):
         from swarm_provenance_mcp.chain.provider import CHAIN_PRESETS
@@ -5016,9 +5016,9 @@ class TestDeployBlock:
             mock_w3.return_value = mock_web3_cls
             provider = ChainProvider(
                 chain="base-sepolia",
-                contract_address="0x9a3c6F47B69211F05891CCb7aD33596290b9fE64",
+                contract_address="0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a",
             )
-            assert provider.deploy_block == 37_562_100
+            assert provider.deploy_block == 39_075_766
 
 
 class TestProvenanceChainWorkflowPrompt:
@@ -5600,7 +5600,7 @@ class TestRecordMergeTransform:
         mock_res.tx_hash = "0xmerge123"
         mock_res.block_number = 54321
         mock_res.gas_used = 120000
-        mock_res.explorer_url = "https://sepolia.basescan.org/tx/0xmerge123"
+        mock_res.explorer_url = "https://base-sepolia.blockscout.com/tx/0xmerge123"
         return mock_res
 
     async def test_merge_transform_success(self, server):

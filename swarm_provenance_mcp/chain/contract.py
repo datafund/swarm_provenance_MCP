@@ -486,6 +486,11 @@ class DataProvenanceContract:
         """
         Get the full on-chain record for a data hash.
 
+        The bundled ABI uses the v2 schema (``TransformationLink[]`` /
+        ``tuple[]``).  On v1 contracts where ``getDataRecord`` returns
+        ``string[]`` for transformations, the ABI decoder will fail; we
+        fall back to ``dataRecords()`` (scalar fields, no arrays).
+
         Args:
             data_hash: 64-char hex hash.
 
@@ -498,7 +503,32 @@ class DataProvenanceContract:
             (list of tuples ``(bytes32, string)``).
         """
         hash_bytes = _normalize_hash(data_hash)
-        return self._contract.functions.getDataRecord(hash_bytes).call()
+        try:
+            return self._contract.functions.getDataRecord(hash_bytes).call()
+        except (OverflowError, Exception) as e:
+            # V1 contracts return string[] for transformations but the ABI
+            # declares tuple[] (v2), causing a decode error.  Reconstruct
+            # the record from the scalar mapping.
+            if self.supports_transformation_links():
+                raise  # genuine error on v2 — re-raise
+            logger.debug("getDataRecord decode failed on v1, using fallback: %s", e)
+            return self._get_data_record_v1_fallback(hash_bytes)
+
+    def _get_data_record_v1_fallback(self, hash_bytes: bytes) -> Tuple:
+        """Reconstruct getDataRecord result for v1 contracts.
+
+        The v2 ABI expects ``TransformationLink[]`` tuples but v1
+        contracts return ``string[]``, causing a decode error.  Falls
+        back to ``dataRecords()`` (scalar fields only — no arrays).
+        Accessors and transformations are returned as empty lists; callers
+        can still get transformations from ``DataTransformed`` events.
+        """
+        # dataRecords returns: (dataHash, owner, timestamp, dataType, status)
+        basic = self._contract.functions.dataRecords(hash_bytes).call()
+        data_hash, owner, timestamp, data_type, status = basic
+
+        # Return the same 7-element tuple shape as getDataRecord
+        return (data_hash, owner, timestamp, data_type, [], [], status)
 
     def get_user_data_records(self, user: str) -> List[bytes]:
         """
@@ -872,7 +902,7 @@ class DataProvenanceContract:
             to_block: End of the scan range. Defaults to latest block.
 
         Returns:
-            List of event objects with args: newDataHash, sourceHashes,
+            List of event objects with args: newDataHash, sourceDataHashes,
             transformation, newDataType.  Returns empty list if the
             contract does not emit DataMerged events.
         """

@@ -9,6 +9,9 @@
 > ⚠️ **DATA PERSISTENCE WARNING**
 > Storage on Swarm is **rented storage** with limited time periods. The default configuration uses very short rental periods (approximately **1 day**). **Do not expect uploaded data to persist longer than the rental period.** Data will become unavailable when the postage stamp expires.
 
+> ⚠️ **TESTNET NOTICE**
+> On-chain provenance features use **Base Sepolia (testnet)** by default. Testnet tokens have no monetary value and testnet state may be reset at any time. Do not rely on testnet anchoring for production data integrity. No warranties of any kind are provided.
+
 A Model Context Protocol (MCP) server for managing Swarm postage stamps and provenance data storage through a centralized FastAPI gateway. Enables AI agents to upload provenance data to the decentralized Swarm network for immutable storage and retrieve it by reference.
 
 ## Overview

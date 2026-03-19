@@ -27,7 +27,7 @@ DUMMY_PRIVATE_KEY = "0x" + "a" * 64
 DUMMY_ADDRESS = "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
 DUMMY_HASH = "a" * 64
 DUMMY_HASH_BYTES = bytes.fromhex(DUMMY_HASH)
-DUMMY_CONTRACT = "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
+DUMMY_CONTRACT = "0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a"
 DUMMY_TX_HASH_BYTES = bytes.fromhex("bb" * 32)
 ZERO_ADDRESS = "0x" + "0" * 40
 
@@ -373,7 +373,7 @@ class TestChainProvider:
 
         assert provider.chain == "base-sepolia"
         assert provider.chain_id == 84532
-        assert provider.contract_address == "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64"
+        assert provider.contract_address == "0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a"
 
     def test_custom_rpc_url(self, mock_chain_deps):
         """Tests that custom RPC URL is used."""
@@ -411,7 +411,7 @@ class TestChainProvider:
         from swarm_provenance_mcp.chain.provider import ChainProvider
 
         provider = ChainProvider(chain="base-sepolia")
-        assert provider.explorer_url == "https://sepolia.basescan.org"
+        assert provider.explorer_url == "https://base-sepolia.blockscout.com"
 
     def test_custom_explorer_url_in_tx_url(self, mock_chain_deps):
         """Tests that custom explorer URL is used in generated TX URLs."""
@@ -474,7 +474,7 @@ class TestChainProvider:
 
         provider = ChainProvider(chain="base-sepolia")
         url = provider.get_explorer_tx_url("0xabc123")
-        assert url == "https://sepolia.basescan.org/tx/0xabc123"
+        assert url == "https://base-sepolia.blockscout.com/tx/0xabc123"
 
     def test_explorer_tx_url_without_prefix(self, mock_chain_deps):
         """Tests explorer URL auto-adds 0x prefix."""
@@ -482,7 +482,7 @@ class TestChainProvider:
 
         provider = ChainProvider(chain="base-sepolia")
         url = provider.get_explorer_tx_url("abc123")
-        assert url == "https://sepolia.basescan.org/tx/0xabc123"
+        assert url == "https://base-sepolia.blockscout.com/tx/0xabc123"
 
     def test_explorer_address_url(self, mock_chain_deps):
         """Tests generating address explorer URL."""
@@ -490,7 +490,7 @@ class TestChainProvider:
 
         provider = ChainProvider(chain="base-sepolia")
         url = provider.get_explorer_address_url(DUMMY_ADDRESS)
-        assert "sepolia.basescan.org/address/" in url
+        assert "base-sepolia.blockscout.com/address/" in url
 
     def test_preset_fallbacks_used_by_default(self, mock_chain_deps):
         """Default init should include primary + preset fallback URLs."""
@@ -739,7 +739,7 @@ class TestChainClientAnchor:
         assert result.owner == DUMMY_ADDRESS
         assert result.block_number == 12345679
         assert result.gas_used == 95_000
-        assert "sepolia.basescan.org" in result.explorer_url
+        assert "base-sepolia.blockscout.com" in result.explorer_url
 
     def test_anchor_default_data_type(self, mock_chain_deps):
         """Tests anchor uses default data type."""
@@ -1952,7 +1952,7 @@ class TestChainClientMergeTransform:
             new_hash="c" * 64,
             description="test",
         )
-        assert "sepolia.basescan.org" in result.explorer_url
+        assert "base-sepolia.blockscout.com" in result.explorer_url
 
     def test_merge_transform_validation_error(self, mock_chain_deps):
         """Tests that validation errors propagate from contract layer."""
@@ -2111,7 +2111,7 @@ class TestMergeTransformResultModel:
             tx_hash="0x" + "ab" * 32,
             block_number=100,
             gas_used=150_000,
-            explorer_url="https://sepolia.basescan.org/tx/0xab",
+            explorer_url="https://base-sepolia.blockscout.com/tx/0xab",
             source_hashes=[DUMMY_HASH, "b" * 64],
             new_hash="c" * 64,
             description="Merged",

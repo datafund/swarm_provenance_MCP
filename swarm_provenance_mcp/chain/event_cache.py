@@ -103,7 +103,7 @@ class TransformationEventCache:
                         else str(new_bytes)
                     )
                     desc = evt.args.transformation
-                    for src_bytes in evt.args.sourceHashes:
+                    for src_bytes in evt.args.sourceDataHashes:
                         src_hex = (
                             src_bytes.hex()
                             if isinstance(src_bytes, bytes)

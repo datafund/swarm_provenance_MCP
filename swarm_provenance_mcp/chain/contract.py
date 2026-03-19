@@ -8,11 +8,14 @@ Dependencies (web3, eth-account) are included in the default install.
 """
 
 import json
+import logging
 from enum import IntEnum
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from .exceptions import ChainConfigurationError, ChainValidationError
+
+logger = logging.getLogger(__name__)
 
 # --- Constants ---
 # Client-side validation limits (not enforced on-chain — Solidity strings are
@@ -24,6 +27,8 @@ MAX_TRANSFORMATION_LENGTH = 256
 # but larger batches risk exceeding the block gas limit.
 MAX_BATCH_REGISTER = 50
 MAX_BATCH_ACCESS = 100
+MIN_MERGE_SOURCES = 2
+MAX_MERGE_SOURCES = 50
 
 # Note: the contract also defines on-chain constants MAX_TRANSFORMATIONS (100)
 # and MAX_ACCESSORS readable via contract.functions.MAX_TRANSFORMATIONS().call().
@@ -481,15 +486,49 @@ class DataProvenanceContract:
         """
         Get the full on-chain record for a data hash.
 
+        The bundled ABI uses the v2 schema (``TransformationLink[]`` /
+        ``tuple[]``).  On v1 contracts where ``getDataRecord`` returns
+        ``string[]`` for transformations, the ABI decoder will fail; we
+        fall back to ``dataRecords()`` (scalar fields, no arrays).
+
         Args:
             data_hash: 64-char hex hash.
 
         Returns:
             Tuple of (dataHash, owner, timestamp, dataType,
                        transformations, accessors, status).
+
+            On v1 contracts, field 4 (transformations) is ``string[]``.
+            On v2 contracts, field 4 is ``TransformationLink[]``
+            (list of tuples ``(bytes32, string)``).
         """
         hash_bytes = _normalize_hash(data_hash)
-        return self._contract.functions.getDataRecord(hash_bytes).call()
+        try:
+            return self._contract.functions.getDataRecord(hash_bytes).call()
+        except (OverflowError, Exception) as e:
+            # V1 contracts return string[] for transformations but the ABI
+            # declares tuple[] (v2), causing a decode error.  Reconstruct
+            # the record from the scalar mapping.
+            if self.supports_transformation_links():
+                raise  # genuine error on v2 — re-raise
+            logger.debug("getDataRecord decode failed on v1, using fallback: %s", e)
+            return self._get_data_record_v1_fallback(hash_bytes)
+
+    def _get_data_record_v1_fallback(self, hash_bytes: bytes) -> Tuple:
+        """Reconstruct getDataRecord result for v1 contracts.
+
+        The v2 ABI expects ``TransformationLink[]`` tuples but v1
+        contracts return ``string[]``, causing a decode error.  Falls
+        back to ``dataRecords()`` (scalar fields only — no arrays).
+        Accessors and transformations are returned as empty lists; callers
+        can still get transformations from ``DataTransformed`` events.
+        """
+        # dataRecords returns: (dataHash, owner, timestamp, dataType, status)
+        basic = self._contract.functions.dataRecords(hash_bytes).call()
+        data_hash, owner, timestamp, data_type, status = basic
+
+        # Return the same 7-element tuple shape as getDataRecord
+        return (data_hash, owner, timestamp, data_type, [], [], status)
 
     def get_user_data_records(self, user: str) -> List[bytes]:
         """
@@ -574,6 +613,126 @@ class DataProvenanceContract:
             self._web3.to_checksum_address(owner),
             self._web3.to_checksum_address(delegate),
         ).call()
+
+    # --- V2 view methods (available on upgraded contracts only) ---
+
+    def get_transformation_links(self, data_hash: str) -> List[Tuple[bytes, str]]:
+        """
+        Forward traversal via contract state (v2+).
+
+        Args:
+            data_hash: 64-char hex hash.
+
+        Returns:
+            List of (newDataHash_bytes, description) tuples.
+
+        Raises:
+            Exception: If the contract does not support this function.
+        """
+        hash_bytes = _normalize_hash(data_hash)
+        result = self._contract.functions.getTransformationLinks(hash_bytes).call()
+        return [(link[0], link[1]) for link in result]
+
+    def get_child_hashes(self, data_hash: str) -> List[bytes]:
+        """
+        Lightweight forward traversal: just child hashes (v2+).
+
+        Args:
+            data_hash: 64-char hex hash.
+
+        Returns:
+            List of newDataHash bytes.
+
+        Raises:
+            Exception: If the contract does not support this function.
+        """
+        hash_bytes = _normalize_hash(data_hash)
+        return self._contract.functions.getChildHashes(hash_bytes).call()
+
+    def get_transformation_parents(self, data_hash: str) -> List[bytes]:
+        """
+        Reverse traversal via contract state (v2+).
+
+        Args:
+            data_hash: 64-char hex hash.
+
+        Returns:
+            List of parent hash bytes.
+
+        Raises:
+            Exception: If the contract does not support this function.
+        """
+        hash_bytes = _normalize_hash(data_hash)
+        return self._contract.functions.getTransformationParents(hash_bytes).call()
+
+    _supports_v2: Optional[bool] = None
+
+    def supports_transformation_links(self) -> bool:
+        """Check if the deployed contract supports v2 TransformationLink functions.
+
+        Performs a trial call on first invocation and caches the result.
+        Returns False for v1 contracts where the function reverts.
+        """
+        if self._supports_v2 is not None:
+            return self._supports_v2
+        try:
+            test_hash = b"\x00" * 32
+            self._contract.functions.getTransformationLinks(test_hash).call()
+            self._supports_v2 = True
+        except Exception:
+            self._supports_v2 = False
+        return self._supports_v2
+
+    # --- Merge transaction builder (v2+) ---
+
+    def build_record_merge_transformation_tx(
+        self,
+        source_hashes: List[str],
+        new_hash: str,
+        description: str,
+        new_data_type: str,
+        sender: str,
+    ) -> dict:
+        """
+        Build tx for N-to-1 merge transformation (v2+).
+
+        Args:
+            source_hashes: List of original data hashes (2-50 items).
+            new_hash: Hash of the merged data.
+            description: Transformation description (max 256 chars).
+            new_data_type: Data type for the merged result (max 64 chars).
+            sender: Address of the transaction sender.
+
+        Returns:
+            Unsigned transaction dict.
+
+        Raises:
+            ChainValidationError: If source count or formats are invalid.
+        """
+        if len(source_hashes) < MIN_MERGE_SOURCES:
+            raise ChainValidationError(
+                f"Merge requires at least {MIN_MERGE_SOURCES} sources, "
+                f"got {len(source_hashes)}"
+            )
+        if len(source_hashes) > MAX_MERGE_SOURCES:
+            raise ChainValidationError(
+                f"Merge source count {len(source_hashes)} exceeds maximum "
+                f"of {MAX_MERGE_SOURCES}"
+            )
+        source_bytes = [_normalize_hash(h) for h in source_hashes]
+        new_bytes = _normalize_hash(new_hash)
+        _validate_transformation(description)
+        _validate_data_type(new_data_type)
+        return self._contract.functions.recordMergeTransformation(
+            source_bytes,
+            new_bytes,
+            description,
+            new_data_type,
+        ).build_transaction(
+            {
+                "from": self._web3.to_checksum_address(sender),
+            }
+        )
 
     # --- Event queries ---
 
@@ -729,6 +888,35 @@ class DataProvenanceContract:
             (evt.args.originalDataHash, evt.args.newDataHash, evt.args.transformation)
             for evt in events
         ]
+
+    def get_all_merge_events(
+        self,
+        from_block: int = 0,
+        to_block: int = None,
+    ) -> list:
+        """
+        Query ALL DataMerged events in a block range (v2+ contracts).
+
+        Args:
+            from_block: Start of the scan range.
+            to_block: End of the scan range. Defaults to latest block.
+
+        Returns:
+            List of event objects with args: newDataHash, sourceDataHashes,
+            transformation, newDataType.  Returns empty list if the
+            contract does not emit DataMerged events.
+        """
+        latest = to_block if to_block is not None else self._web3.eth.block_number
+        try:
+            return self._get_logs_chunked(
+                self._contract.events.DataMerged,
+                None,
+                from_block,
+                latest,
+            )
+        except Exception:
+            # Contract may not have DataMerged event (v1)
+            return []
 
     # --- Gas estimation ---
 

@@ -1,14 +1,15 @@
 """
-In-memory cache for DataTransformed event logs.
+In-memory cache for DataTransformed and DataMerged event logs.
 
-The DataProvenance contract stores transformation descriptions (string[])
-but NOT the linked hashes in state — newDataHash is only in event logs.
-This forces get_provenance_chain to scan the full contract history on
-every call (~1.4M blocks on Base Sepolia, ~20s).
+On v1 contracts, the DataProvenance contract stores transformation
+descriptions (string[]) but NOT the linked hashes in state — newDataHash
+is only in event logs.  This forces get_provenance_chain to scan the full
+contract history on every call (~1.4M blocks on Base Sepolia, ~20s).
 
 This module provides a singleton cache per (chain, contract_address) that
 does a full scan on first call and incremental scans on subsequent calls,
-reducing repeat queries to <1s.
+reducing repeat queries to <1s.  Also scans DataMerged events (v2+) and
+adds forward/reverse entries for each merge source.
 """
 
 from __future__ import annotations
@@ -85,6 +86,33 @@ class TransformationEventCache:
                 )
                 self._forward.setdefault(orig_hex, []).append((new_hex, desc))
                 self._reverse.setdefault(new_hex, []).append((orig_hex, desc))
+
+            # Also scan DataMerged events (v2+ contracts).
+            # For each merge: each source → new_hash (forward),
+            # new_hash → each source (reverse).
+            try:
+                merge_events = contract.get_all_merge_events(
+                    from_block=from_block,
+                    to_block=current_block,
+                )
+                for evt in merge_events:
+                    new_bytes = evt.args.newDataHash
+                    new_hex = (
+                        new_bytes.hex()
+                        if isinstance(new_bytes, bytes)
+                        else str(new_bytes)
+                    )
+                    desc = evt.args.transformation
+                    for src_bytes in evt.args.sourceDataHashes:
+                        src_hex = (
+                            src_bytes.hex()
+                            if isinstance(src_bytes, bytes)
+                            else str(src_bytes)
+                        )
+                        self._forward.setdefault(src_hex, []).append((new_hex, desc))
+                        self._reverse.setdefault(new_hex, []).append((src_hex, desc))
+            except Exception as e:
+                logger.debug("DataMerged event scan skipped: %s", e)
 
             self._last_scanned_block = current_block
             logger.debug(

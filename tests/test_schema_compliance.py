@@ -30,19 +30,19 @@ class TestMCPToolSchemaCompliance:
                 "properties": {
                     "amount": {"type": "integer"},
                     "depth": {"type": "integer"},
-                    "label": {"type": "string"}
+                    "label": {"type": "string"},
                 },
-                "required": []
+                "required": [],
             },
             "upload_data": {
                 "type": "object",
                 "properties": {
                     "data": {"type": "string"},
                     "stamp_id": {"type": "string"},
-                    "content_type": {"type": "string"}
+                    "content_type": {"type": "string"},
                 },
-                "required": ["data", "stamp_id"]
-            }
+                "required": ["data", "stamp_id"],
+            },
         }
 
         for tool_name, schema in expected_tool_schemas.items():
@@ -56,23 +56,29 @@ class TestMCPToolSchemaCompliance:
         """Test that tool schemas match their actual implementations."""
         # Test that handler functions exist and are callable
         from swarm_provenance_mcp.server import (
-            handle_purchase_stamp, handle_get_stamp_status, handle_list_stamps,
-            handle_extend_stamp, handle_upload_data, handle_download_data,
-            handle_check_stamp_health, handle_get_wallet_info, handle_get_notary_info,
-            handle_health_check
+            handle_purchase_stamp,
+            handle_get_stamp_status,
+            handle_list_stamps,
+            handle_extend_stamp,
+            handle_upload_data,
+            handle_download_data,
+            handle_check_stamp_health,
+            handle_get_wallet_info,
+            handle_get_notary_info,
+            handle_health_check,
         )
 
         handlers = {
-            'purchase_stamp': handle_purchase_stamp,
-            'get_stamp_status': handle_get_stamp_status,
-            'list_stamps': handle_list_stamps,
-            'extend_stamp': handle_extend_stamp,
-            'upload_data': handle_upload_data,
-            'download_data': handle_download_data,
-            'check_stamp_health': handle_check_stamp_health,
-            'get_wallet_info': handle_get_wallet_info,
-            'get_notary_info': handle_get_notary_info,
-            'health_check': handle_health_check,
+            "purchase_stamp": handle_purchase_stamp,
+            "get_stamp_status": handle_get_stamp_status,
+            "list_stamps": handle_list_stamps,
+            "extend_stamp": handle_extend_stamp,
+            "upload_data": handle_upload_data,
+            "download_data": handle_download_data,
+            "check_stamp_health": handle_check_stamp_health,
+            "get_wallet_info": handle_get_wallet_info,
+            "get_notary_info": handle_get_notary_info,
+            "health_check": handle_health_check,
         }
 
         # Test that all handlers exist and are callable
@@ -81,12 +87,23 @@ class TestMCPToolSchemaCompliance:
 
         # Test some basic parameter expectations
         import inspect
+
         upload_sig = inspect.signature(handle_upload_data)
-        assert 'arguments' in upload_sig.parameters, "upload_data handler should accept arguments parameter"
+        assert (
+            "arguments" in upload_sig.parameters
+        ), "upload_data handler should accept arguments parameter"
 
     def test_schema_parameter_types_valid(self):
         """Test that all schema parameter types are valid."""
-        valid_types = {'string', 'number', 'integer', 'boolean', 'array', 'object', 'null'}
+        valid_types = {
+            "string",
+            "number",
+            "integer",
+            "boolean",
+            "array",
+            "object",
+            "null",
+        }
 
         # Test our known schemas
         expected_tool_schemas = {
@@ -95,19 +112,20 @@ class TestMCPToolSchemaCompliance:
                 "properties": {
                     "data": {"type": "string"},
                     "stamp_id": {"type": "string"},
-                    "content_type": {"type": "string"}
-                }
+                    "content_type": {"type": "string"},
+                },
             }
         }
 
         for tool_name, schema in expected_tool_schemas.items():
-            properties = schema.get('properties', {})
+            properties = schema.get("properties", {})
 
             for param_name, param_def in properties.items():
-                param_type = param_def.get('type')
+                param_type = param_def.get("type")
                 if param_type:
-                    assert param_type in valid_types, \
-                        f"Tool '{tool_name}' parameter '{param_name}' has invalid type: {param_type}"
+                    assert (
+                        param_type in valid_types
+                    ), f"Tool '{tool_name}' parameter '{param_name}' has invalid type: {param_type}"
 
     def test_required_vs_optional_parameters_consistency(self):
         """Test that required/optional parameter declarations are consistent."""
@@ -117,24 +135,26 @@ class TestMCPToolSchemaCompliance:
             "properties": {
                 "data": {"type": "string"},
                 "stamp_id": {"type": "string"},
-                "content_type": {"type": "string", "default": "application/json"}
+                "content_type": {"type": "string", "default": "application/json"},
             },
-            "required": ["data", "stamp_id"]
+            "required": ["data", "stamp_id"],
         }
 
-        properties = test_schema.get('properties', {})
-        required = set(test_schema.get('required', []))
+        properties = test_schema.get("properties", {})
+        required = set(test_schema.get("required", []))
 
         # All required parameters must be in properties
         for req_param in required:
-            assert req_param in properties, \
-                f"Required parameter '{req_param}' not in properties"
+            assert (
+                req_param in properties
+            ), f"Required parameter '{req_param}' not in properties"
 
         # Parameters with defaults should not be required
         for param_name, param_def in properties.items():
-            if 'default' in param_def:
-                assert param_name not in required, \
-                    f"Parameter '{param_name}' has default but is required"
+            if "default" in param_def:
+                assert (
+                    param_name not in required
+                ), f"Parameter '{param_name}' has default but is required"
 
 
 class TestGatewayClientSchemaCompliance:
@@ -149,28 +169,29 @@ class TestGatewayClientSchemaCompliance:
 
         # Expected signatures for critical methods
         expected_signatures = {
-            'purchase_stamp': ['amount', 'depth', 'label'],
-            'get_stamp_details': ['stamp_id'],
-            'list_stamps': [],
-            'extend_stamp': ['stamp_id', 'amount'],
-            'upload_data': ['data', 'stamp_id', 'content_type'],
-            'download_data': ['reference'],
-            'check_stamp_health': ['stamp_id'],
-            'get_wallet_info': [],
-            'get_notary_info': [],
-            'health_check': [],
+            "purchase_stamp": ["amount", "depth", "label"],
+            "get_stamp_details": ["stamp_id"],
+            "list_stamps": [],
+            "extend_stamp": ["stamp_id", "amount"],
+            "upload_data": ["data", "stamp_id", "content_type"],
+            "download_data": ["reference"],
+            "check_stamp_health": ["stamp_id"],
+            "get_wallet_info": [],
+            "get_notary_info": [],
+            "health_check": [],
         }
 
         for method_name, expected_params in expected_signatures.items():
             if hasattr(client, method_name):
                 method = getattr(client, method_name)
                 sig = inspect.signature(method)
-                actual_params = [p for p in sig.parameters.keys() if p != 'self']
+                actual_params = [p for p in sig.parameters.keys() if p != "self"]
 
                 # Check that expected parameters are present
                 for expected_param in expected_params:
-                    assert expected_param in actual_params, \
-                        f"Method {method_name} missing expected parameter: {expected_param}"
+                    assert (
+                        expected_param in actual_params
+                    ), f"Method {method_name} missing expected parameter: {expected_param}"
 
     def test_gateway_method_return_types_documented(self):
         """Test that gateway methods have proper type hints and docstrings."""
@@ -178,10 +199,16 @@ class TestGatewayClientSchemaCompliance:
 
         client = SwarmGatewayClient()
         critical_methods = [
-            'purchase_stamp', 'get_stamp_details', 'list_stamps',
-            'extend_stamp', 'upload_data', 'download_data',
-            'check_stamp_health', 'get_wallet_info', 'get_notary_info',
-            'health_check'
+            "purchase_stamp",
+            "get_stamp_details",
+            "list_stamps",
+            "extend_stamp",
+            "upload_data",
+            "download_data",
+            "check_stamp_health",
+            "get_wallet_info",
+            "get_notary_info",
+            "health_check",
         ]
 
         for method_name in critical_methods:
@@ -193,9 +220,13 @@ class TestGatewayClientSchemaCompliance:
 
                 # Docstring should mention return type or what it returns
                 doc_lower = method.__doc__.lower()
-                return_indicators = ['return', 'response', 'dict', 'json', 'bytes']
-                has_return_info = any(indicator in doc_lower for indicator in return_indicators)
-                assert has_return_info, f"Method {method_name} docstring should document return type"
+                return_indicators = ["return", "response", "dict", "json", "bytes"]
+                has_return_info = any(
+                    indicator in doc_lower for indicator in return_indicators
+                )
+                assert (
+                    has_return_info
+                ), f"Method {method_name} docstring should document return type"
 
 
 class TestProtocolComplianceRegression:
@@ -210,30 +241,36 @@ class TestProtocolComplianceRegression:
         with pytest.MonkeyPatch().context() as m:
             # Mock the gateway_client to return predictable results
             mock_health_result = {
-                'status': 'healthy',
-                'gateway_url': 'http://test',
-                'response_time_ms': 10.5,
-                'gateway_response': {'test': 'data'}
+                "status": "healthy",
+                "gateway_url": "http://test",
+                "response_time_ms": 10.5,
+                "gateway_response": {"test": "data"},
             }
 
-            m.setattr('swarm_provenance_mcp.server.gateway_client.health_check',
-                     lambda: mock_health_result)
+            m.setattr(
+                "swarm_provenance_mcp.server.gateway_client.health_check",
+                lambda: mock_health_result,
+            )
 
             result = await handle_health_check({})
 
             # Must be CallToolResult
-            assert isinstance(result, CallToolResult), "Result must be CallToolResult instance"
+            assert isinstance(
+                result, CallToolResult
+            ), "Result must be CallToolResult instance"
 
             # Must have content
-            assert hasattr(result, 'content'), "Result must have content attribute"
+            assert hasattr(result, "content"), "Result must have content attribute"
             assert len(result.content) > 0, "Result must have non-empty content"
 
             # Content items must be proper type
             for content_item in result.content:
-                assert isinstance(content_item, TextContent), "Content must be TextContent instances"
-                assert hasattr(content_item, 'type'), "Content must have type attribute"
-                assert hasattr(content_item, 'text'), "Content must have text attribute"
-                assert content_item.type == 'text', "Content type must be 'text'"
+                assert isinstance(
+                    content_item, TextContent
+                ), "Content must be TextContent instances"
+                assert hasattr(content_item, "type"), "Content must have type attribute"
+                assert hasattr(content_item, "text"), "Content must have text attribute"
+                assert content_item.type == "text", "Content type must be 'text'"
 
     def test_tool_error_format_compliance(self):
         """Test that tool errors follow MCP protocol format."""
@@ -248,7 +285,7 @@ class TestProtocolComplianceRegression:
             client.health_check()
         except Exception as e:
             # The error should be a proper exception type
-            assert hasattr(e, '__str__'), "Exceptions should be serializable"
+            assert hasattr(e, "__str__"), "Exceptions should be serializable"
 
 
 class TestDataValidationCompliance:
@@ -263,8 +300,8 @@ class TestDataValidationCompliance:
         test_cases = [
             (4095, False),  # Just under limit - should pass
             (4096, False),  # Exactly at limit - should pass
-            (4097, True),   # Just over limit - should fail
-            (8192, True),   # Way over limit - should fail
+            (4097, True),  # Just over limit - should fail
+            (8192, True),  # Way over limit - should fail
         ]
 
         for size, should_fail in test_cases:
@@ -300,7 +337,7 @@ class TestDataValidationCompliance:
         for test_string in test_strings:
             # Should not raise encoding errors
             try:
-                encoded = test_string.encode('utf-8')
+                encoded = test_string.encode("utf-8")
                 if len(encoded) <= 4096:
                     client.upload_data(test_string, "fake_stamp")
             except ValueError as e:

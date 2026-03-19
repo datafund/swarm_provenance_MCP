@@ -2,6 +2,8 @@
 
 A practical guide for AI agents and developers working with the Swarm Provenance MCP server. Covers concepts, workflows, critical rules, and error recovery for decentralized data provenance.
 
+> **Testnet notice:** On-chain features use Base Sepolia (testnet) by default. Testnet tokens have no monetary value and state may be reset. This software is in beta — no warranties provided.
+
 ---
 
 ## What is Data Provenance?
@@ -12,7 +14,7 @@ Data provenance tracks the **origin, ownership, and transformation history** of 
 |-------|-------------|-------|
 | **Swarm Storage** | Content-addressed decentralized storage | Swarm network |
 | **On-Chain Anchoring** | Immutable ownership + timestamp record | Base Sepolia (DataProvenance contract) |
-| **Transformation Lineage** | Links between original and derived data | On-chain event logs |
+| **Transformation Lineage** | Links between original and derived data | On-chain state (v2) or event logs (v1) |
 
 **Why it matters:** Anyone can verify who stored data, when, and how it was transformed — without trusting a central authority.
 
@@ -26,7 +28,7 @@ Not every setup has all features. What you can do depends on your configuration:
 |------|-------------|-----------------|
 | **Storage Only** | Gateway URL | `purchase_stamp`, `upload_data`, `download_data`, `check_stamp_health`, `get_stamp_status`, `list_stamps`, `extend_stamp`, `health_check`, `get_wallet_info`, `get_notary_info` |
 | **Read-Only Chain** | + `CHAIN_ENABLED=true` | All storage tools + `chain_health`, `verify_hash`, `get_provenance`, `get_provenance_chain` |
-| **Full Provenance** | + `PROVENANCE_WALLET_KEY` (funded) | All tools including `anchor_hash`, `record_transform`, `chain_balance` |
+| **Full Provenance** | + `PROVENANCE_WALLET_KEY` (funded) | All tools including `anchor_hash`, `record_transform`, `record_merge_transform`, `chain_balance` |
 
 Check your mode: run `health_check` — it reports both gateway and chain status.
 
@@ -110,7 +112,21 @@ Chain multiple transformations (e.g., raw → cleaned → anonymized → aggrega
 
 Each step's `new_hash` becomes the next step's `original_hash`. The auto-registration in `record_transform` ensures each intermediate hash is properly linked.
 
-### D: Verify Existing Provenance (Read-Only)
+### D: Merge Multiple Sources
+
+Combine multiple datasets into one with verifiable provenance linking all sources (requires v2 contract).
+
+```
+1. Anchor all source datasets    → Workflow A for each source hash
+2. Upload merged data            → upload_data with the combined result
+3. record_merge_transform        → link [source_1, source_2, ...] → merged_hash
+   (source_hashes, new_hash, description, new_data_type)
+4. get_provenance_chain          → verify merge is recorded (all sources linked to merged)
+```
+
+**Note:** All source hashes must be anchored before calling `record_merge_transform`. The merge supports 2–50 sources. The merged hash is auto-registered with the specified `new_data_type`.
+
+### E: Verify Existing Provenance (Read-Only)
 
 Inspect provenance records without a wallet.
 
@@ -191,6 +207,8 @@ Inspect provenance records without a wallet.
 | "already exists" / "already registered" revert on `record_transform` | `new_hash` was pre-anchored via `anchor_hash` | Do NOT anchor `new_hash` before `record_transform` — it auto-registers. Re-upload the data to get a fresh hash. |
 | "Transformation already recorded" on `record_transform` | Same `(original → new)` pair was already recorded | Not an error — `record_transform` returns the existing link without spending gas. Use `get_provenance_chain` to verify. |
 | "data not registered" | `original_hash` not anchored | Call `anchor_hash` on the original first, then retry `record_transform` |
+| "too few sources" on `record_merge_transform` | Fewer than 2 source hashes provided | Provide at least 2 source hashes |
+| "too many sources" on `record_merge_transform` | More than 50 source hashes provided | Split into multiple merge operations |
 | "not owner" / "unauthorized" | Wrong wallet for this data | Only the anchoring wallet (or delegate) can transform |
 | Size exceeded (4KB) | Upload payload too large | Split or compress data before upload |
 | Gateway unreachable | Network or gateway issue | Run `health_check`, check `SWARM_GATEWAY_URL` config |
@@ -206,10 +224,12 @@ Inspect provenance records without a wallet.
 | **Stamp** | Prepaid storage ticket (BZZ) — controls capacity (depth) and duration (TTL) |
 | **Anchor** | Registering a Swarm hash on the blockchain via `anchor_hash` |
 | **Transformation** | On-chain link between an original hash and a derived hash, recorded via `record_transform` |
+| **Merge transformation** | On-chain N-to-1 link combining multiple source hashes into one, recorded via `record_merge_transform` |
 | **Lineage / Provenance chain** | The full tree of transformations reachable from any hash (walks both directions), retrieved via `get_provenance_chain` |
 | **DAG** | Directed Acyclic Graph — the structure of transformation lineage (branching, no cycles) |
-| **Gas** | ETH spent to execute blockchain transactions (`anchor_hash`, `record_transform`) |
+| **Gas** | ETH spent to execute blockchain transactions (`anchor_hash`, `record_transform`, `record_merge_transform`) |
 | **Base Sepolia** | Testnet for the Base L2 chain — where the DataProvenance contract is deployed |
+| **localhost** | Local hardhat node (chain 31337) — for development/testing with v2 contract |
 | **DataProvenance contract** | Smart contract that stores provenance records and emits `DataTransformed` events |
 | **Owner** | The wallet address that anchored a hash — has exclusive rights to record transformations |
 | **RESTRICTED status** | Irreversible status set via `restrict_original=true` — signals data should not be accessed directly |

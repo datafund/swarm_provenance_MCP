@@ -9,6 +9,9 @@
 > ⚠️ **DATA PERSISTENCE WARNING**
 > Storage on Swarm is **rented storage** with limited time periods. The default configuration uses very short rental periods (approximately **1 day**). **Do not expect uploaded data to persist longer than the rental period.** Data will become unavailable when the postage stamp expires.
 
+> ⚠️ **TESTNET NOTICE**
+> On-chain provenance features use **Base Sepolia (testnet)** by default. Testnet tokens have no monetary value and testnet state may be reset at any time. Do not rely on testnet anchoring for production data integrity. No warranties of any kind are provided.
+
 A Model Context Protocol (MCP) server for managing Swarm postage stamps and provenance data storage through a centralized FastAPI gateway. Enables AI agents to upload provenance data to the decentralized Swarm network for immutable storage and retrieve it by reference.
 
 ## Overview
@@ -36,7 +39,8 @@ This MCP server is specifically designed for provenance data use cases, leveragi
 - **Health Monitoring**: Check gateway and Swarm network connectivity
 - **Chain Diagnostics** (optional): Check on-chain wallet balance and RPC connectivity for provenance anchoring
 - **On-Chain Anchoring** (optional): Register Swarm hashes on-chain for immutable provenance records
-- **Transformation Lineage** (optional): Record and trace data transformations through on-chain event logs
+- **Transformation Lineage** (optional): Record and trace data transformations through on-chain state reads (v2) or event logs (v1)
+- **Merge Transformations** (optional): Record N-to-1 merge transformations combining multiple source hashes into one
 
 ## Installation
 
@@ -121,7 +125,7 @@ Environment variables (set in `.env` file):
 #### Chain Anchoring (Optional)
 
 - `CHAIN_ENABLED`: Enable on-chain provenance anchoring (default: `false`)
-- `CHAIN_NAME`: Blockchain network — `base-sepolia` (testnet) or `base` (mainnet) (default: `base-sepolia`)
+- `CHAIN_NAME`: Blockchain network — `base-sepolia` (testnet), `base` (mainnet), or `localhost` (local hardhat, chain 31337) (default: `base-sepolia`)
 - `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x prefix)
 - `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set)
 - `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs, tried in order after `CHAIN_RPC_URL`
@@ -129,7 +133,7 @@ Environment variables (set in `.env` file):
 - `CHAIN_EXPLORER_URL`: Custom block explorer URL (uses chain preset if not set)
 - `CHAIN_GAS_LIMIT`: Explicit gas limit for chain transactions (skips estimation if set)
 
-When chain is enabled, additional tools become available: `chain_balance`, `chain_health`, `anchor_hash`, `verify_hash`, `get_provenance`, `record_transform`, `get_provenance_chain`. Blockchain dependencies (web3, eth-account) are included in the default install. Read-only tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `chain_health`) work without a wallet key; write tools (`anchor_hash`, `record_transform`) and `chain_balance` require `PROVENANCE_WALLET_KEY` with a funded wallet.
+When chain is enabled, additional tools become available: `chain_balance`, `chain_health`, `anchor_hash`, `verify_hash`, `get_provenance`, `record_transform`, `record_merge_transform`, `get_provenance_chain`. Blockchain dependencies (web3, eth-account) are included in the default install. Read-only tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `chain_health`) work without a wallet key; write tools (`anchor_hash`, `record_transform`, `record_merge_transform`) and `chain_balance` require `PROVENANCE_WALLET_KEY` with a funded wallet.
 
 ### Gateway Options
 
@@ -418,8 +422,33 @@ Record a data transformation on-chain, linking the original data to its transfor
 }
 ```
 
+#### `record_merge_transform` *(optional — requires `CHAIN_ENABLED=true` and `PROVENANCE_WALLET_KEY`)*
+Record an N-to-1 merge transformation on-chain, combining multiple source hashes into a single new hash. All source hashes must be already anchored. Costs gas. Requires a v2 contract (`localhost` or upgraded deployments).
+
+**Parameters:**
+- `source_hashes` (array of strings, required): 2–50 source Swarm reference hashes to merge (each 64-character hex)
+- `new_hash` (string, required): 64-character hex Swarm reference of the merged result
+- `description` (string): Description of the merge transformation (max 256 chars)
+- `new_data_type` (string): Data type for the merged result (default: `"merged"`, max 64 chars)
+
+**Example:**
+```json
+{
+  "name": "record_merge_transform",
+  "arguments": {
+    "source_hashes": [
+      "a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789a",
+      "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789ab"
+    ],
+    "new_hash": "c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789abc",
+    "description": "Merged EU and US datasets",
+    "new_data_type": "merged-dataset"
+  }
+}
+```
+
 #### `get_provenance_chain` *(optional — requires `CHAIN_ENABLED=true`)*
-Follow the transformation lineage for a Swarm hash. Walks through all recorded transformations using on-chain event logs to show how data evolved — from original to each derived version. Read-only — no gas or wallet key required.
+Follow the transformation lineage for a Swarm hash. On v2 contracts, uses state reads for fast traversal; on v1 contracts, walks through event logs. Shows how data evolved — from original to each derived version. Read-only — no gas or wallet key required.
 
 **Parameters:**
 - `swarm_hash` (string, required): 64-character hex Swarm reference hash to trace lineage for
@@ -646,7 +675,7 @@ To enable blockchain anchoring, add an `"env"` block to the config. You can use 
 }
 ```
 
-Read-only chain tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `chain_health`) work without `PROVENANCE_WALLET_KEY`. Write tools (`anchor_hash`, `record_transform`) and `chain_balance` require a funded wallet — see [Chain Anchoring](#chain-anchoring-optional) for details.
+Read-only chain tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `chain_health`) work without `PROVENANCE_WALLET_KEY`. Write tools (`anchor_hash`, `record_transform`, `record_merge_transform`) and `chain_balance` require a funded wallet — see [Chain Anchoring](#chain-anchoring-optional) for details.
 
 #### Docker-based
 
@@ -803,6 +832,7 @@ This MCP server is designed to work with AI agents that support the Model Contex
 6. **Chain: "insufficient funds"**: Fund your wallet with testnet ETH (Base Sepolia faucet) or bridge ETH to Base mainnet. Run `chain_balance` for guidance.
 7. **Chain: "already registered"**: The hash is already anchored on-chain. Use `get_provenance` to view the existing record.
 8. **Chain: "transformation already recorded"**: The `(original → new)` link already exists on-chain. No gas spent — use `get_provenance_chain` to verify the lineage.
+9. **Chain: "too few/many sources"**: `record_merge_transform` requires 2–50 source hashes. Adjust the `source_hashes` array accordingly.
 
 ### Logging
 

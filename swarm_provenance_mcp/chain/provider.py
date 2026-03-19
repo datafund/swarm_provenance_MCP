@@ -38,9 +38,9 @@ CHAIN_PRESETS = {
     "base-sepolia": {
         "chain_id": 84532,
         "rpc_url": "https://sepolia.base.org",
-        "explorer_url": "https://sepolia.basescan.org",
-        "contract_address": "0x9a3c6F47B69211F05891CCb7aD33596290b9fE64",
-        "deploy_block": 37_562_100,
+        "explorer_url": "https://base-sepolia.blockscout.com",
+        "contract_address": "0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a",
+        "deploy_block": 39_075_766,
         "rpc_fallbacks": [
             "https://base-sepolia-rpc.publicnode.com",
             "https://base-sepolia.drpc.org",
@@ -56,6 +56,14 @@ CHAIN_PRESETS = {
             "https://base-rpc.publicnode.com",
             "https://base.drpc.org",
         ],
+    },
+    "localhost": {
+        "chain_id": 31337,
+        "rpc_url": "http://127.0.0.1:8545",
+        "explorer_url": None,
+        "contract_address": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+        "deploy_block": 0,
+        "rpc_fallbacks": [],
     },
 }
 
@@ -240,7 +248,7 @@ class ChainProvider:
                 rpc_url=self.rpc_url,
             ) from e
 
-    def get_explorer_tx_url(self, tx_hash: str) -> str:
+    def get_explorer_tx_url(self, tx_hash: str) -> Optional[str]:
         """
         Get block explorer URL for a transaction.
 
@@ -248,13 +256,15 @@ class ChainProvider:
             tx_hash: Transaction hash (with or without 0x prefix).
 
         Returns:
-            Full block explorer URL for the transaction.
+            Full block explorer URL for the transaction, or None if no explorer configured.
         """
+        if not self.explorer_url:
+            return None
         if not tx_hash.startswith("0x"):
             tx_hash = "0x" + tx_hash
         return f"{self.explorer_url}/tx/{tx_hash}"
 
-    def get_explorer_address_url(self, address: str) -> str:
+    def get_explorer_address_url(self, address: str) -> Optional[str]:
         """
         Get block explorer URL for an address.
 
@@ -262,8 +272,10 @@ class ChainProvider:
             address: Ethereum address (with or without 0x prefix).
 
         Returns:
-            Full block explorer URL for the address.
+            Full block explorer URL for the address, or None if no explorer configured.
         """
+        if not self.explorer_url:
+            return None
         if not address.startswith("0x"):
             address = "0x" + address
         return f"{self.explorer_url}/address/{address}"

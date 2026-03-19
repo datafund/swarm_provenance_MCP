@@ -30,26 +30,30 @@ class TestPerformanceBaselines:
     async def test_tool_handler_response_times(self):
         """Test that tool handlers respond within reasonable time."""
         from swarm_provenance_mcp.server import (
-            handle_purchase_stamp, handle_list_stamps, handle_health_check
+            handle_purchase_stamp,
+            handle_list_stamps,
+            handle_health_check,
         )
 
         # Mock the gateway client to avoid network delays
         mock_responses = {
-            'purchase_stamp': {'batchID': 'test123', 'message': 'success'},
-            'list_stamps': {'stamps': [], 'total_count': 0},
-            'health_check': {'status': 'healthy', 'response_time_ms': 10}
+            "purchase_stamp": {"batchID": "test123", "message": "success"},
+            "list_stamps": {"stamps": [], "total_count": 0},
+            "health_check": {"status": "healthy", "response_time_ms": 10},
         }
 
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client, \
-             patch('swarm_provenance_mcp.server.chain_client', None):
-            mock_client.purchase_stamp.return_value = mock_responses['purchase_stamp']
-            mock_client.list_stamps.return_value = mock_responses['list_stamps']
-            mock_client.health_check.return_value = mock_responses['health_check']
+        with (
+            patch("swarm_provenance_mcp.server.gateway_client") as mock_client,
+            patch("swarm_provenance_mcp.server.chain_client", None),
+        ):
+            mock_client.purchase_stamp.return_value = mock_responses["purchase_stamp"]
+            mock_client.list_stamps.return_value = mock_responses["list_stamps"]
+            mock_client.health_check.return_value = mock_responses["health_check"]
 
             handlers_to_test = [
-                ('purchase_stamp', handle_purchase_stamp, {}),
-                ('list_stamps', handle_list_stamps, {}),
-                ('health_check', handle_health_check, {}),
+                ("purchase_stamp", handle_purchase_stamp, {}),
+                ("list_stamps", handle_list_stamps, {}),
+                ("health_check", handle_health_check, {}),
             ]
 
             for name, handler, args in handlers_to_test:
@@ -58,7 +62,9 @@ class TestPerformanceBaselines:
                 response_time = time.time() - start_time
 
                 # Handlers should respond quickly (under 100ms without network)
-                assert response_time < 0.1, f"Handler {name} too slow: {response_time:.3f}s"
+                assert (
+                    response_time < 0.1
+                ), f"Handler {name} too slow: {response_time:.3f}s"
                 print(f"Handler {name} response time: {response_time:.3f}s")
 
     def test_gateway_client_initialization_performance(self):
@@ -86,7 +92,9 @@ class TestPerformanceBaselines:
         memory_increase = after_creation_memory - initial_memory
 
         # Memory increase should be reasonable (under 50MB for basic objects)
-        assert memory_increase < 50, f"Memory increase too high: {memory_increase:.1f}MB"
+        assert (
+            memory_increase < 50
+        ), f"Memory increase too high: {memory_increase:.1f}MB"
         print(f"Memory usage after creation: {memory_increase:.1f}MB increase")
 
 
@@ -98,11 +106,13 @@ class TestConcurrencyAndLoad:
         from swarm_provenance_mcp.server import handle_health_check
 
         # Mock to avoid network calls
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client, \
-             patch('swarm_provenance_mcp.server.chain_client', None):
+        with (
+            patch("swarm_provenance_mcp.server.gateway_client") as mock_client,
+            patch("swarm_provenance_mcp.server.chain_client", None),
+        ):
             mock_client.health_check.return_value = {
-                'status': 'healthy',
-                'response_time_ms': 10
+                "status": "healthy",
+                "response_time_ms": 10,
             }
 
             # Run multiple handlers concurrently
@@ -120,7 +130,9 @@ class TestConcurrencyAndLoad:
                 assert not result.isError
 
             # Should complete reasonably quickly even with concurrency
-            assert total_time < 1.0, f"Concurrent operations too slow: {total_time:.2f}s"
+            assert (
+                total_time < 1.0
+            ), f"Concurrent operations too slow: {total_time:.2f}s"
             print(f"Concurrent {num_concurrent} operations: {total_time:.3f}s")
 
     def test_rapid_client_creation_destruction(self):
@@ -138,7 +150,9 @@ class TestConcurrencyAndLoad:
 
         # Should not leak significant memory
         assert memory_increase < 10, f"Memory leak detected: {memory_increase:.1f}MB"
-        print(f"Memory after rapid client creation/destruction: +{memory_increase:.1f}MB")
+        print(
+            f"Memory after rapid client creation/destruction: +{memory_increase:.1f}MB"
+        )
 
     def test_large_data_handling_performance(self):
         """Test performance with large (but valid) data."""
@@ -154,13 +168,15 @@ class TestConcurrencyAndLoad:
 
         start_time = time.time()
 
-        with patch.object(client.session, 'post', return_value=mock_response):
+        with patch.object(client.session, "post", return_value=mock_response):
             client.upload_data(large_data, "fake_stamp")
 
         processing_time = time.time() - start_time
 
         # Should process large data quickly (under 0.1s)
-        assert processing_time < 0.1, f"Large data processing too slow: {processing_time:.3f}s"
+        assert (
+            processing_time < 0.1
+        ), f"Large data processing too slow: {processing_time:.3f}s"
         print(f"Large data processing time: {processing_time:.3f}s")
 
 
@@ -204,7 +220,9 @@ class TestResourceLeakDetection:
         connection_increase = final_connections - initial_connections
 
         # Should not accumulate connections
-        assert connection_increase <= 2, f"Connection leak detected: +{connection_increase}"
+        assert (
+            connection_increase <= 2
+        ), f"Connection leak detected: +{connection_increase}"
         print(f"Connection change: +{connection_increase}")
 
     async def test_async_resource_cleanup(self):
@@ -214,8 +232,8 @@ class TestResourceLeakDetection:
         initial_tasks = len([t for t in asyncio.all_tasks() if not t.done()])
 
         # Create many async operations
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
-            mock_client.health_check.return_value = {'status': 'healthy'}
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.health_check.return_value = {"status": "healthy"}
 
             tasks = []
             for _ in range(20):
@@ -253,7 +271,9 @@ class TestScalabilityLimits:
         access_time = time.time() - start_time
 
         # Multiple accesses should remain fast
-        assert access_time < 0.1, f"Tool handler access scaling poorly: {access_time:.3f}s"
+        assert (
+            access_time < 0.1
+        ), f"Tool handler access scaling poorly: {access_time:.3f}s"
         print(f"Tool handler access time (100x): {access_time:.3f}s")
 
     @pytest.mark.slow
@@ -261,8 +281,8 @@ class TestScalabilityLimits:
         """Test that sustained operations remain stable."""
         from swarm_provenance_mcp.server import handle_health_check
 
-        with patch('swarm_provenance_mcp.server.gateway_client') as mock_client:
-            mock_client.health_check.return_value = {'status': 'healthy'}
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.health_check.return_value = {"status": "healthy"}
 
             # Run many operations to test for memory leaks or performance degradation
             times = []
@@ -281,6 +301,10 @@ class TestScalabilityLimits:
 
                     # Performance shouldn't degrade more than 50%
                     degradation = recent_avg / early_avg
-                    assert degradation < 1.5, f"Performance degraded {degradation:.1f}x after {i} operations"
+                    assert (
+                        degradation < 1.5
+                    ), f"Performance degraded {degradation:.1f}x after {i} operations"
 
-            print(f"Sustained operations: avg {sum(times)/len(times):.4f}s per operation")
+            print(
+                f"Sustained operations: avg {sum(times)/len(times):.4f}s per operation"
+            )

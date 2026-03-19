@@ -24,21 +24,19 @@ class TestSwarmGatewayClient:
         with requests_mock.Mocker() as m:
             expected_response = {
                 "batchID": "test-batch-id-123",
-                "message": "Postage stamp purchased successfully"
+                "message": "Postage stamp purchased successfully",
             }
             m.post(f"{self.base_url}/api/v1/stamps/", json=expected_response)
 
             result = self.client.purchase_stamp(
-                amount=2000000000,
-                depth=17,
-                label="test-stamp"
+                amount=2000000000, depth=17, label="test-stamp"
             )
 
             assert result == expected_response
             assert m.last_request.json() == {
                 "amount": 2000000000,
                 "depth": 17,
-                "label": "test-stamp"
+                "label": "test-stamp",
             }
 
     def test_purchase_stamp_without_label(self):
@@ -46,17 +44,14 @@ class TestSwarmGatewayClient:
         with requests_mock.Mocker() as m:
             expected_response = {
                 "batchID": "test-batch-id-456",
-                "message": "Postage stamp purchased successfully"
+                "message": "Postage stamp purchased successfully",
             }
             m.post(f"{self.base_url}/api/v1/stamps/", json=expected_response)
 
             result = self.client.purchase_stamp(amount=500000000, depth=16)
 
             assert result == expected_response
-            assert m.last_request.json() == {
-                "amount": 500000000,
-                "depth": 16
-            }
+            assert m.last_request.json() == {"amount": 500000000, "depth": 16}
 
     def test_get_stamp_details_success(self):
         """Test successful stamp details retrieval."""
@@ -68,7 +63,7 @@ class TestSwarmGatewayClient:
                 "depth": 17,
                 "expectedExpiration": "2024-12-31-23-59",
                 "usable": True,
-                "utilization": 25.5
+                "utilization": 25.5,
             }
             m.get(f"{self.base_url}/api/v1/stamps/{stamp_id}", json=expected_response)
 
@@ -81,18 +76,10 @@ class TestSwarmGatewayClient:
         with requests_mock.Mocker() as m:
             expected_response = {
                 "stamps": [
-                    {
-                        "batchID": "stamp-1",
-                        "amount": "2000000000",
-                        "depth": 17
-                    },
-                    {
-                        "batchID": "stamp-2",
-                        "amount": "500000000",
-                        "depth": 16
-                    }
+                    {"batchID": "stamp-1", "amount": "2000000000", "depth": 17},
+                    {"batchID": "stamp-2", "amount": "500000000", "depth": 16},
                 ],
-                "total_count": 2
+                "total_count": 2,
             }
             m.get(f"{self.base_url}/api/v1/stamps/", json=expected_response)
 
@@ -106,15 +93,17 @@ class TestSwarmGatewayClient:
         with requests_mock.Mocker() as m:
             expected_response = {
                 "batchID": stamp_id,
-                "message": "Postage stamp extended successfully"
+                "message": "Postage stamp extended successfully",
             }
-            m.patch(f"{self.base_url}/api/v1/stamps/{stamp_id}/extend", json=expected_response)
+            m.patch(
+                f"{self.base_url}/api/v1/stamps/{stamp_id}/extend",
+                json=expected_response,
+            )
 
             result = self.client.extend_stamp(stamp_id, 500000000)
 
             assert result == expected_response
             assert m.last_request.json() == {"amount": 500000000}
-
 
     def test_check_stamp_health_success(self):
         """Test successful stamp health check."""
@@ -125,9 +114,12 @@ class TestSwarmGatewayClient:
                 "can_upload": True,
                 "errors": [],
                 "warnings": [],
-                "status": {"exists": True, "usable": True, "utilizationPercent": 10.0}
+                "status": {"exists": True, "usable": True, "utilizationPercent": 10.0},
             }
-            m.get(f"{self.base_url}/api/v1/stamps/{stamp_id}/check", json=expected_response)
+            m.get(
+                f"{self.base_url}/api/v1/stamps/{stamp_id}/check",
+                json=expected_response,
+            )
 
             result = self.client.check_stamp_health(stamp_id)
 
@@ -139,7 +131,7 @@ class TestSwarmGatewayClient:
         with requests_mock.Mocker() as m:
             expected_response = {
                 "walletAddress": "0x1234567890abcdef1234567890abcdef12345678",
-                "bzzBalance": "5000000000000000"
+                "bzzBalance": "5000000000000000",
             }
             m.get(f"{self.base_url}/api/v1/wallet", json=expected_response)
 
@@ -154,7 +146,7 @@ class TestSwarmGatewayClient:
                 "enabled": True,
                 "available": True,
                 "address": "0xabcdef",
-                "message": "Notary is operational"
+                "message": "Notary is operational",
             }
             m.get(f"{self.base_url}/api/v1/notary/info", json=expected_response)
 
@@ -174,7 +166,9 @@ class TestSwarmGatewayClient:
     def test_custom_headers(self):
         """Test that custom headers are set correctly."""
         with requests_mock.Mocker() as m:
-            m.get(f"{self.base_url}/api/v1/stamps/", json={"stamps": [], "total_count": 0})
+            m.get(
+                f"{self.base_url}/api/v1/stamps/", json={"stamps": [], "total_count": 0}
+            )
 
             self.client.list_stamps()
 

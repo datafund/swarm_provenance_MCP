@@ -5,7 +5,6 @@ import pytest
 import requests
 from swarm_provenance_mcp.gateway_client import SwarmGatewayClient
 
-
 # Gateway configuration
 GATEWAY_URL = os.getenv("SWARM_GATEWAY_URL", "http://127.0.0.1:8000")
 GATEWAY_HEALTH_URL = f"{GATEWAY_URL}/"
@@ -43,9 +42,7 @@ def test_gateway_client_purchase_stamp(gateway_client):
     """Test actual stamp purchase through gateway client."""
     try:
         result = gateway_client.purchase_stamp(
-            amount=2000000000,
-            depth=17,
-            label="integration-test"
+            amount=2000000000, depth=17, label="integration-test"
         )
 
         # Verify response structure
@@ -80,9 +77,7 @@ def test_gateway_client_extend_stamp(gateway_client):
     # First purchase a stamp to extend
     try:
         purchase_result = gateway_client.purchase_stamp(
-            amount=2000000000,
-            depth=17,
-            label="extend-test"
+            amount=2000000000, depth=17, label="extend-test"
         )
         stamp_id = purchase_result["batchID"]
 
@@ -92,12 +87,14 @@ def test_gateway_client_extend_stamp(gateway_client):
         # Verify response
         assert "batchID" in extend_result, "Extension response missing batchID"
         assert "message" in extend_result, "Extension response missing message"
-        assert extend_result["batchID"] == stamp_id, "Extension should return same stamp ID"
+        assert (
+            extend_result["batchID"] == stamp_id
+        ), "Extension should return same stamp ID"
         assert extend_result["message"] == "Postage stamp extended successfully"
 
     except Exception as e:
         # Accept 502 errors as they indicate gateway is working but backend Swarm node is not available
-        if hasattr(e, 'response') and e.response.status_code == 502:
+        if hasattr(e, "response") and e.response.status_code == 502:
             pytest.skip(f"Backend Swarm node not available (502): {e}")
         else:
             pytest.fail(f"Stamp extension failed: {e}")
@@ -138,7 +135,12 @@ def test_gateway_client_invalid_stamp_operations(gateway_client):
         pytest.fail("Expected error when extending non-existent stamp")
     except requests.RequestException as e:
         # This is expected - should get 404 or similar error
-        assert e.response.status_code in [400, 404, 500, 502], f"Unexpected status code: {e.response.status_code}"
+        assert e.response.status_code in [
+            400,
+            404,
+            500,
+            502,
+        ], f"Unexpected status code: {e.response.status_code}"
 
     # Test getting details of non-existent stamp
     try:
@@ -146,7 +148,12 @@ def test_gateway_client_invalid_stamp_operations(gateway_client):
         pytest.fail("Expected error when getting details of non-existent stamp")
     except requests.RequestException as e:
         # This is expected - should get 404 or similar error
-        assert e.response.status_code in [400, 404, 500, 502], f"Unexpected status code: {e.response.status_code}"
+        assert e.response.status_code in [
+            400,
+            404,
+            500,
+            502,
+        ], f"Unexpected status code: {e.response.status_code}"
 
 
 if __name__ == "__main__":

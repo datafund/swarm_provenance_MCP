@@ -326,8 +326,8 @@ class TestCodeChangeDetection:
         # Check that essential configuration is available
         essential_configs = [
             "swarm_gateway_url",
-            "default_stamp_amount",
-            "default_stamp_depth",
+            "default_stamp_duration_hours",
+            "default_stamp_size",
         ]
 
         for config_name in essential_configs:

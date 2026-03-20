@@ -37,8 +37,8 @@ async def tool_list():
         mock_settings.chain_enabled = True
         mock_settings.mcp_server_name = "test"
         mock_settings.mcp_server_version = "0.1.0"
-        mock_settings.default_stamp_amount = 2000000000
-        mock_settings.default_stamp_depth = 17
+        mock_settings.default_stamp_duration_hours = 25
+        mock_settings.default_stamp_size = "small"
         server = create_server()
         return await _get_tools_from_server(server)
 
@@ -146,7 +146,7 @@ class TestToolDefinitions:
             "purchase_stamp": [],  # All parameters have defaults
             "get_stamp_status": ["stamp_id"],
             "list_stamps": [],  # No parameters
-            "extend_stamp": ["stamp_id", "amount"],
+            "extend_stamp": ["stamp_id", "duration_hours"],
             "upload_data": ["data", "stamp_id"],
             "download_data": ["reference"],
             "check_stamp_health": ["stamp_id"],
@@ -274,8 +274,8 @@ class TestToolImplementationSync:
         purchase_method = getattr(client, "purchase_stamp")
         sig = inspect.signature(purchase_method)
 
-        # Should have amount, depth, and optional label parameters
-        expected_params = {"amount", "depth", "label"}
+        # Should have duration_hours, size, depth, and optional label parameters
+        expected_params = {"duration_hours", "size", "depth", "label"}
         actual_params = set(sig.parameters.keys()) - {"self"}
 
         assert (
@@ -284,10 +284,10 @@ class TestToolImplementationSync:
 
         # Check parameter types if type hints are available
         hints = get_type_hints(purchase_method)
-        if "amount" in hints:
-            assert hints["amount"] == int, "amount parameter should be int type"
-        if "depth" in hints:
-            assert hints["depth"] == int, "depth parameter should be int type"
+        if "duration_hours" in hints:
+            assert hints["duration_hours"] == int, "duration_hours parameter should be int type"
+        if "size" in hints:
+            assert hints["size"] == str, "size parameter should be str type"
 
     def test_method_documentation_exists(self):
         """Test that gateway client methods have proper docstrings."""
@@ -350,8 +350,8 @@ class TestToolFutureCompatibility:
         # Essential settings that tools depend on
         required_settings = [
             "swarm_gateway_url",
-            "default_stamp_amount",
-            "default_stamp_depth",
+            "default_stamp_duration_hours",
+            "default_stamp_size",
             "payment_mode",
             "mcp_server_name",
             "mcp_server_version",

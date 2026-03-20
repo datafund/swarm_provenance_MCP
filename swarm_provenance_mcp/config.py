@@ -17,16 +17,16 @@ class Settings(BaseSettings):
     )
 
     # Default stamp parameters
-    default_stamp_amount: int = Field(
-        default=2000000000,
-        env="DEFAULT_STAMP_AMOUNT",
-        description="Default amount for new postage stamps (in wei)",
+    default_stamp_duration_hours: int = Field(
+        default=25,
+        env="DEFAULT_STAMP_DURATION_HOURS",
+        description="Default duration in hours for new postage stamps (minimum 24)",
     )
 
-    default_stamp_depth: int = Field(
-        default=17,
-        env="DEFAULT_STAMP_DEPTH",
-        description="Default depth for new postage stamps",
+    default_stamp_size: str = Field(
+        default="small",
+        env="DEFAULT_STAMP_SIZE",
+        description="Default size preset for new postage stamps (small, medium, large)",
     )
 
     # MCP Server Configuration

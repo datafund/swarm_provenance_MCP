@@ -57,13 +57,18 @@ class SwarmGatewayClient:
             raise
 
     def purchase_stamp(
-        self, amount: int, depth: int, label: Optional[str] = None
+        self,
+        duration_hours: int,
+        size: str = "small",
+        depth: Optional[int] = None,
+        label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Purchase a new postage stamp.
 
         Args:
-            amount: Amount of the stamp in wei
-            depth: Depth of the stamp
+            duration_hours: Duration in hours (minimum 24)
+            size: Size preset ("small", "medium", "large")
+            depth: Optional explicit depth override (sent instead of size)
             label: Optional label for the stamp
 
         Returns:
@@ -73,7 +78,10 @@ class SwarmGatewayClient:
             RequestException: If the request fails
         """
         url = f"{self.base_url}/api/v1/stamps/"
-        payload = {"amount": amount, "depth": depth}
+        if depth is not None:
+            payload: Dict[str, Any] = {"duration_hours": duration_hours, "depth": depth}
+        else:
+            payload = {"duration_hours": duration_hours, "size": size}
         if label:
             payload["label"] = label
 
@@ -112,12 +120,12 @@ class SwarmGatewayClient:
         self._raise_with_detail(response)
         return response.json()
 
-    def extend_stamp(self, stamp_id: str, amount: int) -> Dict[str, Any]:
-        """Extend an existing stamp with additional funds.
+    def extend_stamp(self, stamp_id: str, duration_hours: int) -> Dict[str, Any]:
+        """Extend an existing stamp's TTL.
 
         Args:
             stamp_id: The batch ID of the stamp to extend
-            amount: Additional amount to add in wei
+            duration_hours: Additional duration in hours (minimum 24)
 
         Returns:
             Response containing batchID and message
@@ -126,7 +134,7 @@ class SwarmGatewayClient:
             RequestException: If the request fails
         """
         url = f"{self.base_url}/api/v1/stamps/{stamp_id}/extend"
-        payload = {"amount": amount}
+        payload = {"duration_hours": duration_hours}
 
         response = self.session.patch(url, json=payload, timeout=30)
         self._raise_with_detail(response)

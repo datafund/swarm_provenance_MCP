@@ -28,7 +28,8 @@ class TestMCPToolSchemaCompliance:
             "purchase_stamp": {
                 "type": "object",
                 "properties": {
-                    "amount": {"type": "integer"},
+                    "duration_hours": {"type": "integer"},
+                    "size": {"type": "string"},
                     "depth": {"type": "integer"},
                     "label": {"type": "string"},
                 },
@@ -169,10 +170,10 @@ class TestGatewayClientSchemaCompliance:
 
         # Expected signatures for critical methods
         expected_signatures = {
-            "purchase_stamp": ["amount", "depth", "label"],
+            "purchase_stamp": ["duration_hours", "size", "depth", "label"],
             "get_stamp_details": ["stamp_id"],
             "list_stamps": [],
-            "extend_stamp": ["stamp_id", "amount"],
+            "extend_stamp": ["stamp_id", "duration_hours"],
             "upload_data": ["data", "stamp_id", "content_type"],
             "download_data": ["reference"],
             "check_stamp_health": ["stamp_id"],

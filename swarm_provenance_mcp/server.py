@@ -127,7 +127,8 @@ KEY CONSTRAINTS:
 - Max upload size: 4KB (4096 bytes) per request
 - After purchase_stamp, the stamp may be instantly usable (pool) or take up to 2 minutes (fresh mint). Poll with check_stamp_health every 10-15 seconds until can_upload is true.
 - After extend_stamp, wait up to 2 minutes for the extension to propagate.
-- Stamp depth controls capacity: 17 (small, ~35KB), 20 (medium, ~500MB), 22 (large, ~6GB)
+- Stamp size controls capacity: small (~35KB), medium (~500MB), large (~6GB)
+- duration_hours controls TTL — minimum 24 hours
 - Stamps are rented storage — data expires when the stamp TTL runs out
 - A stamp can be reused for multiple uploads until capacity or TTL is exhausted
 
@@ -135,7 +136,7 @@ TOOL RELATIONSHIPS:
 - purchase_stamp → returns stamp_id → use with upload_data, check_stamp_health, get_stamp_status, extend_stamp
 - upload_data → returns reference hash → use with download_data
 - check_stamp_health gives detailed diagnostics; get_stamp_status gives raw stamp data
-- extend_stamp increases TTL (not capacity)
+- extend_stamp increases TTL via duration_hours (not capacity)
 
 ERRORS:
 - "Not usable" / "NOT_FOUND": stamp not yet propagated — poll check_stamp_health every 15s (up to 2 min)
@@ -236,21 +237,41 @@ def validate_and_clean_reference_hash(reference: str) -> str:
     return reference
 
 
-def validate_stamp_amount(amount: int) -> None:
-    """Validate stamp amount.
+def validate_stamp_duration_hours(duration_hours: int) -> None:
+    """Validate stamp duration in hours.
 
     Args:
-        amount: The amount to validate
+        duration_hours: The duration to validate
 
     Raises:
-        ValueError: If amount is invalid
+        ValueError: If duration is invalid
     """
-    if amount < 1000000:
-        raise ValueError(f"Stamp amount must be at least 1,000,000 wei, got: {amount}")
+    if duration_hours < 24:
+        raise ValueError(
+            f"Stamp duration must be at least 24 hours, got: {duration_hours}"
+        )
+
+
+VALID_STAMP_SIZES = ("small", "medium", "large")
+
+
+def validate_stamp_size(size: str) -> None:
+    """Validate stamp size preset.
+
+    Args:
+        size: The size to validate
+
+    Raises:
+        ValueError: If size is invalid
+    """
+    if size not in VALID_STAMP_SIZES:
+        raise ValueError(
+            f"Stamp size must be one of {', '.join(VALID_STAMP_SIZES)}, got: {size!r}"
+        )
 
 
 def validate_stamp_depth(depth: int) -> None:
-    """Validate stamp depth.
+    """Validate stamp depth (optional override).
 
     Args:
         depth: The depth to validate
@@ -259,9 +280,7 @@ def validate_stamp_depth(depth: int) -> None:
         ValueError: If depth is invalid
     """
     if not (17 <= depth <= 22):
-        raise ValueError(
-            f"Stamp depth must be 17 (small), 20 (medium), or 22 (large), got: {depth}"
-        )
+        raise ValueError(f"Stamp depth must be between 17 and 22, got: {depth}")
 
 
 def validate_data_size(data: str) -> None:
@@ -467,16 +486,21 @@ def create_server() -> Server:
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "amount": {
+                        "duration_hours": {
                             "type": "integer",
-                            "description": f"Amount in wei — controls TTL (time-to-live). Higher amount = longer before the stamp expires (default: {settings.default_stamp_amount})",
-                            "default": settings.default_stamp_amount,
-                            "minimum": 1000000,
+                            "description": f"Duration in hours — controls TTL (time-to-live). Minimum 24 hours (default: {settings.default_stamp_duration_hours})",
+                            "default": settings.default_stamp_duration_hours,
+                            "minimum": 24,
+                        },
+                        "size": {
+                            "type": "string",
+                            "enum": ["small", "medium", "large"],
+                            "description": f"Size preset — controls storage capacity. small (~35KB), medium (~500MB), large (~6GB). Capacities are approximate (default: {settings.default_stamp_size})",
+                            "default": settings.default_stamp_size,
                         },
                         "depth": {
                             "type": "integer",
-                            "description": f"Depth — controls storage capacity. Three practical sizes: 17 (small, ~35KB), 20 (medium, ~500MB), 22 (large, ~6GB). Capacities are approximate effective volumes with erasure coding. Higher depth costs more (default: {settings.default_stamp_depth})",
-                            "default": settings.default_stamp_depth,
+                            "description": "Advanced: explicit depth override (17–22). When provided, sent instead of size. Only use if you need a specific depth value.",
                             "minimum": 17,
                             "maximum": 22,
                         },
@@ -511,7 +535,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="extend_stamp",
-                description="Extend an existing stamp by adding funds to increase its TTL (time-to-live). This extends the expiration date but does NOT increase storage capacity (depth). Changes take up to 2 minutes to propagate through the blockchain.",
+                description="Extend an existing stamp's TTL (time-to-live) by adding duration. This extends the expiration date but does NOT increase storage capacity. Changes take up to 2 minutes to propagate through the blockchain.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -520,13 +544,13 @@ def create_server() -> Server:
                             "description": "The 64-character hexadecimal batch ID of the stamp to extend (without 0x prefix). Example: a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789a",
                             "pattern": "^[a-fA-F0-9]{64}$",
                         },
-                        "amount": {
+                        "duration_hours": {
                             "type": "integer",
-                            "description": "Additional amount to add to the stamp in wei. This will extend the stamp's TTL proportionally.",
-                            "minimum": 1000000,
+                            "description": "Additional duration in hours to add to the stamp's TTL. Minimum 24 hours.",
+                            "minimum": 24,
                         },
                     },
-                    "required": ["stamp_id", "amount"],
+                    "required": ["stamp_id", "duration_hours"],
                 },
             ),
             Tool(
@@ -921,7 +945,7 @@ def create_server() -> Server:
                                 f"Content-Type: {content_type}\n\n"
                                 f"Follow these steps:\n"
                                 f"1. Call health_check to verify the gateway is reachable\n"
-                                f"2. Call purchase_stamp (depth 17 for small data) to get your own stamp, "
+                                f"2. Call purchase_stamp (size 'small' for small data) to get your own stamp, "
                                 f"or use an owned stamp from list_stamps.\n"
                                 f"3. Poll check_stamp_health every 15 seconds until ready (up to 2 minutes)\n"
                                 f"4. Call upload_data with the data and your stamp_id\n"
@@ -992,7 +1016,7 @@ def create_server() -> Server:
                 f"Steps:\n"
                 f"1. Call health_check — verify gateway and chain connectivity\n"
                 f"2. Call chain_balance — confirm wallet has ETH for gas\n"
-                f"3. Call purchase_stamp (depth 17 for small data) to get a stamp, "
+                f"3. Call purchase_stamp (size 'small' for small data) to get a stamp, "
                 f"or use an owned stamp from list_stamps.\n"
                 f"4. Poll check_stamp_health every 15 seconds until can_upload is true (up to 2 minutes)\n"
                 f"5. Call upload_data with the data and your stamp_id — save the reference hash\n"
@@ -1053,13 +1077,19 @@ def create_server() -> Server:
 async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle stamp purchase requests."""
     try:
-        amount = arguments.get("amount", settings.default_stamp_amount)
-        depth = arguments.get("depth", settings.default_stamp_depth)
+        duration_hours = arguments.get(
+            "duration_hours", settings.default_stamp_duration_hours
+        )
+        size = arguments.get("size", settings.default_stamp_size)
+        depth = arguments.get("depth")
         label = arguments.get("label")
 
         # Validate inputs
-        validate_stamp_amount(amount)
-        validate_stamp_depth(depth)
+        validate_stamp_duration_hours(duration_hours)
+        if depth is not None:
+            validate_stamp_depth(depth)
+        else:
+            validate_stamp_size(size)
 
         if label and len(label) > 100:
             return CallToolResult(
@@ -1076,7 +1106,9 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
                 isError=True,
             )
 
-        result = gateway_client.purchase_stamp(amount, depth, label)
+        result = gateway_client.purchase_stamp(
+            duration_hours, size=size, depth=depth, label=label
+        )
 
         # Check if purchase was actually successful
         batch_id = result.get("batchID")
@@ -1098,8 +1130,11 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         response_text = f"🎉 Stamp purchased successfully!\n\n"
         response_text += f"📋 Your Stamp Details:\n"
         response_text += f"   Batch ID: `{batch_id}`\n"
-        response_text += f"   Amount: {amount:,} wei\n"
-        response_text += f"   Depth: {depth}\n"
+        response_text += f"   Duration: {duration_hours} hours\n"
+        if depth is not None:
+            response_text += f"   Depth: {depth}\n"
+        else:
+            response_text += f"   Size: {size}\n"
         if label:
             response_text += f"   Label: {label}\n"
         response_text += f"\n✅ Stamp ID: `{batch_id}`\n"
@@ -1348,24 +1383,24 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle stamp extension requests."""
     try:
         stamp_id = arguments.get("stamp_id")
-        amount = arguments.get("amount")
+        duration_hours = arguments.get("duration_hours")
 
         if not stamp_id:
             raise ValueError("Stamp ID is required")
-        if not amount:
-            raise ValueError("Amount is required")
+        if not duration_hours:
+            raise ValueError("duration_hours is required")
 
         # Validate inputs
         clean_stamp_id = validate_and_clean_stamp_id(stamp_id)
-        validate_stamp_amount(amount)
+        validate_stamp_duration_hours(duration_hours)
 
-        result = gateway_client.extend_stamp(clean_stamp_id, amount)
+        result = gateway_client.extend_stamp(clean_stamp_id, duration_hours)
 
         response_text = f"✅ Stamp extended successfully!\n\n"
         response_text += f"📋 Extension Details:\n"
         batch_id = result.get("batchID", "N/A")
         response_text += f"   Batch ID: `{batch_id}`\n"
-        response_text += f"   Additional Amount: {amount:,} wei\n"
+        response_text += f"   Additional Duration: {duration_hours} hours\n"
         response_text += f"   Status: {result.get('message', 'Extended')}\n\n"
         response_text += f"⏱️  Important: Extension takes up to 2 minutes to propagate through the blockchain.\n"
         response_text += f"🔍 Check stamp status again in about 2 minutes to see the new expiration time."

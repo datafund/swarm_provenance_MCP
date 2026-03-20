@@ -179,11 +179,11 @@ class TestToolExecution:
         result_with_params = await call_tool_directly(
             server,
             "purchase_stamp",
-            {"amount": 5000000000, "depth": 18, "label": "test-stamp"},
+            {"duration_hours": 48, "size": "medium", "label": "test-stamp"},
         )
         assert not result_with_params.isError
         mock_gateway_client.purchase_stamp.assert_called_once_with(
-            5000000000, 18, "test-stamp"
+            48, size="medium", depth=None, label="test-stamp"
         )
 
     async def test_get_stamp_status_tool(self, server, mock_gateway_client):
@@ -218,13 +218,13 @@ class TestToolExecution:
     async def test_extend_stamp_tool(self, server, mock_gateway_client):
         """Test extend_stamp tool execution."""
         result = await call_tool_directly(
-            server, "extend_stamp", {"stamp_id": TEST_STAMP_ID, "amount": 2000000000}
+            server, "extend_stamp", {"stamp_id": TEST_STAMP_ID, "duration_hours": 48}
         )
 
         assert isinstance(result, CallToolResult)
         assert not result.isError
         mock_gateway_client.extend_stamp.assert_called_once_with(
-            TEST_STAMP_ID, 2000000000
+            TEST_STAMP_ID, 48
         )
 
     async def test_upload_data_tool(self, server, mock_gateway_client):
@@ -383,7 +383,7 @@ class TestToolExecution:
             ("purchase_stamp", {}),
             ("get_stamp_status", {"stamp_id": TEST_STAMP_ID}),
             ("list_stamps", {}),
-            ("extend_stamp", {"stamp_id": TEST_STAMP_ID, "amount": 2000000000}),
+            ("extend_stamp", {"stamp_id": TEST_STAMP_ID, "duration_hours": 48}),
             ("upload_data", {"data": "test data", "stamp_id": TEST_STAMP_ID}),
             ("download_data", {"reference": TEST_REFERENCE}),
             ("check_stamp_health", {"stamp_id": TEST_STAMP_ID}),
@@ -481,7 +481,7 @@ class TestResponseHints:
             ("purchase_stamp", {}),
             ("get_stamp_status", {"stamp_id": TEST_STAMP_ID}),
             ("list_stamps", {}),
-            ("extend_stamp", {"stamp_id": TEST_STAMP_ID, "amount": 2000000000}),
+            ("extend_stamp", {"stamp_id": TEST_STAMP_ID, "duration_hours": 48}),
             ("upload_data", {"data": "test", "stamp_id": TEST_STAMP_ID}),
             ("download_data", {"reference": TEST_REFERENCE}),
             ("check_stamp_health", {"stamp_id": TEST_STAMP_ID}),
@@ -1164,9 +1164,9 @@ class TestToolParameterValidation:
     async def test_parameter_type_validation(self, server):
         """Test that tools validate parameter types correctly."""
         with patch("swarm_provenance_mcp.server.gateway_client"):
-            # Test invalid amount type for purchase_stamp
+            # Test invalid duration_hours type for purchase_stamp
             result = await call_tool_directly(
-                server, "purchase_stamp", {"amount": "not_a_number", "depth": 17}
+                server, "purchase_stamp", {"duration_hours": "not_a_number"}
             )
 
             # Should handle type conversion or return error
@@ -1175,14 +1175,77 @@ class TestToolParameterValidation:
     async def test_parameter_range_validation(self, server):
         """Test parameter range validation where applicable."""
         with patch("swarm_provenance_mcp.server.gateway_client"):
-            # Test negative amount (should be handled gracefully)
+            # Test negative duration_hours (should be handled gracefully)
             result = await call_tool_directly(
-                server, "purchase_stamp", {"amount": -1000, "depth": 17}
+                server, "purchase_stamp", {"duration_hours": -1}
             )
 
             # The tool should either handle this gracefully or return a meaningful error
             assert isinstance(result, CallToolResult)
             assert len(result.content) > 0
+
+    async def test_invalid_size_validation(self, server):
+        """Test that invalid size preset is rejected."""
+        with patch("swarm_provenance_mcp.server.gateway_client"):
+            result = await call_tool_directly(
+                server, "purchase_stamp", {"size": "huge"}
+            )
+            assert result.isError, "Invalid size should produce an error"
+            error_text = result.content[0].text.lower()
+            assert "size" in error_text
+
+    async def test_duration_below_minimum(self, server):
+        """Test that duration below 24 hours is rejected."""
+        with patch("swarm_provenance_mcp.server.gateway_client"):
+            result = await call_tool_directly(
+                server, "purchase_stamp", {"duration_hours": 12}
+            )
+            assert result.isError, "Duration < 24 should produce an error"
+            error_text = result.content[0].text.lower()
+            assert "24" in error_text
+
+    async def test_extend_duration_below_minimum(self, server):
+        """Test that extend duration below 24 hours is rejected."""
+        with patch("swarm_provenance_mcp.server.gateway_client"):
+            result = await call_tool_directly(
+                server,
+                "extend_stamp",
+                {"stamp_id": TEST_STAMP_ID, "duration_hours": 12},
+            )
+            assert result.isError, "Extend duration < 24 should produce an error"
+            error_text = result.content[0].text.lower()
+            assert "24" in error_text
+
+    async def test_purchase_with_size_presets(self, server):
+        """Test purchase with each size preset."""
+        for size in ("small", "medium", "large"):
+            with patch("swarm_provenance_mcp.server.gateway_client") as mock_gw:
+                mock_gw.purchase_stamp.return_value = {
+                    "batchID": "a" * 64,
+                    "message": "ok",
+                }
+                result = await call_tool_directly(
+                    server, "purchase_stamp", {"duration_hours": 25, "size": size}
+                )
+                assert not result.isError, f"Size {size} should succeed"
+                assert "Stamp purchased" in result.content[0].text
+                assert f"Size: {size}" in result.content[0].text
+
+    async def test_purchase_with_depth_override(self, server):
+        """Test purchase with explicit depth override sends depth instead of size."""
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_gw:
+            mock_gw.purchase_stamp.return_value = {
+                "batchID": "b" * 64,
+                "message": "ok",
+            }
+            result = await call_tool_directly(
+                server, "purchase_stamp", {"duration_hours": 25, "depth": 20}
+            )
+            assert not result.isError
+            mock_gw.purchase_stamp.assert_called_once_with(
+                25, size="small", depth=20, label=None
+            )
+            assert "Depth: 20" in result.content[0].text
 
     async def test_empty_string_parameters(self, server):
         """Test handling of empty string parameters."""
@@ -1363,8 +1426,8 @@ class TestChainBalance:
             mock_settings.chain_enabled = True
             mock_settings.mcp_server_name = "test"
             mock_settings.mcp_server_version = "0.1.0"
-            mock_settings.default_stamp_amount = 2000000000
-            mock_settings.default_stamp_depth = 17
+            mock_settings.default_stamp_duration_hours = 25
+            mock_settings.default_stamp_size = "small"
 
             test_server = create_server()
             # Find the list_tools handler
@@ -2163,8 +2226,8 @@ class TestAnchorHash:
             mock_settings.chain_enabled = True
             mock_settings.mcp_server_name = "test"
             mock_settings.mcp_server_version = "0.1.0"
-            mock_settings.default_stamp_amount = 2000000000
-            mock_settings.default_stamp_depth = 17
+            mock_settings.default_stamp_duration_hours = 25
+            mock_settings.default_stamp_size = "small"
 
             test_server = create_server()
             handler = None
@@ -2477,8 +2540,8 @@ class TestVerifyHash:
             mock_settings.chain_enabled = True
             mock_settings.mcp_server_name = "test"
             mock_settings.mcp_server_version = "0.1.0"
-            mock_settings.default_stamp_amount = 2000000000
-            mock_settings.default_stamp_depth = 17
+            mock_settings.default_stamp_duration_hours = 25
+            mock_settings.default_stamp_size = "small"
 
             test_server = create_server()
             handler = None
@@ -2920,8 +2983,8 @@ class TestGetProvenance:
             mock_settings.chain_enabled = True
             mock_settings.mcp_server_name = "test"
             mock_settings.mcp_server_version = "0.1.0"
-            mock_settings.default_stamp_amount = 2000000000
-            mock_settings.default_stamp_depth = 17
+            mock_settings.default_stamp_duration_hours = 25
+            mock_settings.default_stamp_size = "small"
 
             test_server = create_server()
             handler = None
@@ -3474,8 +3537,8 @@ class TestRecordTransform:
             mock_settings.chain_enabled = True
             mock_settings.mcp_server_name = "test"
             mock_settings.mcp_server_version = "0.1.0"
-            mock_settings.default_stamp_amount = 2000000000
-            mock_settings.default_stamp_depth = 17
+            mock_settings.default_stamp_duration_hours = 25
+            mock_settings.default_stamp_size = "small"
 
             test_server = create_server()
             handler = None
@@ -4032,8 +4095,8 @@ class TestGetProvenanceChain:
             mock_settings.chain_enabled = True
             mock_settings.mcp_server_name = "test"
             mock_settings.mcp_server_version = "0.1.0"
-            mock_settings.default_stamp_amount = 2000000000
-            mock_settings.default_stamp_depth = 17
+            mock_settings.default_stamp_duration_hours = 25
+            mock_settings.default_stamp_size = "small"
 
             test_server = create_server()
             handler = None

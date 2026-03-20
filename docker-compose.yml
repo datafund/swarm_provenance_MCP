@@ -8,8 +8,8 @@ services:
     stdin_open: true
     environment:
       - SWARM_GATEWAY_URL=${SWARM_GATEWAY_URL:-https://provenance-gateway.datafund.io}
-      - DEFAULT_STAMP_AMOUNT=${DEFAULT_STAMP_AMOUNT:-2000000000}
-      - DEFAULT_STAMP_DEPTH=${DEFAULT_STAMP_DEPTH:-17}
+      - DEFAULT_STAMP_DURATION_HOURS=${DEFAULT_STAMP_DURATION_HOURS:-25}
+      - DEFAULT_STAMP_SIZE=${DEFAULT_STAMP_SIZE:-small}
       - PAYMENT_MODE=${PAYMENT_MODE:-free}
     env_file:
       - path: .env

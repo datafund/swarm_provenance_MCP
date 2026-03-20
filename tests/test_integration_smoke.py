@@ -202,8 +202,8 @@ class TestConfigurationStability:
         """Test that all required configuration settings exist."""
         required_settings = [
             "swarm_gateway_url",
-            "default_stamp_amount",
-            "default_stamp_depth",
+            "default_stamp_duration_hours",
+            "default_stamp_size",
             "payment_mode",
             "mcp_server_name",
             "mcp_server_version",
@@ -218,11 +218,13 @@ class TestConfigurationStability:
     def test_default_values_reasonable(self):
         """Test that default configuration values are reasonable."""
         assert (
-            settings.default_stamp_amount > 0
-        ), "Default stamp amount should be positive"
-        assert (
-            settings.default_stamp_depth > 0
-        ), "Default stamp depth should be positive"
+            settings.default_stamp_duration_hours > 0
+        ), "Default stamp duration_hours should be positive"
+        assert settings.default_stamp_size in (
+            "small",
+            "medium",
+            "large",
+        ), "Default stamp size should be a valid preset"
         assert settings.swarm_gateway_url.startswith(
             "http"
         ), "Gateway URL should be HTTP(S)"
@@ -242,8 +244,8 @@ class TestErrorHandlingStability:
         invalid_args = [
             {},  # Missing required args for some tools
             {"invalid_field": "value"},
-            {"amount": "not_a_number"},
-            {"amount": -1},
+            {"duration_hours": "not_a_number"},
+            {"duration_hours": -1},
         ]
 
         for args in invalid_args:

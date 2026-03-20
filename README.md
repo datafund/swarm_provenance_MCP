@@ -29,10 +29,10 @@ This MCP server is specifically designed for provenance data use cases, leveragi
 
 ## Features
 
-- **Purchase Stamps**: Create new postage stamps with configurable amount and depth
+- **Purchase Stamps**: Create new postage stamps with configurable duration and size
 - **Stamp Status**: Get detailed information about specific stamps
 - **List Stamps**: View all available postage stamps
-- **Extend Stamps**: Add additional funds to existing stamps
+- **Extend Stamps**: Extend the duration of existing stamps
 - **Data Upload**: Upload data to Swarm network with stamp validation
 - **Data Download**: Download data from Swarm network by reference
 - **Provenance Storage**: Store data with provenance metadata for immutable, verifiable records
@@ -95,8 +95,8 @@ docker run -i --rm swarm-provenance-mcp
 ```bash
 docker run -i --rm \
   -e SWARM_GATEWAY_URL=https://provenance-gateway.datafund.io \
-  -e DEFAULT_STAMP_AMOUNT=2000000000 \
-  -e DEFAULT_STAMP_DEPTH=17 \
+  -e DEFAULT_STAMP_DURATION_HOURS=25 \
+  -e DEFAULT_STAMP_SIZE=small \
   swarm-provenance-mcp
 ```
 
@@ -109,8 +109,8 @@ docker compose run --rm swarm-provenance-mcp
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SWARM_GATEWAY_URL` | Gateway endpoint URL | `https://provenance-gateway.datafund.io` |
-| `DEFAULT_STAMP_AMOUNT` | Default stamp amount in wei | `2000000000` |
-| `DEFAULT_STAMP_DEPTH` | Default stamp depth: 17 (small), 20 (medium), 22 (large) | `17` |
+| `DEFAULT_STAMP_DURATION_HOURS` | Default stamp duration in hours (min 24) | `25` |
+| `DEFAULT_STAMP_SIZE` | Default stamp size: `small`, `medium`, or `large` | `small` |
 | `PAYMENT_MODE` | Gateway payment tier (`free` = 3 write req/min) | `free` |
 
 ## Configuration
@@ -118,8 +118,8 @@ docker compose run --rm swarm-provenance-mcp
 Environment variables (set in `.env` file):
 
 - `SWARM_GATEWAY_URL`: URL of the swarm_connect FastAPI gateway (default: `https://provenance-gateway.datafund.io`)
-- `DEFAULT_STAMP_AMOUNT`: Default amount for new stamps in wei (default: `2000000000`)
-- `DEFAULT_STAMP_DEPTH`: Default depth for new stamps (default: `17`)
+- `DEFAULT_STAMP_DURATION_HOURS`: Default stamp duration in hours, minimum 24 (default: `25`)
+- `DEFAULT_STAMP_SIZE`: Default stamp size — `small`, `medium`, or `large` (default: `small`)
 - `PAYMENT_MODE`: Gateway payment tier (default: `free` — rate limited to 3 write requests/minute)
 
 #### Chain Anchoring (Optional)
@@ -169,8 +169,9 @@ swarm-provenance-mcp
 Purchase a new postage stamp.
 
 **Parameters:**
-- `amount` (int): Amount in wei (optional, uses default if not provided)
-- `depth` (int): Stamp depth (optional, uses default if not provided)
+- `duration_hours` (int): Duration in hours, minimum 24 (optional, uses default if not provided)
+- `size` (string): Stamp size — `"small"`, `"medium"`, or `"large"` (optional, uses default if not provided)
+- `depth` (int): Explicit depth override, bypasses size (optional, advanced use only)
 - `label` (string): Optional label for the stamp
 
 **Example:**
@@ -178,8 +179,8 @@ Purchase a new postage stamp.
 {
   "name": "purchase_stamp",
   "arguments": {
-    "amount": 1000000000,
-    "depth": 17,
+    "duration_hours": 48,
+    "size": "small",
     "label": "my-test-stamp"
   }
 }
@@ -215,11 +216,11 @@ List all available postage stamps.
 ```
 
 #### `extend_stamp`
-Extend an existing stamp with additional funds.
+Extend an existing stamp with additional duration.
 
 **Parameters:**
 - `stamp_id` (string): The batch ID of the stamp to extend
-- `amount` (int): Additional amount to add in wei
+- `duration_hours` (int): Additional duration in hours, minimum 24
 
 **Example:**
 ```json
@@ -227,7 +228,7 @@ Extend an existing stamp with additional funds.
   "name": "extend_stamp",
   "arguments": {
     "stamp_id": "000de42079daebd58347bb38ce05bdc477701d93651d3bba318a9aee3fbd786a",
-    "amount": 500000000
+    "duration_hours": 48
   }
 }
 ```
@@ -551,7 +552,7 @@ Configure the gateway URL and other settings via environment variables:
 ```bash
 docker run -i --rm \
   -e SWARM_GATEWAY_URL=https://provenance-gateway.datafund.io \
-  -e DEFAULT_STAMP_DEPTH=20 \
+  -e DEFAULT_STAMP_SIZE=medium \
   swarm-provenance-mcp
 ```
 

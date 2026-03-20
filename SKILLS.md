@@ -223,7 +223,7 @@ Inspect provenance records without a wallet.
 | Term | Definition |
 |------|-----------|
 | **Swarm hash** | 64-character hex content address returned by `upload_data` |
-| **Stamp** | Prepaid storage ticket (BZZ) — controls capacity (depth) and duration (TTL) |
+| **Stamp** | Prepaid storage ticket (BZZ) — configured by duration (hours) and size (small/medium/large) |
 | **Anchor** | Registering a Swarm hash on the blockchain via `anchor_hash` |
 | **Transformation** | On-chain link between an original hash and a derived hash, recorded via `record_transform` |
 | **Merge transformation** | On-chain N-to-1 link combining multiple source hashes into one, recorded via `record_merge_transform` |

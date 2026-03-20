@@ -105,7 +105,7 @@ On-chain provenance module. Dependencies (web3, eth-account) included in default
 - `get_stamp_status` - Retrieve detailed stamp information (includes utilization + propagation data)
 - `list_stamps` - List local stamps with access mode (owned/shared) and propagation status
   Stamps have `accessMode`: `"owned"` (dedicated, yours) or `"shared"` (public, any gateway user). Use owned stamps for production.
-- `extend_stamp` - Add funds to existing stamps
+- `extend_stamp` - Extend stamp duration
 - `upload_data` - Upload data to Swarm (max 4KB)
 - `download_data` - Download data from Swarm by reference hash
 - `check_stamp_health` - Diagnose stamp upload readiness with errors/warnings and propagation timing
@@ -148,8 +148,8 @@ Blockchain dependencies (web3, eth-account) are included in the default install.
 
 ### Environment Variables
 - `SWARM_GATEWAY_URL`: Gateway endpoint (default: `https://provenance-gateway.datafund.io`)
-- `DEFAULT_STAMP_AMOUNT`: Default stamp amount in wei (default: `2000000000`)
-- `DEFAULT_STAMP_DEPTH`: Default stamp depth (default: `17`)
+- `DEFAULT_STAMP_DURATION_HOURS`: Default stamp duration in hours, minimum 24 (default: `25`)
+- `DEFAULT_STAMP_SIZE`: Default stamp size — `small`, `medium`, or `large` (default: `small`)
 - `PAYMENT_MODE`: Gateway payment tier — `free` for rate-limited free tier (default: `free`)
 - `MCP_SERVER_NAME`: Server identification (default: `swarm-provenance-mcp`)
 - `MCP_SERVER_VERSION`: Server version (default: `0.1.0`)

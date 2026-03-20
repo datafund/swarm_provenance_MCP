@@ -29,13 +29,13 @@ class TestSwarmGatewayClient:
             m.post(f"{self.base_url}/api/v1/stamps/", json=expected_response)
 
             result = self.client.purchase_stamp(
-                amount=2000000000, depth=17, label="test-stamp"
+                duration_hours=25, size="small", label="test-stamp"
             )
 
             assert result == expected_response
             assert m.last_request.json() == {
-                "amount": 2000000000,
-                "depth": 17,
+                "duration_hours": 25,
+                "size": "small",
                 "label": "test-stamp",
             }
 
@@ -48,10 +48,10 @@ class TestSwarmGatewayClient:
             }
             m.post(f"{self.base_url}/api/v1/stamps/", json=expected_response)
 
-            result = self.client.purchase_stamp(amount=500000000, depth=16)
+            result = self.client.purchase_stamp(duration_hours=48)
 
             assert result == expected_response
-            assert m.last_request.json() == {"amount": 500000000, "depth": 16}
+            assert m.last_request.json() == {"duration_hours": 48, "size": "small"}
 
     def test_get_stamp_details_success(self):
         """Test successful stamp details retrieval."""
@@ -100,10 +100,10 @@ class TestSwarmGatewayClient:
                 json=expected_response,
             )
 
-            result = self.client.extend_stamp(stamp_id, 500000000)
+            result = self.client.extend_stamp(stamp_id, 48)
 
             assert result == expected_response
-            assert m.last_request.json() == {"amount": 500000000}
+            assert m.last_request.json() == {"duration_hours": 48}
 
     def test_check_stamp_health_success(self):
         """Test successful stamp health check."""

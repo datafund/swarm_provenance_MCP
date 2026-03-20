@@ -11,8 +11,8 @@ LABEL org.opencontainers.image.title="Swarm Provenance MCP" \
 
 ENV PYTHONUNBUFFERED=1
 ENV SWARM_GATEWAY_URL=https://provenance-gateway.datafund.io
-ENV DEFAULT_STAMP_AMOUNT=2000000000
-ENV DEFAULT_STAMP_DEPTH=17
+ENV DEFAULT_STAMP_DURATION_HOURS=25
+ENV DEFAULT_STAMP_SIZE=small
 ENV PAYMENT_MODE=free
 
 RUN groupadd --gid 1000 mcp \

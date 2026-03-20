@@ -153,8 +153,8 @@ class TestEndToEndWorkflow:
         print("\n📦 Step 1: Purchasing stamp...")
         try:
             purchase_result = workflow_tester.client.purchase_stamp(
-                amount=settings.default_stamp_amount,
-                depth=settings.default_stamp_depth,
+                duration_hours=settings.default_stamp_duration_hours,
+                size=settings.default_stamp_size,
                 label="e2e-test-stamp",
             )
 
@@ -231,17 +231,17 @@ class TestEndToEndWorkflow:
 
         # Step 6: Extend the stamp
         print(f"\n🔄 Step 6: Extending stamp...")
-        extension_amount = settings.default_stamp_amount // 2  # Add 50% more
+        extension_hours = 24  # Add 24 more hours
 
         try:
             extend_result = workflow_tester.client.extend_stamp(
-                stamp_id, extension_amount
+                stamp_id, extension_hours
             )
 
             assert (
                 extend_result.get("batchID") == stamp_id
             ), "Extension returned wrong stamp ID"
-            print(f"✅ Stamp extension requested (added {extension_amount:,} wei)")
+            print(f"✅ Stamp extension requested (added {extension_hours}h)")
 
         except Exception as e:
             pytest.skip(f"Could not extend stamp (gateway/network issue): {e}")
@@ -323,8 +323,8 @@ class TestEndToEndWorkflow:
         # Purchase stamp
         try:
             purchase_result = workflow_tester.client.purchase_stamp(
-                amount=settings.default_stamp_amount,
-                depth=settings.default_stamp_depth,
+                duration_hours=settings.default_stamp_duration_hours,
+                size=settings.default_stamp_size,
                 label="timing-test",
             )
 
@@ -380,7 +380,7 @@ if __name__ == "__main__":
         print("\n🚀 Running simplified workflow test...")
 
         # Purchase
-        purchase_result = tester.client.purchase_stamp(2000000000, 17, "manual-test")
+        purchase_result = tester.client.purchase_stamp(duration_hours=25, size="small", label="manual-test")
         stamp_id = purchase_result["batchID"]
         print(f"✅ Purchased stamp: {stamp_id[:12]}...")
 

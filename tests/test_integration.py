@@ -42,7 +42,7 @@ def test_gateway_client_purchase_stamp(gateway_client):
     """Test actual stamp purchase through gateway client."""
     try:
         result = gateway_client.purchase_stamp(
-            amount=2000000000, depth=17, label="integration-test"
+            duration_hours=25, size="small", label="integration-test"
         )
 
         # Verify response structure
@@ -77,12 +77,12 @@ def test_gateway_client_extend_stamp(gateway_client):
     # First purchase a stamp to extend
     try:
         purchase_result = gateway_client.purchase_stamp(
-            amount=2000000000, depth=17, label="extend-test"
+            duration_hours=25, size="small", label="extend-test"
         )
         stamp_id = purchase_result["batchID"]
 
         # Now extend it
-        extend_result = gateway_client.extend_stamp(stamp_id, 2000000000)
+        extend_result = gateway_client.extend_stamp(stamp_id, 24)
 
         # Verify response
         assert "batchID" in extend_result, "Extension response missing batchID"
@@ -111,7 +111,7 @@ def test_gateway_client_connection_failure():
 
     try:
         # This should raise an exception
-        bad_client.purchase_stamp(2000000000, 17)
+        bad_client.purchase_stamp(duration_hours=25, size="small")
         pytest.fail("Expected connection error when gateway is not available")
 
     except requests.RequestException:
@@ -131,7 +131,7 @@ def test_gateway_client_invalid_stamp_operations(gateway_client):
 
     # Test extending non-existent stamp
     try:
-        gateway_client.extend_stamp(fake_stamp_id, 2000000000)
+        gateway_client.extend_stamp(fake_stamp_id, 24)
         pytest.fail("Expected error when extending non-existent stamp")
     except requests.RequestException as e:
         # This is expected - should get 404 or similar error
@@ -164,7 +164,7 @@ if __name__ == "__main__":
         # Test basic stamp purchase
         client = SwarmGatewayClient(GATEWAY_URL)
         try:
-            result = client.purchase_stamp(2000000000, 17, "quick-test")
+            result = client.purchase_stamp(duration_hours=25, size="small", label="quick-test")
             print(f"✅ Stamp purchase successful: {result['batchID'][:12]}...")
         except Exception as e:
             print(f"❌ Stamp purchase failed: {e}")

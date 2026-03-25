@@ -79,6 +79,8 @@ cp .env.example .env
 
 Run the MCP server in a container with no local dependencies.
 
+> **Registry**: The pre-built image is published to **GitHub Container Registry** only — always use the full `ghcr.io/` prefix. It is **not** available on Docker Hub.
+
 **Quick start** (pre-built image):
 ```bash
 docker pull ghcr.io/datafund/swarm-provenance-mcp:latest

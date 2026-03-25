@@ -20,12 +20,18 @@ To submit this server to the Docker MCP Registry:
 
 ## Prerequisites
 
-The Docker image must be published to GHCR first:
+The Docker image must be published to GHCR first. The image is **automatically rebuilt** on every push to `main` and on version tags:
+
+| Trigger | Tags produced |
+|---------|---------------|
+| Push to `main` | `latest`, `sha-<7char>` |
+| Tag `v1.2.3` | `1.2.3`, `1.2`, `latest`, `sha-<7char>` |
 
 ```bash
-# Tag a release to trigger the publish workflow
+# Force a publish via version tag
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The image will be available at `ghcr.io/datafund/swarm-provenance-mcp:latest`.
+The image is available at `ghcr.io/datafund/swarm-provenance-mcp:latest`.
+Pin a specific build with `ghcr.io/datafund/swarm-provenance-mcp:sha-<commit>`.

@@ -147,11 +147,13 @@ When chain_enabled=true, on-chain provenance tools become available (blockchain 
 These register Swarm hashes in the DataProvenance smart contract on Base Sepolia, creating an immutable on-chain record.
 - chain_health — test RPC connectivity (no wallet needed)
 - chain_balance — check wallet ETH balance with funding guidance when low
-- anchor_hash — register a Swarm hash on-chain (costs gas, requires funded wallet)
+- anchor_hash — register a Swarm hash on-chain, optionally with a storage_ref for bidirectional lookup (costs gas, requires funded wallet)
 - verify_hash — check if a Swarm hash is registered on-chain (read-only, no gas)
-- get_provenance — retrieve full provenance record: owner, timestamp, data type, status, transformations, accessors (read-only)
+- get_provenance — retrieve full provenance record: owner, timestamp, data type, status, storage ref, transformations, accessors (read-only)
 - record_transform — record data transformation linking original to new hash, creating lineage (costs gas; optionally restricts original)
 - get_provenance_chain — follow transformation lineage for a hash, building a tree of how data evolved (read-only)
+- set_storage_ref — attach a Swarm storage reference to an existing on-chain record (set-once, owner-only, costs gas)
+- lookup_by_storage_ref — reverse lookup: find the provenance record by its Swarm storage reference (read-only, no gas)
 The health_check tool reports chain status alongside gateway status.
 
 PROVENANCE RULES (critical):
@@ -167,8 +169,11 @@ PROVENANCE RULES (critical):
 CHAIN WORKFLOW — store with on-chain provenance:
 health_check → purchase_stamp → check_stamp_health → upload_data → anchor_hash → verify_hash
 
+CHAIN WORKFLOW — store with storage reference linking:
+health_check → purchase_stamp → upload_data → anchor_hash (with storage_ref = Swarm reference) → lookup_by_storage_ref
+
 CHAIN WORKFLOW — record a transformation:
-upload_data (transformed data) → record_transform (original, new, description) → get_provenance_chain
+upload_data (transformed data) → record_transform (original, new, description) → upload_data (to Swarm) → set_storage_ref (link Swarm ref to new hash) → get_provenance_chain
 
 COMPANION SERVERS:
 - swarm_connect gateway (required) — the FastAPI gateway this server talks to, handles Bee node communication
@@ -321,6 +326,8 @@ ALL_TOOL_NAMES = [
     "record_transform",
     "record_merge_transform",
     "get_provenance_chain",
+    "set_storage_ref",
+    "lookup_by_storage_ref",
 ]
 
 
@@ -669,6 +676,11 @@ def create_server() -> Server:
                                     "description": "Ethereum address to register as the data owner. If omitted, the wallet address is used. Use this to register data on behalf of another address (requires delegate authorization).",
                                     "pattern": "^0x[a-fA-F0-9]{40}$",
                                 },
+                                "storage_ref": {
+                                    "type": "string",
+                                    "description": "Optional 64-character hex storage reference (e.g. Swarm hash) to link bidirectionally with the data hash. Enables reverse lookup via lookup_by_storage_ref.",
+                                    "pattern": "^[a-fA-F0-9]{64}$",
+                                },
                             },
                             "required": ["swarm_hash"],
                         },
@@ -791,6 +803,41 @@ def create_server() -> Server:
                             "required": ["swarm_hash"],
                         },
                     ),
+                    Tool(
+                        name="set_storage_ref",
+                        description="Attach a Swarm storage reference to an existing on-chain record. Set-once: cannot be changed after first write. Owner-only. Use this after record_transform to link the transformed data's storage location. Costs gas.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "data_hash": {
+                                    "type": "string",
+                                    "description": "64-character hex data hash of the existing on-chain record (without 0x prefix)",
+                                    "pattern": "^[a-fA-F0-9]{64}$",
+                                },
+                                "storage_ref": {
+                                    "type": "string",
+                                    "description": "64-character hex storage reference to link (e.g. Swarm reference hash, without 0x prefix)",
+                                    "pattern": "^[a-fA-F0-9]{64}$",
+                                },
+                            },
+                            "required": ["data_hash", "storage_ref"],
+                        },
+                    ),
+                    Tool(
+                        name="lookup_by_storage_ref",
+                        description="Reverse lookup: find the on-chain provenance record by its Swarm storage reference. Returns the linked data hash and full provenance record if found. Read-only — no gas or wallet key required.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "storage_ref": {
+                                    "type": "string",
+                                    "description": "64-character hex storage reference to look up (e.g. Swarm reference hash, without 0x prefix)",
+                                    "pattern": "^[a-fA-F0-9]{64}$",
+                                },
+                            },
+                            "required": ["storage_ref"],
+                        },
+                    ),
                 ]
             )
 
@@ -837,6 +884,10 @@ def create_server() -> Server:
                 return await handle_record_merge_transform(arguments)
             elif name == "get_provenance_chain":
                 return await handle_get_provenance_chain(arguments)
+            elif name == "set_storage_ref":
+                return await handle_set_storage_ref(arguments)
+            elif name == "lookup_by_storage_ref":
+                return await handle_lookup_by_storage_ref(arguments)
             else:
                 return CallToolResult(
                     content=[
@@ -2160,18 +2211,25 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
             raise ValueError("data_type must be 64 characters or fewer")
 
         owner = arguments.get("owner")
+        storage_ref = arguments.get("storage_ref")
+        if storage_ref:
+            storage_ref = validate_and_clean_reference_hash(storage_ref)
 
         if owner:
             result = await asyncio.to_thread(
                 chain_client.anchor_for, clean_hash, owner, data_type
             )
         else:
-            result = await asyncio.to_thread(chain_client.anchor, clean_hash, data_type)
+            result = await asyncio.to_thread(
+                chain_client.anchor, clean_hash, data_type, storage_ref
+            )
 
         response_text = f"⛓️  Hash anchored on-chain\n\n"
         response_text += f"   Swarm Hash: {result.swarm_hash}\n"
         response_text += f"   Data Type: {result.data_type}\n"
         response_text += f"   Owner: {result.owner}\n"
+        if result.storage_ref:
+            response_text += f"   Storage Ref: {result.storage_ref}\n"
         response_text += f"   Tx Hash: {result.tx_hash}\n"
         response_text += f"   Block: {result.block_number:,}\n"
         response_text += f"   Gas Used: {result.gas_used:,}"
@@ -2391,6 +2449,26 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
                     DataStatusEnum,
                 )
 
+                # Handle both 8-field (v3+, with storageRef) and 7-field tuples
+                if len(raw) >= 8:
+                    storage_ref_bytes = raw[4]
+                    transformations_raw = raw[5]
+                    accessors_raw = raw[6]
+                    status_raw = raw[7]
+                else:
+                    storage_ref_bytes = None
+                    transformations_raw = raw[4]
+                    accessors_raw = raw[5]
+                    status_raw = raw[6]
+
+                parsed_storage_ref = None
+                if (
+                    storage_ref_bytes
+                    and isinstance(storage_ref_bytes, bytes)
+                    and storage_ref_bytes != b"\x00" * 32
+                ):
+                    parsed_storage_ref = storage_ref_bytes.hex()
+
                 record = ChainProvenanceRecord(
                     data_hash=(
                         raw[0].hex() if isinstance(raw[0], bytes) else str(raw[0])
@@ -2398,10 +2476,12 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
                     owner=raw[1],
                     timestamp=raw[2],
                     data_type=raw[3],
-                    status=DataStatusEnum(raw[6]),
-                    accessors=list(raw[5]),
+                    storage_ref=parsed_storage_ref,
+                    status=DataStatusEnum(status_raw),
+                    accessors=list(accessors_raw),
                     transformations=[
-                        ChainTransformation(description=str(t)) for t in raw[4]
+                        ChainTransformation(description=str(t))
+                        for t in transformations_raw
                     ],
                 )
 
@@ -2422,6 +2502,8 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += f"   Registered: {timestamp_str}\n"
             response_text += f"   Data Type: {record.data_type}\n"
             response_text += f"   Status: {record.status.name}"
+            if record.storage_ref:
+                response_text += f"\n   Storage Ref: {record.storage_ref}"
             response_text += _format_hints(
                 "download_data", ["anchor_hash", "health_check"]
             )
@@ -2524,15 +2606,36 @@ async def handle_get_provenance(arguments: Dict[str, Any]) -> CallToolResult:
                     f"Data hash {clean_hash} is not registered on-chain",
                     data_hash=clean_hash,
                 )
+            # Handle both 8-field (v3+, with storageRef) and 7-field tuples
+            if len(raw) >= 8:
+                storage_ref_bytes = raw[4]
+                transformations_raw = raw[5]
+                accessors_raw = raw[6]
+                status_raw = raw[7]
+            else:
+                storage_ref_bytes = None
+                transformations_raw = raw[4]
+                accessors_raw = raw[5]
+                status_raw = raw[6]
+
+            parsed_storage_ref = None
+            if (
+                storage_ref_bytes
+                and isinstance(storage_ref_bytes, bytes)
+                and storage_ref_bytes != b"\x00" * 32
+            ):
+                parsed_storage_ref = storage_ref_bytes.hex()
+
             record = ChainProvenanceRecord(
                 data_hash=(raw[0].hex() if isinstance(raw[0], bytes) else str(raw[0])),
                 owner=raw[1],
                 timestamp=raw[2],
                 data_type=raw[3],
-                status=DataStatusEnum(raw[6]),
-                accessors=list(raw[5]),
+                storage_ref=parsed_storage_ref,
+                status=DataStatusEnum(status_raw),
+                accessors=list(accessors_raw),
                 transformations=[
-                    ChainTransformation(description=str(t)) for t in raw[4]
+                    ChainTransformation(description=str(t)) for t in transformations_raw
                 ],
             )
 
@@ -2561,6 +2664,8 @@ async def handle_get_provenance(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"   Registered: {timestamp_str}\n"
         response_text += f"   Data Type: {record.data_type}\n"
         response_text += f"   Status: {status_text}"
+        if record.storage_ref:
+            response_text += f"\n   Storage Ref: {record.storage_ref}"
 
         if record.transformations:
             response_text += f"\n\n   Transformations ({len(record.transformations)}):"
@@ -3326,6 +3431,359 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
         response_text += _format_hints(
             "get_provenance", ["download_data", "record_transform"]
         )
+
+        return CallToolResult(content=[TextContent(type="text", text=response_text)])
+
+    except ValueError as e:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(f"Validation error: {str(e)}", retryable=False),
+                )
+            ],
+            isError=True,
+        )
+    except Exception as e:
+        try:
+            from .chain.exceptions import ChainConnectionError
+        except ImportError:
+            ChainConnectionError = None
+
+        is_conn_error = ChainConnectionError and isinstance(e, ChainConnectionError)
+
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        f"Chain error: {str(e)}",
+                        retryable=is_conn_error,
+                        next_tool="chain_health" if is_conn_error else None,
+                    ),
+                )
+            ],
+            isError=True,
+        )
+
+
+async def handle_set_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
+    """Handle set_storage_ref requests — attach a storage reference to an on-chain record.
+
+    Write operation: requires PROVENANCE_WALLET_KEY and gas. Set-once, owner-only.
+    """
+    if not CHAIN_AVAILABLE:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        "Chain module not available. Reinstall with: pip install -e . (web3/eth-account should be included)",
+                        retryable=False,
+                    ),
+                )
+            ],
+            isError=True,
+        )
+    if not chain_client:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        "set_storage_ref requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                        "Read-only chain tools (verify_hash, get_provenance, lookup_by_storage_ref, chain_health) "
+                        "work without a wallet.",
+                        retryable=False,
+                        next_tool="chain_health",
+                    ),
+                )
+            ],
+            isError=True,
+        )
+
+    try:
+        data_hash = arguments.get("data_hash")
+        if not data_hash:
+            raise ValueError("data_hash is required")
+        clean_hash = validate_and_clean_reference_hash(data_hash)
+
+        storage_ref = arguments.get("storage_ref")
+        if not storage_ref:
+            raise ValueError("storage_ref is required")
+        clean_ref = validate_and_clean_reference_hash(storage_ref)
+
+        result = await asyncio.to_thread(
+            chain_client.set_storage_ref, clean_hash, clean_ref
+        )
+
+        response_text = f"⛓️  Storage reference linked\n\n"
+        response_text += f"   Data Hash: {clean_hash}\n"
+        response_text += f"   Storage Ref: {clean_ref}\n"
+        response_text += f"   Tx Hash: {result.tx_hash}\n"
+        response_text += f"   Block: {result.block_number:,}\n"
+        response_text += f"   Gas Used: {result.gas_used:,}"
+        if result.explorer_url:
+            response_text += f"\n   Explorer: {result.explorer_url}"
+
+        # Post-tx balance check
+        try:
+            wallet_info = await asyncio.to_thread(chain_client.balance)
+            guidance = _format_funding_guidance(
+                wallet_info.address, wallet_info.balance_wei, wallet_info.chain
+            )
+            response_text += guidance
+        except Exception:
+            pass
+
+        response_text += _format_hints(
+            "lookup_by_storage_ref", ["get_provenance", "verify_hash"]
+        )
+
+        return CallToolResult(content=[TextContent(type="text", text=response_text)])
+
+    except ValueError as e:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(f"Validation error: {str(e)}", retryable=False),
+                )
+            ],
+            isError=True,
+        )
+    except Exception as e:
+        try:
+            from .chain.exceptions import (
+                DataNotRegisteredError,
+                StorageRefAlreadySetError,
+                ChainTransactionError,
+                ChainConnectionError,
+            )
+        except ImportError:
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(f"Chain error: {str(e)}", retryable=False),
+                    )
+                ],
+                isError=True,
+            )
+
+        if isinstance(e, StorageRefAlreadySetError):
+            response_text = f"⛓️  Storage reference already set\n\n"
+            response_text += f"   Data Hash: {e.data_hash}"
+            if e.existing_storage_ref:
+                response_text += f"\n   Existing Ref: {e.existing_storage_ref}"
+            response_text += (
+                "\n\n   Storage references are set-once and cannot be changed."
+            )
+            response_text += _format_hints("get_provenance", ["lookup_by_storage_ref"])
+            return CallToolResult(
+                content=[TextContent(type="text", text=response_text)]
+            )
+
+        if isinstance(e, DataNotRegisteredError):
+            response_text = f"⛓️  Not found — data hash is NOT registered on-chain\n\n"
+            response_text += f"   Data Hash: {e.data_hash}"
+            response_text += "\n\n   Anchor the hash first with anchor_hash, then set the storage reference."
+            response_text += _format_hints("anchor_hash", ["health_check"])
+            return CallToolResult(
+                content=[TextContent(type="text", text=response_text)],
+                isError=True,
+            )
+
+        if isinstance(e, ChainTransactionError):
+            if _is_insufficient_funds_error(e):
+                msg = _format_insufficient_funds_error("set_storage_ref", chain_client)
+            else:
+                msg = f"Transaction failed: {str(e)}"
+                if e.tx_hash:
+                    msg += f"\n   Tx Hash: {e.tx_hash}"
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(
+                            msg, retryable=False, next_tool="chain_balance"
+                        ),
+                    )
+                ],
+                isError=True,
+            )
+
+        if isinstance(e, ChainConnectionError):
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(
+                            f"Chain connection error: {str(e)}",
+                            retryable=True,
+                            next_tool="chain_health",
+                        ),
+                    )
+                ],
+                isError=True,
+            )
+
+        if _is_insufficient_funds_error(e):
+            msg = _format_insufficient_funds_error("set_storage_ref", chain_client)
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=_format_error(
+                            msg, retryable=False, next_tool="chain_balance"
+                        ),
+                    )
+                ],
+                isError=True,
+            )
+
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(f"Chain error: {str(e)}", retryable=False),
+                )
+            ],
+            isError=True,
+        )
+
+
+async def handle_lookup_by_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
+    """Handle lookup_by_storage_ref requests — reverse lookup by storage reference.
+
+    Read-only: works without PROVENANCE_WALLET_KEY by creating a temporary
+    provider + contract for direct contract reads (no signing needed).
+    """
+    if not CHAIN_AVAILABLE:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        "Chain module not available. Reinstall with: pip install -e . (web3/eth-account should be included)",
+                        retryable=False,
+                    ),
+                )
+            ],
+            isError=True,
+        )
+
+    try:
+        storage_ref = arguments.get("storage_ref")
+        if not storage_ref:
+            raise ValueError("storage_ref is required")
+        clean_ref = validate_and_clean_reference_hash(storage_ref)
+
+        # Use chain_client if available, otherwise create temporary provider + contract
+        if chain_client:
+            record = await asyncio.to_thread(
+                chain_client.lookup_by_storage_ref, clean_ref
+            )
+        else:
+            from .chain.provider import ChainProvider
+            from .chain.contract import DataProvenanceContract
+
+            provider = ChainProvider(
+                chain=settings.chain_name,
+                rpc_url=settings.chain_rpc_url,
+                contract_address=settings.chain_contract_address,
+                explorer_url=settings.chain_explorer_url,
+                rpc_fallbacks=_parse_rpc_fallbacks(),
+            )
+            contract = DataProvenanceContract(
+                web3=provider.web3,
+                contract_address=provider.contract_address,
+            )
+            data_hash_bytes = await asyncio.to_thread(
+                contract.get_data_hash_by_storage_ref, clean_ref
+            )
+            if data_hash_bytes == b"\x00" * 32:
+                record = None
+            else:
+                # Fetch the full record
+                from .chain.models import (
+                    ChainProvenanceRecord,
+                    ChainTransformation,
+                    DataStatusEnum,
+                )
+
+                raw = await asyncio.to_thread(
+                    contract.get_data_record, data_hash_bytes.hex()
+                )
+                zero_address = "0x" + "0" * 40
+                if raw[1] == zero_address:
+                    record = None
+                else:
+                    # Handle both 8-field (v3+) and 7-field (v2) tuples
+                    if len(raw) >= 8:
+                        storage_ref_bytes = raw[4]
+                        transformations_raw = raw[5]
+                        accessors_raw = raw[6]
+                        status_raw = raw[7]
+                    else:
+                        storage_ref_bytes = None
+                        transformations_raw = raw[4]
+                        accessors_raw = raw[5]
+                        status_raw = raw[6]
+
+                    parsed_storage_ref = None
+                    if (
+                        storage_ref_bytes
+                        and isinstance(storage_ref_bytes, bytes)
+                        and storage_ref_bytes != b"\x00" * 32
+                    ):
+                        parsed_storage_ref = storage_ref_bytes.hex()
+
+                    record = ChainProvenanceRecord(
+                        data_hash=(
+                            raw[0].hex() if isinstance(raw[0], bytes) else str(raw[0])
+                        ),
+                        owner=raw[1],
+                        timestamp=raw[2],
+                        data_type=raw[3],
+                        storage_ref=parsed_storage_ref,
+                        status=DataStatusEnum(status_raw),
+                        accessors=list(accessors_raw),
+                        transformations=[
+                            ChainTransformation(description=str(t))
+                            for t in transformations_raw
+                        ],
+                    )
+
+        if record:
+            from datetime import datetime, timezone
+
+            timestamp_str = "unknown"
+            if record.timestamp:
+                try:
+                    dt = datetime.fromtimestamp(record.timestamp, tz=timezone.utc)
+                    timestamp_str = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+                except (ValueError, OSError):
+                    timestamp_str = str(record.timestamp)
+
+            response_text = (
+                f"⛓️  Found — storage reference is linked to a provenance record\n\n"
+            )
+            response_text += f"   Storage Ref: {clean_ref}\n"
+            response_text += f"   Data Hash: {record.data_hash}\n"
+            response_text += f"   Owner: {record.owner}\n"
+            response_text += f"   Registered: {timestamp_str}\n"
+            response_text += f"   Data Type: {record.data_type}\n"
+            response_text += f"   Status: {record.status.name}"
+            response_text += _format_hints(
+                "download_data", ["get_provenance", "verify_hash"]
+            )
+        else:
+            response_text = f"⛓️  Not found — no provenance record linked to this storage reference\n\n"
+            response_text += f"   Storage Ref: {clean_ref}"
+            response_text += _format_hints(
+                "anchor_hash", ["upload_data", "health_check"]
+            )
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
 

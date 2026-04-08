@@ -135,7 +135,7 @@ Environment variables (set in `.env` file):
 - `CHAIN_EXPLORER_URL`: Custom block explorer URL (uses chain preset if not set)
 - `CHAIN_GAS_LIMIT`: Explicit gas limit for chain transactions (skips estimation if set)
 
-When chain is enabled, additional tools become available: `chain_balance`, `chain_health`, `anchor_hash`, `verify_hash`, `get_provenance`, `record_transform`, `record_merge_transform`, `get_provenance_chain`. Blockchain dependencies (web3, eth-account) are included in the default install. Read-only tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `chain_health`) work without a wallet key; write tools (`anchor_hash`, `record_transform`, `record_merge_transform`) and `chain_balance` require `PROVENANCE_WALLET_KEY` with a funded wallet.
+When chain is enabled, additional tools become available: `chain_balance`, `chain_health`, `anchor_hash`, `verify_hash`, `get_provenance`, `record_transform`, `record_merge_transform`, `get_provenance_chain`, `set_storage_ref`, `lookup_by_storage_ref`. Blockchain dependencies (web3, eth-account) are included in the default install. Read-only tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `lookup_by_storage_ref`, `chain_health`) work without a wallet key; write tools (`anchor_hash`, `record_transform`, `record_merge_transform`, `set_storage_ref`) and `chain_balance` require `PROVENANCE_WALLET_KEY` with a funded wallet.
 
 ### Gateway Options
 
@@ -359,6 +359,7 @@ Register a Swarm reference hash on the blockchain, creating an immutable provena
 - `swarm_hash` (string, required): 64-character hex Swarm reference hash to anchor
 - `data_type` (string): Data type/category (default: `swarm-provenance`, max 64 chars)
 - `owner` (string): Ethereum address to register as owner (defaults to wallet address; requires delegate authorization for other addresses)
+- `storage_ref` (string): Optional 64-character hex storage reference to link bidirectionally. Enables reverse lookup via `lookup_by_storage_ref`
 
 **Example:**
 ```json
@@ -464,6 +465,40 @@ Follow the transformation lineage for a Swarm hash. On v2 contracts, uses state 
   "arguments": {
     "swarm_hash": "a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789a",
     "max_depth": 10
+  }
+}
+```
+
+#### `set_storage_ref` *(optional — requires `CHAIN_ENABLED=true` and `PROVENANCE_WALLET_KEY`)*
+Attach a Swarm storage reference to an existing on-chain record. Set-once: cannot be changed after first write. Owner-only. Useful after `record_transform` to link the transformed data's Swarm storage location.
+
+**Parameters:**
+- `data_hash` (string, required): 64-character hex data hash of the existing on-chain record
+- `storage_ref` (string, required): 64-character hex storage reference to link (e.g. Swarm reference)
+
+**Example:**
+```json
+{
+  "name": "set_storage_ref",
+  "arguments": {
+    "data_hash": "a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789a",
+    "storage_ref": "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789ab"
+  }
+}
+```
+
+#### `lookup_by_storage_ref` *(optional — requires `CHAIN_ENABLED=true`)*
+Reverse lookup: find the on-chain provenance record by its Swarm storage reference. Returns the linked data hash and full provenance record if found. Read-only — no gas or wallet key required.
+
+**Parameters:**
+- `storage_ref` (string, required): 64-character hex storage reference to look up
+
+**Example:**
+```json
+{
+  "name": "lookup_by_storage_ref",
+  "arguments": {
+    "storage_ref": "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789ab"
   }
 }
 ```
@@ -678,7 +713,7 @@ To enable blockchain anchoring, add an `"env"` block to the config. You can use 
 }
 ```
 
-Read-only chain tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `chain_health`) work without `PROVENANCE_WALLET_KEY`. Write tools (`anchor_hash`, `record_transform`, `record_merge_transform`) and `chain_balance` require a funded wallet — see [Chain Anchoring](#chain-anchoring-optional) for details.
+Read-only chain tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `lookup_by_storage_ref`, `chain_health`) work without `PROVENANCE_WALLET_KEY`. Write tools (`anchor_hash`, `record_transform`, `record_merge_transform`, `set_storage_ref`) and `chain_balance` require a funded wallet — see [Chain Anchoring](#chain-anchoring-optional) for details.
 
 #### Docker-based
 
@@ -831,7 +866,7 @@ This MCP server is designed to work with AI agents that support the Model Contex
 2. **Authentication errors**: Check that the gateway doesn't require authentication
 3. **Invalid stamp IDs**: Verify stamp IDs are valid batch IDs from the Swarm network
 4. **Timeout errors**: Increase timeout values if operations are taking too long
-5. **Chain: "wallet key not configured"**: Set `PROVENANCE_WALLET_KEY` in `.env` for write operations (`anchor_hash`, `record_transform`). Read-only tools work without it.
+5. **Chain: "wallet key not configured"**: Set `PROVENANCE_WALLET_KEY` in `.env` for write operations (`anchor_hash`, `record_transform`, `set_storage_ref`). Read-only tools work without it.
 6. **Chain: "insufficient funds"**: Fund your wallet with testnet ETH (Base Sepolia faucet) or bridge ETH to Base mainnet. Run `chain_balance` for guidance.
 7. **Chain: "already registered"**: The hash is already anchored on-chain. Use `get_provenance` to view the existing record.
 8. **Chain: "transformation already recorded"**: The `(original → new)` link already exists on-chain. No gas spent — use `get_provenance_chain` to verify the lineage.

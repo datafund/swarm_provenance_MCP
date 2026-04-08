@@ -39,6 +39,10 @@ class ChainProvenanceRecord(BaseModel):
     accessors: List[str] = Field(
         default_factory=list, description="Addresses that accessed this data"
     )
+    storage_ref: Optional[str] = Field(
+        default=None,
+        description="Swarm storage reference linked to this data hash (bytes32 hex, if set)",
+    )
     transformations: List[ChainTransformation] = Field(
         default_factory=list, description="Transformations derived from this data"
     )
@@ -56,6 +60,10 @@ class AnchorResult(BaseModel):
     swarm_hash: str = Field(description="The anchored Swarm reference hash")
     data_type: str = Field(description="Data type registered on-chain")
     owner: str = Field(description="Owner address of the registered data")
+    storage_ref: Optional[str] = Field(
+        default=None,
+        description="Storage reference linked during anchoring (if provided)",
+    )
 
 
 class TransformResult(BaseModel):

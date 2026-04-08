@@ -82,6 +82,8 @@ class TestToolDefinitions:
             "record_transform",
             "record_merge_transform",
             "get_provenance_chain",
+            "set_storage_ref",
+            "lookup_by_storage_ref",
         }
 
         actual_tools = {tool.name for tool in tool_list}

@@ -224,6 +224,25 @@
     "type": "event"
   },
   {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "dataHash",
+        "type": "bytes32"
+      },
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "storageRef",
+        "type": "bytes32"
+      }
+    ],
+    "name": "StorageRefLinked",
+    "type": "event"
+  },
+  {
     "inputs": [],
     "name": "ADMIN_ROLE",
     "outputs": [
@@ -364,6 +383,29 @@
         "type": "bytes32[]"
       },
       {
+        "internalType": "string[]",
+        "name": "_dataTypes",
+        "type": "string[]"
+      },
+      {
+        "internalType": "bytes32[]",
+        "name": "_storageRefs",
+        "type": "bytes32[]"
+      }
+    ],
+    "name": "batchRegisterData",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32[]",
+        "name": "_dataHashes",
+        "type": "bytes32[]"
+      },
+      {
         "internalType": "enum DataProvenance.DataStatus[]",
         "name": "_statuses",
         "type": "uint8[]"
@@ -418,6 +460,11 @@
         "type": "string"
       },
       {
+        "internalType": "bytes32",
+        "name": "storageRef",
+        "type": "bytes32"
+      },
+      {
         "internalType": "enum DataProvenance.DataStatus",
         "name": "status",
         "type": "uint8"
@@ -440,6 +487,25 @@
         "internalType": "bytes32[]",
         "name": "",
         "type": "bytes32[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "_storageRef",
+        "type": "bytes32"
+      }
+    ],
+    "name": "getDataHashByStorageRef",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
       }
     ],
     "stateMutability": "view",
@@ -476,6 +542,11 @@
             "internalType": "string",
             "name": "dataType",
             "type": "string"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "storageRef",
+            "type": "bytes32"
           },
           {
             "components": [
@@ -856,6 +927,29 @@
         "internalType": "string",
         "name": "_dataType",
         "type": "string"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "_storageRef",
+        "type": "bytes32"
+      }
+    ],
+    "name": "registerData",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "_dataHash",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "string",
+        "name": "_dataType",
+        "type": "string"
       }
     ],
     "name": "registerData",
@@ -879,6 +973,34 @@
         "internalType": "address",
         "name": "_actualOwner",
         "type": "address"
+      }
+    ],
+    "name": "registerDataFor",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "_dataHash",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "string",
+        "name": "_dataType",
+        "type": "string"
+      },
+      {
+        "internalType": "address",
+        "name": "_actualOwner",
+        "type": "address"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "_storageRef",
+        "type": "bytes32"
       }
     ],
     "name": "registerDataFor",
@@ -951,6 +1073,43 @@
     "name": "setDelegate",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "_dataHash",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "_storageRef",
+        "type": "bytes32"
+      }
+    ],
+    "name": "setStorageRef",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "name": "storageRefToDataHash",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {

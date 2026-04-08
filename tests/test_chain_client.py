@@ -27,7 +27,7 @@ DUMMY_PRIVATE_KEY = "0x" + "a" * 64
 DUMMY_ADDRESS = "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
 DUMMY_HASH = "a" * 64
 DUMMY_HASH_BYTES = bytes.fromhex(DUMMY_HASH)
-DUMMY_CONTRACT = "0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a"
+DUMMY_CONTRACT = "0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322"
 DUMMY_TX_HASH_BYTES = bytes.fromhex("bb" * 32)
 ZERO_ADDRESS = "0x" + "0" * 40
 
@@ -373,7 +373,7 @@ class TestChainProvider:
 
         assert provider.chain == "base-sepolia"
         assert provider.chain_id == 84532
-        assert provider.contract_address == "0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a"
+        assert provider.contract_address == "0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322"
 
     def test_custom_rpc_url(self, mock_chain_deps):
         """Tests that custom RPC URL is used."""

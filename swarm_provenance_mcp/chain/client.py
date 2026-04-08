@@ -16,6 +16,7 @@ from .exceptions import (
     ChainTransactionError,
     DataAlreadyRegisteredError,
     DataNotRegisteredError,
+    StorageRefAlreadySetError,
     TransformationAlreadyExistsError,
 )
 from .models import (
@@ -184,6 +185,7 @@ class ChainClient:
         self,
         swarm_hash: str,
         data_type: str = "swarm-provenance",
+        storage_ref: Optional[str] = None,
     ) -> AnchorResult:
         """
         Anchor a Swarm hash on-chain by registering it in the DataProvenance contract.
@@ -191,11 +193,15 @@ class ChainClient:
         Args:
             swarm_hash: Swarm reference hash (64 hex chars).
             data_type: Data type/category (max 64 chars, default 'swarm-provenance').
+            storage_ref: Optional storage reference (64 hex chars) to link
+                bidirectionally with the data hash. Enables reverse lookup.
 
         Returns:
             AnchorResult with transaction details.
         """
-        logger.debug("Anchor: hash=%s type=%s", swarm_hash, data_type)
+        logger.debug(
+            "Anchor: hash=%s type=%s storage_ref=%s", swarm_hash, data_type, storage_ref
+        )
 
         # Pre-check: avoid wasting gas on already-registered hashes
         try:
@@ -210,11 +216,19 @@ class ChainClient:
         except DataNotRegisteredError:
             pass  # Not registered -- proceed with anchoring
 
-        tx = self._contract.build_register_data_tx(
-            data_hash=swarm_hash,
-            data_type=data_type,
-            sender=self._wallet.address,
-        )
+        if storage_ref:
+            tx = self._contract.build_register_data_with_storage_ref_tx(
+                data_hash=swarm_hash,
+                data_type=data_type,
+                storage_ref=storage_ref,
+                sender=self._wallet.address,
+            )
+        else:
+            tx = self._contract.build_register_data_tx(
+                data_hash=swarm_hash,
+                data_type=data_type,
+                sender=self._wallet.address,
+            )
         try:
             receipt = self._send_transaction(tx)
         except ChainTransactionError as e:
@@ -242,6 +256,7 @@ class ChainClient:
             swarm_hash=swarm_hash,
             data_type=data_type,
             owner=self._wallet.address,
+            storage_ref=storage_ref,
         )
 
     def anchor_for(
@@ -619,6 +634,91 @@ class ChainClient:
             owner=self._wallet.address,
         )
 
+    def set_storage_ref(
+        self,
+        data_hash: str,
+        storage_ref: str,
+    ) -> AnchorResult:
+        """
+        Attach a storage reference to an existing on-chain record.
+
+        Set-once: the storage reference cannot be changed after it is set.
+        Owner-only: only the data owner can call this.
+
+        Args:
+            data_hash: Hash of the registered data (64 hex chars).
+            storage_ref: Storage reference to link (64 hex chars, e.g. Swarm ref).
+
+        Returns:
+            AnchorResult with transaction details.
+
+        Raises:
+            DataNotRegisteredError: If data_hash is not registered on-chain.
+            StorageRefAlreadySetError: If a storage ref is already set for this hash.
+        """
+        logger.debug("Set storage ref: hash=%s ref=%s", data_hash, storage_ref)
+
+        # Pre-check: verify hash is registered and storage ref is not already set
+        record = self.get(data_hash)
+        if record.storage_ref:
+            raise StorageRefAlreadySetError(
+                f"Storage reference already set for {data_hash}",
+                data_hash=data_hash,
+                existing_storage_ref=record.storage_ref,
+            )
+
+        tx = self._contract.build_set_storage_ref_tx(
+            data_hash=data_hash,
+            storage_ref=storage_ref,
+            sender=self._wallet.address,
+        )
+        try:
+            receipt = self._send_transaction(tx)
+        except ChainTransactionError as e:
+            if "already set" in str(e).lower() or "storage ref" in str(e).lower():
+                raise StorageRefAlreadySetError(
+                    f"Storage reference already set for {data_hash}",
+                    data_hash=data_hash,
+                ) from e
+            raise
+
+        return AnchorResult(
+            tx_hash=receipt["transactionHash"].hex(),
+            block_number=receipt["blockNumber"],
+            gas_used=receipt["gasUsed"],
+            explorer_url=self._receipt_to_explorer_url(receipt),
+            swarm_hash=data_hash,
+            data_type=record.data_type,
+            owner=self._wallet.address,
+            storage_ref=storage_ref,
+        )
+
+    def lookup_by_storage_ref(
+        self,
+        storage_ref: str,
+    ) -> Optional[ChainProvenanceRecord]:
+        """
+        Reverse lookup: find the provenance record by storage reference.
+
+        Read-only — no wallet or gas required.
+
+        Args:
+            storage_ref: Storage reference hash (64 hex chars).
+
+        Returns:
+            ChainProvenanceRecord if found, None if no mapping exists.
+        """
+        logger.debug("Lookup by storage ref: %s", storage_ref)
+
+        data_hash_bytes = self._contract.get_data_hash_by_storage_ref(storage_ref)
+
+        # Check if result is zero bytes (no mapping)
+        if data_hash_bytes == b"\x00" * 32:
+            return None
+
+        data_hash_hex = data_hash_bytes.hex()
+        return self.get(data_hash_hex)
+
     def merge_transform(
         self,
         source_hashes: List[str],
@@ -690,17 +790,32 @@ class ChainClient:
 
         record = self._contract.get_data_record(swarm_hash)
 
-        # record is a tuple: (dataHash, owner, timestamp, dataType,
-        #                      transformations, accessors, status)
-        (
-            data_hash_bytes,
-            owner,
-            timestamp,
-            data_type,
-            transformations,
-            accessors,
-            status,
-        ) = record
+        # record is a tuple — v3+ (with storageRef) returns 8 elements:
+        #   (dataHash, owner, timestamp, dataType, storageRef,
+        #    transformations, accessors, status)
+        # Older contracts return 7 elements (no storageRef).
+        if len(record) >= 8:
+            (
+                data_hash_bytes,
+                owner,
+                timestamp,
+                data_type,
+                storage_ref_bytes,
+                transformations,
+                accessors,
+                status,
+            ) = record[:8]
+        else:
+            (
+                data_hash_bytes,
+                owner,
+                timestamp,
+                data_type,
+                transformations,
+                accessors,
+                status,
+            ) = record[:7]
+            storage_ref_bytes = None
 
         # Check if data is registered (owner is zero address if not)
         zero_address = "0x" + "0" * 40
@@ -732,6 +847,12 @@ class ChainClient:
             len(accessors),
         )
 
+        # Parse storage_ref — non-zero bytes32 means a ref is set
+        parsed_storage_ref = None
+        if storage_ref_bytes and isinstance(storage_ref_bytes, bytes):
+            if storage_ref_bytes != b"\x00" * 32:
+                parsed_storage_ref = storage_ref_bytes.hex()
+
         return ChainProvenanceRecord(
             data_hash=(
                 data_hash_bytes.hex()
@@ -741,6 +862,7 @@ class ChainClient:
             owner=owner,
             timestamp=timestamp,
             data_type=data_type,
+            storage_ref=parsed_storage_ref,
             status=DataStatusEnum(status),
             accessors=list(accessors),
             transformations=chain_transformations,

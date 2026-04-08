@@ -65,6 +65,20 @@ class DataAlreadyRegisteredError(ChainError):
         self.data_type = data_type
 
 
+class StorageRefAlreadySetError(ChainError):
+    """Storage reference is already set for this data hash (set-once)."""
+
+    def __init__(
+        self,
+        message: str,
+        data_hash: str = None,
+        existing_storage_ref: str = None,
+    ):
+        super().__init__(message)
+        self.data_hash = data_hash
+        self.existing_storage_ref = existing_storage_ref
+
+
 class TransformationAlreadyExistsError(ChainError):
     """Transformation (original → new) pair is already recorded on-chain."""
 

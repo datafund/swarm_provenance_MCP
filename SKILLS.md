@@ -15,6 +15,7 @@ Data provenance tracks the **origin, ownership, and transformation history** of 
 | **Swarm Storage** | Content-addressed decentralized storage | Swarm network |
 | **On-Chain Anchoring** | Immutable ownership + timestamp record | Base Sepolia (DataProvenance contract) |
 | **Transformation Lineage** | Links between original and derived data | On-chain state (v2) or event logs (v1) |
+| **Storage References** | Bidirectional hash ↔ storage location linking | On-chain state (v3+) |
 
 **Why it matters:** Anyone can verify who stored data, when, and how it was transformed — without trusting a central authority.
 
@@ -27,8 +28,8 @@ Not every setup has all features. What you can do depends on your configuration:
 | Mode | Requirements | Available Tools |
 |------|-------------|-----------------|
 | **Storage Only** | Gateway URL | `purchase_stamp`, `upload_data`, `download_data`, `check_stamp_health`, `get_stamp_status`, `list_stamps`, `extend_stamp`, `health_check`, `get_wallet_info`, `get_notary_info` |
-| **Read-Only Chain** | + `CHAIN_ENABLED=true` | All storage tools + `chain_health`, `verify_hash`, `get_provenance`, `get_provenance_chain` |
-| **Full Provenance** | + `PROVENANCE_WALLET_KEY` (funded) | All tools including `anchor_hash`, `record_transform`, `record_merge_transform`, `chain_balance` |
+| **Read-Only Chain** | + `CHAIN_ENABLED=true` | All storage tools + `chain_health`, `verify_hash`, `get_provenance`, `get_provenance_chain`, `lookup_by_storage_ref` |
+| **Full Provenance** | + `PROVENANCE_WALLET_KEY` (funded) | All tools including `anchor_hash`, `record_transform`, `record_merge_transform`, `set_storage_ref`, `chain_balance` |
 
 Check your mode: run `health_check` — it reports both gateway and chain status.
 
@@ -66,6 +67,10 @@ One original hash can have **multiple transformations** (branching). Each transf
 ### 6. Status changes are one-way
 
 When `restrict_original=true` is passed to `record_transform`, the original data status changes to RESTRICTED. This **cannot be undone**. Only restrict when you are certain the original should no longer be directly accessed.
+
+### 7. Storage references are set-once
+
+When a storage reference is attached to a data hash (via `anchor_hash` with `storage_ref` or `set_storage_ref`), it **cannot be changed or removed**. This creates an immutable bidirectional link between the content hash and its storage location. Verify the reference is correct before setting it.
 
 ---
 
@@ -128,15 +133,45 @@ Combine multiple datasets into one with verifiable provenance linking all source
 
 **Note:** All source hashes must be anchored before calling `record_merge_transform`. The merge supports 2–50 sources. The merged hash is auto-registered with the specified `new_data_type`.
 
-### E: Verify Existing Provenance (Read-Only)
+### E: Store and Anchor with Storage Reference
+
+Register data on Swarm and link both the content hash and Swarm reference on-chain for bidirectional lookup.
+
+```
+1. health_check              → verify gateway + chain connectivity
+2. chain_balance              → confirm wallet has ETH for gas
+3. purchase_stamp             → get a stamp for Swarm storage
+4. check_stamp_health         → poll until can_upload: true
+5. upload_data                → store data, receive Swarm reference hash
+6. anchor_hash(swarm_hash,    → register hash on-chain with storage reference linked
+     storage_ref=<swarm_ref>)
+7. lookup_by_storage_ref      → verify reverse lookup works
+```
+
+### F: Link Storage Reference After Transformation
+
+After recording a transformation, upload the transformed data to Swarm and link the storage location.
+
+```
+1. record_transform           → link original_hash → new_hash (new_hash auto-registered)
+2. upload_data                → upload the transformed data to Swarm, get Swarm ref
+3. set_storage_ref            → permanently link new_hash to its Swarm reference
+   (data_hash=new_hash, storage_ref=<swarm_ref>)
+4. lookup_by_storage_ref      → verify the link works
+```
+
+**Remember:** `set_storage_ref` is set-once. Once linked, it cannot be changed.
+
+### G: Verify Existing Provenance (Read-Only)
 
 Inspect provenance records without a wallet.
 
 ```
 1. verify_hash(swarm_hash)        → check if hash is registered, get basic info
-2. get_provenance(swarm_hash)     → full record: owner, timestamp, status, transformations
-3. get_provenance_chain(hash)     → follow transformation lineage tree
-4. download_data(reference)       → retrieve the actual data from Swarm
+2. get_provenance(swarm_hash)     → full record: owner, timestamp, status, storage ref, transformations
+3. lookup_by_storage_ref(ref)     → reverse lookup by Swarm reference
+4. get_provenance_chain(hash)     → follow transformation lineage tree
+5. download_data(reference)       → retrieve the actual data from Swarm
 ```
 
 ---
@@ -211,6 +246,7 @@ Inspect provenance records without a wallet.
 | "data not registered" | `original_hash` not anchored | Call `anchor_hash` on the original first, then retry `record_transform` |
 | "too few sources" on `record_merge_transform` | Fewer than 2 source hashes provided | Provide at least 2 source hashes |
 | "too many sources" on `record_merge_transform` | More than 50 source hashes provided | Split into multiple merge operations |
+| "storage reference already set" on `set_storage_ref` | Storage ref already linked to this hash | Storage refs are set-once — use `get_provenance` to see the existing ref |
 | "not owner" / "unauthorized" | Wrong wallet for this data | Only the anchoring wallet (or delegate) can transform |
 | Size exceeded (4KB) | Upload payload too large | Split or compress data before upload |
 | Gateway unreachable | Network or gateway issue | Run `health_check`, check `SWARM_GATEWAY_URL` config |
@@ -225,6 +261,7 @@ Inspect provenance records without a wallet.
 | **Swarm hash** | 64-character hex content address returned by `upload_data` |
 | **Stamp** | Prepaid storage ticket (BZZ) — configured by duration (hours) and size (small/medium/large) |
 | **Anchor** | Registering a Swarm hash on the blockchain via `anchor_hash` |
+| **Storage reference** | A 64-char hex reference linking on-chain data hash to its storage location (e.g. Swarm hash). Set via `anchor_hash` (with `storage_ref`) or `set_storage_ref`. Set-once, immutable. Enables `lookup_by_storage_ref` reverse lookup |
 | **Transformation** | On-chain link between an original hash and a derived hash, recorded via `record_transform` |
 | **Merge transformation** | On-chain N-to-1 link combining multiple source hashes into one, recorded via `record_merge_transform` |
 | **Lineage / Provenance chain** | The full tree of transformations reachable from any hash (walks both directions), retrieved via `get_provenance_chain` |

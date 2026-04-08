@@ -280,6 +280,67 @@ class DataProvenanceContract:
             }
         )
 
+    def build_register_data_with_storage_ref_tx(
+        self,
+        data_hash: str,
+        data_type: str,
+        storage_ref: str,
+        sender: str,
+    ) -> dict:
+        """
+        Build transaction to register a data hash with a linked storage reference.
+
+        Calls the 3-param registerData(bytes32, string, bytes32) overload.
+
+        Args:
+            data_hash: 64-char hex hash of the data (content hash, e.g. SHA-256).
+            data_type: Category/type string (max 64 chars).
+            storage_ref: 64-char hex storage reference (e.g. Swarm reference).
+            sender: Address of the transaction sender.
+
+        Returns:
+            Unsigned transaction dict.
+        """
+        hash_bytes = _normalize_hash(data_hash)
+        ref_bytes = _normalize_hash(storage_ref)
+        _validate_data_type(data_type)
+        return self._contract.functions.registerData(
+            hash_bytes, data_type, ref_bytes
+        ).build_transaction(
+            {
+                "from": self._web3.to_checksum_address(sender),
+            }
+        )
+
+    def build_set_storage_ref_tx(
+        self,
+        data_hash: str,
+        storage_ref: str,
+        sender: str,
+    ) -> dict:
+        """
+        Build transaction to attach a storage reference to an existing record.
+
+        Set-once: cannot be changed after first write. Owner-only.
+
+        Args:
+            data_hash: 64-char hex hash of the registered data.
+            storage_ref: 64-char hex storage reference to link.
+            sender: Address of the data owner.
+
+        Returns:
+            Unsigned transaction dict.
+        """
+        hash_bytes = _normalize_hash(data_hash)
+        ref_bytes = _normalize_hash(storage_ref)
+        return self._contract.functions.setStorageRef(
+            hash_bytes, ref_bytes
+        ).build_transaction(
+            {
+                "from": self._web3.to_checksum_address(sender),
+            }
+        )
+
     def build_record_transformation_tx(
         self,
         original_hash: str,
@@ -496,7 +557,12 @@ class DataProvenanceContract:
 
         Returns:
             Tuple of (dataHash, owner, timestamp, dataType,
-                       transformations, accessors, status).
+                       storageRef, transformations, accessors, status)
+            on v3+ contracts (with storageRef at index 4).
+
+            On v2 contracts (no storageRef), returns
+            (dataHash, owner, timestamp, dataType,
+             transformations, accessors, status) — 7 elements.
 
             On v1 contracts, field 4 (transformations) is ``string[]``.
             On v2 contracts, field 4 is ``TransformationLink[]``
@@ -527,8 +593,9 @@ class DataProvenanceContract:
         basic = self._contract.functions.dataRecords(hash_bytes).call()
         data_hash, owner, timestamp, data_type, status = basic
 
-        # Return the same 7-element tuple shape as getDataRecord
-        return (data_hash, owner, timestamp, data_type, [], [], status)
+        # Return the same 8-element tuple shape as getDataRecord (v3+)
+        # with zero-bytes storageRef at index 4
+        return (data_hash, owner, timestamp, data_type, b"\x00" * 32, [], [], status)
 
     def get_user_data_records(self, user: str) -> List[bytes]:
         """
@@ -664,6 +731,39 @@ class DataProvenanceContract:
         """
         hash_bytes = _normalize_hash(data_hash)
         return self._contract.functions.getTransformationParents(hash_bytes).call()
+
+    # --- Storage reference read methods ---
+
+    def get_data_hash_by_storage_ref(self, storage_ref: str) -> bytes:
+        """
+        Reverse lookup: storage reference → data hash.
+
+        Args:
+            storage_ref: 64-char hex storage reference.
+
+        Returns:
+            bytes32 data hash. Returns 32 zero bytes if no mapping exists.
+        """
+        ref_bytes = _normalize_hash(storage_ref)
+        return self._contract.functions.getDataHashByStorageRef(ref_bytes).call()
+
+    _supports_storage_ref_cache: Optional[bool] = None
+
+    def supports_storage_ref(self) -> bool:
+        """Check if the deployed contract supports storageRef functions.
+
+        Performs a trial call on first invocation and caches the result.
+        Returns False for older contracts without setStorageRef.
+        """
+        if self._supports_storage_ref_cache is not None:
+            return self._supports_storage_ref_cache
+        try:
+            test_hash = b"\x00" * 32
+            self._contract.functions.getDataHashByStorageRef(test_hash).call()
+            self._supports_storage_ref_cache = True
+        except Exception:
+            self._supports_storage_ref_cache = False
+        return self._supports_storage_ref_cache
 
     _supports_v2: Optional[bool] = None
 

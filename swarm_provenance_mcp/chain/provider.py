@@ -39,8 +39,8 @@ CHAIN_PRESETS = {
         "chain_id": 84532,
         "rpc_url": "https://sepolia.base.org",
         "explorer_url": "https://base-sepolia.blockscout.com",
-        "contract_address": "0xD4a724CD7f5C4458cD2d884C2af6f011aC3Af80a",
-        "deploy_block": 39_075_766,
+        "contract_address": "0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322",
+        "deploy_block": 39_898_628,
         "rpc_fallbacks": [
             "https://base-sepolia-rpc.publicnode.com",
             "https://base-sepolia.drpc.org",

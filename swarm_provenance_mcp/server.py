@@ -137,6 +137,8 @@ TOOL RELATIONSHIPS:
 - upload_data → returns reference hash → use with download_data
 - check_stamp_health gives detailed diagnostics; get_stamp_status gives raw stamp data
 - extend_stamp increases TTL via duration_hours (not capacity)
+- anchor_hash → optionally accepts storage_ref → use lookup_by_storage_ref to reverse-lookup
+- set_storage_ref → links storage ref to an already-anchored hash (set-once) → use lookup_by_storage_ref to verify
 
 ERRORS:
 - "Not usable" / "NOT_FOUND": stamp not yet propagated — poll check_stamp_health every 15s (up to 2 min)
@@ -1071,7 +1073,8 @@ def create_server() -> Server:
                 f"or use an owned stamp from list_stamps.\n"
                 f"4. Poll check_stamp_health every 15 seconds until can_upload is true (up to 2 minutes)\n"
                 f"5. Call upload_data with the data and your stamp_id — save the reference hash\n"
-                f"6. Call anchor_hash with the reference hash to register it on-chain\n"
+                f"6. Call anchor_hash with the reference hash to register it on-chain. "
+                f"Optionally pass storage_ref (the Swarm reference from step 5) for bidirectional lookup.\n"
                 f"7. Call verify_hash to confirm the on-chain registration succeeded"
             )
 
@@ -1083,7 +1086,8 @@ def create_server() -> Server:
                     f"record_transform registers it automatically.\n"
                     f"10. Call record_transform with original_hash (from step 5), "
                     f'new_hash (from step 8), and description: "{transform_desc}"\n'
-                    f"11. Call get_provenance_chain on the original hash to verify the lineage"
+                    f"11. Optionally call set_storage_ref to link the new hash to its Swarm reference (from step 8)\n"
+                    f"12. Call get_provenance_chain on the original hash to verify the lineage"
                 )
 
             return GetPromptResult(

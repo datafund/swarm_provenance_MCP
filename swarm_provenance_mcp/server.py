@@ -179,8 +179,7 @@ upload_data (transformed data) → record_transform (original, new, description)
 
 COMPANION SERVERS:
 - swarm_connect gateway (required) — the FastAPI gateway this server talks to, handles Bee node communication
-- fds-id MCP (optional) — identity and signing server for cryptographic provenance chain anchoring
-The health_check tool reports gateway connectivity. For full provenance workflows with signed data, an fds-id server is needed but not required for basic storage.
+The health_check tool reports gateway connectivity and connection status.
 """.strip()
 
 # Validation patterns
@@ -1832,10 +1831,8 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     "Reinstall with: pip install -e . (web3/eth-account should be included)"
                 )
 
-        # Cross-server coordination info
-        response_text += f"\n_companion_servers:"
-        response_text += f"\n  - swarm_connect gateway: {gateway_url} (required, {'connected' if gateway_ok else 'unreachable'})"
-        response_text += f"\n  - fds-id MCP: optional (identity/signing for provenance chain anchoring)"
+        # Gateway status
+        response_text += f"\n_gateway: {gateway_url} ({'connected' if gateway_ok else 'unreachable'})"
 
         response_text += f"\n\n_next: {next_tool}"
         response_text += f"\n_related: list_stamps, purchase_stamp, get_wallet_info"

@@ -59,9 +59,7 @@ ready: true
 ⛓️  Chain: base-sepolia (connected)
    Contract: 0x9a3c6F47B69211F05891CCb7aD33596290b9fE64
    Wallet: 0x1f82225723ED636b3463Cf2574b555D00D750Eb0
-_companion_servers:
-  - swarm_connect gateway: https://provenance-gateway.datafund.io (required, connected)
-  - fds-id MCP: optional (identity/signing for provenance chain anchoring)
+_gateway: https://provenance-gateway.datafund.io (connected)
 
 _next: upload_data
 _related: list_stamps, purchase_stamp, get_wallet_info

@@ -666,9 +666,7 @@ cp .env.example .env
 {
   "mcpServers": {
     "swarm-provenance": {
-      "command": "/path/to/swarm_provenance_mcp/venv/bin/python",
-      "args": ["-m", "swarm_provenance_mcp.server"],
-      "cwd": "/path/to/swarm_provenance_mcp"
+      "command": "/path/to/swarm_provenance_mcp/run.sh"
     }
   }
 }
@@ -689,6 +687,8 @@ cp .env.example .env
 
 *Note: Replace `/path/to/swarm_provenance_mcp` with the actual path where you cloned the repository.*
 
+The `run.sh` launcher auto-recreates the venv if it breaks after moving or renaming the repo directory — no manual fix needed.
+
 **Alternative (if package is installed)**: You can use `"command": "swarm-provenance-mcp"` instead after running `pip install -e .`
 
 #### With on-chain provenance
@@ -699,9 +699,7 @@ To enable blockchain anchoring, add an `"env"` block to the config. You can use 
 {
   "mcpServers": {
     "swarm-provenance": {
-      "command": "/path/to/swarm_provenance_mcp/venv/bin/python",
-      "args": ["-m", "swarm_provenance_mcp.server"],
-      "cwd": "/path/to/swarm_provenance_mcp",
+      "command": "/path/to/swarm_provenance_mcp/run.sh",
       "env": {
         "CHAIN_ENABLED": "true",
         "PROVENANCE_WALLET_KEY": "0x...your_private_key_here..."

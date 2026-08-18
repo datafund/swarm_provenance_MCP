@@ -582,6 +582,11 @@ def create_server() -> Server:
                             "description": "MIME type of the content (e.g., application/json, text/plain, image/png)",
                             "default": "application/json",
                         },
+                        "sign": {
+                            "type": "string",
+                            "description": "Signing method for provenance. Use 'notary' to have the gateway cryptographically sign the data at upload time, creating a verifiable proof of upload. Check notary_info first to confirm signing is available. Leave empty for unsigned upload.",
+                            "enum": ["notary"],
+                        },
                     },
                     "required": ["data", "stamp_id"],
                 },
@@ -1505,6 +1510,7 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
         if not stamp_id:
             raise ValueError("Stamp ID cannot be empty")
         content_type = arguments.get("content_type", "application/json")
+        sign = arguments.get("sign")
 
         # Validate inputs
         validate_data_size(data)
@@ -1553,16 +1559,25 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
                 raise
 
         # Proceed with upload if stamp validation passed
-        result = gateway_client.upload_data(data, clean_stamp_id, content_type)
+        result = gateway_client.upload_data(data, clean_stamp_id, content_type, sign=sign)
 
         response_text = f"🎉 Data uploaded successfully to Swarm!\n\n"
         response_text += f"📄 Upload Details:\n"
         response_text += f"   Size: {len(data.encode('utf-8')):,} bytes\n"
         response_text += f"   Content Type: {content_type}\n"
-        response_text += f"   Stamp Used: `{clean_stamp_id}`\n\n"
-        response_text += f"🔗 Retrieval Information:\n"
+        response_text += f"   Stamp Used: `{clean_stamp_id}`\n"
+        if sign:
+            response_text += f"   Signing: {sign}\n"
+        response_text += f"\n🔗 Retrieval Information:\n"
         response_text += f"   Reference Hash: `{result['reference']}`\n"
         response_text += f"   💡 Copy this reference hash to download your data later using the 'download_data' tool."
+
+        # Surface notary signature details when present
+        notary_info = result.get("notary") or result.get("signature")
+        if notary_info and isinstance(notary_info, dict):
+            signer = notary_info.get("signer") or notary_info.get("signerAddress")
+            if signer:
+                response_text += f"\n\n🔐 Notary Signature:\n   Signer: {signer}"
 
         # Add validation warning if applicable
         if stamp_validation_failed:

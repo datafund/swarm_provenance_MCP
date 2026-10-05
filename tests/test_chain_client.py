@@ -30,6 +30,20 @@ DUMMY_HASH_BYTES = bytes.fromhex(DUMMY_HASH)
 DUMMY_CONTRACT = "0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322"
 DUMMY_TX_HASH_BYTES = bytes.fromhex("bb" * 32)
 ZERO_ADDRESS = "0x" + "0" * 40
+UNREGISTERED_RECORD = (DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0)
+
+
+def _http_error(status: int):
+    """Build the HTTPError web3's HTTPProvider raises for a non-2xx response."""
+    from requests import Response
+    from requests.exceptions import HTTPError
+
+    response = Response()
+    response.status_code = status
+    return HTTPError(
+        f"{status} Server Error: Service Unavailable for url: https://sepolia.base.org/",
+        response=response,
+    )
 
 
 @pytest.fixture
@@ -439,16 +453,18 @@ class TestChainProvider:
         provider = ChainProvider(chain="base-sepolia")
         assert provider.health_check() is True
 
-    def test_health_check_not_connected(self, mock_chain_deps):
-        """Tests health check when not connected."""
+    def test_health_check_state_method_failing(self, mock_chain_deps):
+        """eth_chainId answering is not enough — a failing state method is unhealthy."""
         from swarm_provenance_mcp.chain.provider import ChainProvider
 
-        mock_chain_deps["web3_instance"].is_connected.return_value = False
+        type(mock_chain_deps["web3_instance"].eth).gas_price = PropertyMock(
+            side_effect=_http_error(503)
+        )
         provider = ChainProvider(chain="base-sepolia")
 
         with pytest.raises(ChainConnectionError) as exc_info:
             provider.health_check()
-        assert "Cannot connect" in str(exc_info.value)
+        assert "503" in str(exc_info.value)
 
     def test_health_check_chain_id_mismatch(self, mock_chain_deps):
         """Tests health check with wrong chain ID."""
@@ -497,10 +513,11 @@ class TestChainProvider:
         from swarm_provenance_mcp.chain.provider import ChainProvider
 
         provider = ChainProvider(chain="base-sepolia")
-        assert len(provider._rpc_urls) == 3
+        assert len(provider._rpc_urls) == 4
         assert provider._rpc_urls[0] == "https://sepolia.base.org"
         assert "publicnode.com" in provider._rpc_urls[1]
         assert "drpc.org" in provider._rpc_urls[2]
+        assert "tenderly.co" in provider._rpc_urls[3]
 
     def test_custom_rpc_skips_preset_fallbacks(self, mock_chain_deps):
         """Custom RPC with no explicit fallbacks should only have primary."""
@@ -546,12 +563,11 @@ class TestChainProvider:
         provider = ChainProvider(chain="base-sepolia")
         original_url = provider.rpc_url
 
-        # Make the current web3 fail is_connected
-        provider._web3.is_connected.return_value = False
+        # Primary answers eth_chainId but 503s on state methods
+        type(provider._web3.eth).gas_price = PropertyMock(side_effect=_http_error(503))
 
         # Mock _import_web3 to return a Web3 class whose instances succeed
         fallback_web3 = MagicMock()
-        fallback_web3.is_connected.return_value = True
         fallback_web3.eth.chain_id = 84532
 
         web3_cls = mock_chain_deps["web3_class"]
@@ -576,7 +592,7 @@ class TestChainProvider:
 
         # Fallback web3 returns a block number
         fallback_web3 = MagicMock()
-        fallback_web3.is_connected.return_value = True
+        fallback_web3.eth.chain_id = 84532
         type(fallback_web3.eth).block_number = PropertyMock(return_value=99999)
 
         web3_cls = mock_chain_deps["web3_class"]
@@ -585,6 +601,219 @@ class TestChainProvider:
         block = provider.get_block_number()
         assert block == 99999
         assert provider._web3 == fallback_web3
+
+
+# --- RPC failover tests (issue #140) ---
+
+
+class TestIsTransportError:
+    """Classification of errors that warrant trying another RPC endpoint."""
+
+    @pytest.mark.parametrize("status", [429, 502, 503, 504])
+    def test_unavailable_statuses(self, status):
+        from swarm_provenance_mcp.chain.provider import is_transport_error
+
+        assert is_transport_error(_http_error(status))
+
+    @pytest.mark.parametrize("status", [400, 401, 404])
+    def test_client_errors_are_not_transport(self, status):
+        from swarm_provenance_mcp.chain.provider import is_transport_error
+
+        assert not is_transport_error(_http_error(status))
+
+    def test_connection_and_timeout(self):
+        from requests.exceptions import ConnectionError, Timeout
+
+        from swarm_provenance_mcp.chain.provider import is_transport_error
+
+        assert is_transport_error(ConnectionError("refused"))
+        assert is_transport_error(Timeout("read timed out"))
+
+    def test_no_healthy_backend_rpc_error(self):
+        from swarm_provenance_mcp.chain.provider import is_transport_error
+
+        err = ValueError(
+            {
+                "code": -32011,
+                "message": "no backend is currently healthy to serve traffic",
+            }
+        )
+        assert is_transport_error(err)
+
+    def test_wrapped_cause_is_found(self):
+        from swarm_provenance_mcp.chain.provider import is_transport_error
+
+        try:
+            try:
+                raise _http_error(503)
+            except Exception as e:
+                raise ChainTransactionError(f"Transaction failed: {e}") from e
+        except ChainTransactionError as wrapped:
+            assert is_transport_error(wrapped)
+
+    def test_revert_and_funds_are_not_transport(self):
+        from swarm_provenance_mcp.chain.provider import is_transport_error
+
+        assert not is_transport_error(
+            ValueError("execution reverted: already registered")
+        )
+        assert not is_transport_error(ValueError("insufficient funds for gas * price"))
+
+
+@pytest.fixture
+def endpoints(mock_chain_deps):
+    """
+    Give each RPC URL its own Web3 mock, so tests can degrade one endpoint.
+
+    Every endpoint starts healthy and shares the fixture's contract mock;
+    ``degrade(url)`` gives that endpoint a contract whose calls 503 and a
+    gas_price that 503s, while eth_chainId keeps answering — the
+    partially-degraded state observed on sepolia.base.org.
+    """
+    from swarm_provenance_mcp.chain.provider import CHAIN_PRESETS
+
+    preset = CHAIN_PRESETS["base-sepolia"]
+    urls = [preset["rpc_url"]] + preset["rpc_fallbacks"]
+    healthy = mock_chain_deps["web3_instance"]
+    contract = mock_chain_deps["contract"]
+    contract.functions.getDataRecord.return_value.call.return_value = (
+        UNREGISTERED_RECORD
+    )
+
+    by_url = {}
+    for url in urls:
+        w3 = MagicMock()
+        w3.to_checksum_address = lambda x: x
+        w3.eth.chain_id = 84532
+        w3.eth.gas_price = 1_000_000
+        w3.eth.get_transaction_count.return_value = 0
+        w3.eth.estimate_gas.return_value = 100_000
+        w3.eth.send_raw_transaction.return_value = DUMMY_TX_HASH_BYTES
+        w3.eth.wait_for_transaction_receipt.return_value = (
+            healthy.eth.wait_for_transaction_receipt.return_value
+        )
+        w3.eth.contract.return_value = contract
+        by_url[url] = w3
+
+    def degrade(url):
+        w3 = by_url[url]
+        type(w3.eth).gas_price = PropertyMock(side_effect=_http_error(503))
+        w3.eth.get_transaction_count.side_effect = _http_error(503)
+        broken = MagicMock()
+        broken.functions.getDataRecord.return_value.call.side_effect = _http_error(503)
+        broken.functions.registerData.return_value.build_transaction.side_effect = (
+            _http_error(503)
+        )
+        w3.eth.contract.return_value = broken
+
+    web3_cls = mock_chain_deps["web3_class"]
+    web3_cls.HTTPProvider.side_effect = lambda url, **kwargs: url
+    web3_cls.side_effect = lambda url: by_url[url]
+
+    return {"urls": urls, "web3": by_url, "degrade": degrade}
+
+
+class TestProviderFallbackProbe:
+    """_try_fallback must probe state methods, not just eth_chainId."""
+
+    def test_skips_fallback_that_only_answers_cached_methods(self, endpoints):
+        from swarm_provenance_mcp.chain.provider import ChainProvider
+
+        primary, first_fb, second_fb = endpoints["urls"][:3]
+        endpoints["degrade"](primary)
+        endpoints["degrade"](first_fb)
+
+        provider = ChainProvider(chain="base-sepolia")
+        assert provider.health_check() is True
+        assert provider.rpc_url == second_fb
+
+    def test_all_degraded_raises_connection_error(self, endpoints):
+        from swarm_provenance_mcp.chain.provider import ChainProvider
+
+        for url in endpoints["urls"]:
+            endpoints["degrade"](url)
+
+        provider = ChainProvider(chain="base-sepolia")
+        with pytest.raises(ChainConnectionError):
+            provider.health_check()
+
+
+class TestChainClientFailover:
+    """Operations re-run on the next RPC when the current one is unavailable."""
+
+    def test_anchor_fails_over_on_partially_degraded_primary(self, endpoints):
+        """The #140 scenario: chainId answers, state methods 503 — anchor still lands."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+
+        primary, fallback = endpoints["urls"][:2]
+        endpoints["degrade"](primary)
+
+        client = ChainClient(chain="base-sepolia")
+        result = client.anchor(swarm_hash=DUMMY_HASH, data_type="test-data")
+
+        assert isinstance(result, AnchorResult)
+        assert client._provider.rpc_url == fallback
+        endpoints["web3"][fallback].eth.send_raw_transaction.assert_called_once()
+        endpoints["web3"][primary].eth.send_raw_transaction.assert_not_called()
+
+    def test_contract_rebound_to_fallback(self, endpoints):
+        """After failover the contract must call the new endpoint, not the old one."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+
+        primary, fallback = endpoints["urls"][:2]
+        endpoints["degrade"](primary)
+
+        client = ChainClient(chain="base-sepolia")
+        client.verify(DUMMY_HASH)
+
+        assert client._contract._web3 is endpoints["web3"][fallback]
+
+    def test_no_failover_after_broadcast(self, endpoints):
+        """A transport error from send_raw_transaction must not re-send the tx."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+
+        primary = endpoints["urls"][0]
+        endpoints["web3"][primary].eth.send_raw_transaction.side_effect = _http_error(
+            503
+        )
+
+        client = ChainClient(chain="base-sepolia")
+        with pytest.raises(ChainTransactionError) as exc_info:
+            client.anchor(swarm_hash=DUMMY_HASH, data_type="test-data")
+
+        assert exc_info.value.broadcast is True
+        assert client._provider.rpc_url == primary
+        endpoints["web3"][primary].eth.send_raw_transaction.assert_called_once()
+        for url in endpoints["urls"][1:]:
+            endpoints["web3"][url].eth.send_raw_transaction.assert_not_called()
+
+    def test_all_endpoints_degraded_raises_connection_error(self, endpoints):
+        """With no usable fallback the error is a ChainConnectionError (retryable)."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+
+        for url in endpoints["urls"]:
+            endpoints["degrade"](url)
+
+        client = ChainClient(chain="base-sepolia")
+        with pytest.raises(ChainConnectionError) as exc_info:
+            client.anchor(swarm_hash=DUMMY_HASH, data_type="test-data")
+        assert "503" in str(exc_info.value)
+
+    def test_domain_errors_do_not_fail_over(self, endpoints):
+        """A revert is the same on every endpoint — no failover."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+
+        primary = endpoints["urls"][0]
+        endpoints["web3"][primary].eth.estimate_gas.side_effect = ValueError(
+            "execution reverted: already registered"
+        )
+
+        client = ChainClient(chain="base-sepolia")
+        with pytest.raises(ChainTransactionError) as exc_info:
+            client.anchor(swarm_hash=DUMMY_HASH, data_type="test-data")
+
+        assert exc_info.value.broadcast is False
+        assert client._provider.rpc_url == primary
 
 
 # --- Wallet tests ---

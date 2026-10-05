@@ -2107,6 +2107,8 @@ async def handle_chain_health(arguments: Dict[str, Any]) -> CallToolResult:
         )
 
     try:
+        from .chain.provider import PROBE_METHODS
+
         # Use chain_client if available, otherwise create a temporary provider
         if chain_client:
             provider = chain_client._provider
@@ -2138,6 +2140,7 @@ async def handle_chain_health(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"   Chain ID: {provider.chain_id}\n"
         response_text += f"   Latest Block: {block_number:,}\n"
         response_text += f"   RPC Response: {elapsed_ms:.0f}ms\n"
+        response_text += f"   Probe: {', '.join(PROBE_METHODS)}\n"
         response_text += f"   Contract: {provider.contract_address}\n"
         response_text += f"   RPC: {_mask_rpc_url(provider.rpc_url)}"
         response_text += _format_hints("chain_balance", ["health_check"])

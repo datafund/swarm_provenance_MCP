@@ -8,11 +8,14 @@ gas estimation, signing, broadcasting, and receipt parsing.
 Dependencies (web3, eth-account) are included in the default install.
 """
 
+import functools
 import logging
 from typing import List, Optional
 
 from .contract import DataStatus
 from .exceptions import (
+    ChainConnectionError,
+    ChainError,
     ChainTransactionError,
     DataAlreadyRegisteredError,
     DataNotRegisteredError,
@@ -31,6 +34,59 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _should_fail_over(e: Exception) -> bool:
+    """Whether an error is an unavailable endpoint that another RPC may serve."""
+    from .provider import is_transport_error
+
+    if isinstance(e, ChainTransactionError):
+        # Once broadcast was attempted the tx may be pending — never re-run.
+        return not e.broadcast and is_transport_error(e)
+    if isinstance(e, ChainError):
+        # Domain errors, and ChainConnectionError from a nested call that
+        # already exhausted the fallbacks.
+        return False
+    return is_transport_error(e)
+
+
+def _rpc_failover(method):
+    """
+    Re-run a ChainClient operation on the next configured RPC endpoint when
+    the current one is unavailable (5xx, rate-limited, timeout, -32011).
+
+    Raises ChainConnectionError when no fallback can serve the request, so
+    callers can report it as retryable.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        failovers = 0
+        while True:
+            try:
+                return method(self, *args, **kwargs)
+            except Exception as e:
+                if not _should_fail_over(e):
+                    raise
+                failed_url = self._provider.rpc_url
+                max_failovers = len(self._provider._rpc_urls) - 1
+                if failovers < max_failovers and self._failover():
+                    failovers += 1
+                    logger.warning(
+                        "%s: RPC %s unavailable (%s), retrying on %s",
+                        method.__name__,
+                        failed_url,
+                        e,
+                        self._provider.rpc_url,
+                    )
+                    continue
+                raise ChainConnectionError(
+                    f"RPC endpoint unavailable and no fallback could serve the "
+                    f"request: {e}",
+                    rpc_url=failed_url,
+                ) from e
+
+    return wrapper
 
 
 class ChainClient:
@@ -109,6 +165,26 @@ class ChainClient:
 
     # --- Internal helpers ---
 
+    def _failover(self) -> bool:
+        """
+        Switch the provider to the next healthy RPC and rebind the contract.
+
+        The contract wrapper holds its own Web3 reference, so it must be
+        rebuilt or it keeps calling the endpoint that just failed.
+
+        Returns:
+            True if a fallback endpoint was switched to.
+        """
+        from .contract import DataProvenanceContract
+
+        if not self._provider._try_fallback():
+            return False
+        self._contract = DataProvenanceContract(
+            web3=self._provider.web3,
+            contract_address=self._provider.contract_address,
+        )
+        return True
+
     def _send_transaction(self, tx: dict) -> dict:
         """
         Estimate gas, sign, broadcast, and wait for receipt.
@@ -123,6 +199,7 @@ class ChainClient:
             ChainTransactionError: If transaction fails.
         """
         web3 = self._provider.web3
+        broadcast = False
 
         try:
             # Fill in nonce
@@ -140,6 +217,7 @@ class ChainClient:
 
             # Sign and send
             raw_tx = self._wallet.sign_transaction(tx)
+            broadcast = True
             tx_hash = web3.eth.send_raw_transaction(raw_tx)
 
             logger.debug("Transaction sent: %s", tx_hash.hex())
@@ -151,6 +229,7 @@ class ChainClient:
                 raise ChainTransactionError(
                     "Transaction reverted (status=0)",
                     tx_hash=tx_hash.hex(),
+                    broadcast=True,
                 )
 
             logger.debug(
@@ -170,6 +249,7 @@ class ChainClient:
             raise ChainTransactionError(
                 f"Transaction failed: {e}",
                 tx_hash=tx_hash_str,
+                broadcast=broadcast,
             ) from e
 
     def _receipt_to_explorer_url(self, receipt: dict) -> Optional[str]:
@@ -181,6 +261,7 @@ class ChainClient:
 
     # --- Write operations ---
 
+    @_rpc_failover
     def anchor(
         self,
         swarm_hash: str,
@@ -259,6 +340,7 @@ class ChainClient:
             storage_ref=storage_ref,
         )
 
+    @_rpc_failover
     def anchor_for(
         self,
         swarm_hash: str,
@@ -311,6 +393,7 @@ class ChainClient:
             owner=owner,
         )
 
+    @_rpc_failover
     def batch_anchor(
         self,
         swarm_hashes: List[str],
@@ -345,6 +428,7 @@ class ChainClient:
             owner=self._wallet.address,
         )
 
+    @_rpc_failover
     def transform(
         self,
         original_hash: str,
@@ -435,6 +519,7 @@ class ChainClient:
             description=description,
         )
 
+    @_rpc_failover
     def access(
         self,
         swarm_hash: str,
@@ -465,6 +550,7 @@ class ChainClient:
             accessor=self._wallet.address,
         )
 
+    @_rpc_failover
     def batch_access(
         self,
         swarm_hashes: List[str],
@@ -495,6 +581,7 @@ class ChainClient:
             accessor=self._wallet.address,
         )
 
+    @_rpc_failover
     def set_status(
         self,
         swarm_hash: str,
@@ -531,6 +618,7 @@ class ChainClient:
             owner=self._wallet.address,
         )
 
+    @_rpc_failover
     def batch_set_status(
         self,
         swarm_hashes: List[str],
@@ -565,6 +653,7 @@ class ChainClient:
             owner=self._wallet.address,
         )
 
+    @_rpc_failover
     def transfer_ownership(
         self,
         swarm_hash: str,
@@ -599,6 +688,7 @@ class ChainClient:
             owner=new_owner,
         )
 
+    @_rpc_failover
     def set_delegate(
         self,
         delegate: str,
@@ -634,6 +724,7 @@ class ChainClient:
             owner=self._wallet.address,
         )
 
+    @_rpc_failover
     def set_storage_ref(
         self,
         data_hash: str,
@@ -693,6 +784,7 @@ class ChainClient:
             storage_ref=storage_ref,
         )
 
+    @_rpc_failover
     def lookup_by_storage_ref(
         self,
         storage_ref: str,
@@ -719,6 +811,7 @@ class ChainClient:
         data_hash_hex = data_hash_bytes.hex()
         return self.get(data_hash_hex)
 
+    @_rpc_failover
     def merge_transform(
         self,
         source_hashes: List[str],
@@ -770,6 +863,7 @@ class ChainClient:
 
     # --- Read operations ---
 
+    @_rpc_failover
     def get(
         self,
         swarm_hash: str,
@@ -868,6 +962,7 @@ class ChainClient:
             transformations=chain_transformations,
         )
 
+    @_rpc_failover
     def verify(
         self,
         swarm_hash: str,
@@ -887,6 +982,7 @@ class ChainClient:
         except DataNotRegisteredError:
             return False
 
+    @_rpc_failover
     def balance(self) -> ChainWalletInfo:
         """
         Get wallet balance and chain info.
@@ -931,6 +1027,7 @@ class ChainClient:
 
         return result
 
+    @_rpc_failover
     def get_provenance_chain(
         self,
         swarm_hash: str,

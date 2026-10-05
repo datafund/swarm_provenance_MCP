@@ -1481,6 +1481,8 @@ class TestChainHealth:
         assert "base-sepolia" in text
         assert "84532" in text
         assert "12,345,678" in text
+        # Reports the probe actually run, so green cannot mean "chainId answered"
+        assert "Probe: eth_chainId, eth_gasPrice, eth_getTransactionCount" in text
 
     async def test_chain_health_disconnected(self, server):
         """Connection error should show disconnected status."""

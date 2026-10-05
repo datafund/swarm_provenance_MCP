@@ -14,6 +14,7 @@ from typing import List, Optional
 
 from .contract import DataStatus
 from .exceptions import (
+    ChainConfigurationError,
     ChainConnectionError,
     ChainError,
     ChainTransactionError,
@@ -89,6 +90,15 @@ def _rpc_failover(method):
     return wrapper
 
 
+class _NoWallet:
+    """Stands in for ChainWallet in a read-only client: any use raises."""
+
+    def __getattr__(self, name):
+        raise ChainConfigurationError(
+            "This operation requires a wallet. Set PROVENANCE_WALLET_KEY."
+        )
+
+
 class ChainClient:
     """High-level client for DataProvenance smart contract operations.
 
@@ -108,6 +118,7 @@ class ChainClient:
         explorer_url: Optional[str] = None,
         gas_limit: Optional[int] = None,
         rpc_fallbacks: Optional[List[str]] = None,
+        read_only: bool = False,
     ):
         """
         Initialize the chain client.
@@ -122,6 +133,8 @@ class ChainClient:
             explorer_url: Custom block explorer URL. If None, uses preset.
             gas_limit: Explicit gas limit. If set, skips estimation and multiplier.
             rpc_fallbacks: Fallback RPC URLs tried in order on failure.
+            read_only: Skip wallet loading. Read methods work as usual; write
+                methods raise ChainConfigurationError.
 
         Raises:
             ChainConfigurationError: If dependencies missing or config invalid.
@@ -137,10 +150,13 @@ class ChainClient:
             explorer_url=explorer_url,
             rpc_fallbacks=rpc_fallbacks,
         )
-        self._wallet = ChainWallet(
-            private_key=private_key,
-            private_key_env=private_key_env,
-        )
+        if read_only:
+            self._wallet = _NoWallet()
+        else:
+            self._wallet = ChainWallet(
+                private_key=private_key,
+                private_key_env=private_key_env,
+            )
         self._contract = DataProvenanceContract(
             web3=self._provider.web3,
             contract_address=self._provider.contract_address,

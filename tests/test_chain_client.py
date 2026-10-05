@@ -700,7 +700,15 @@ def endpoints(mock_chain_deps):
         type(w3.eth).gas_price = PropertyMock(side_effect=_http_error(503))
         w3.eth.get_transaction_count.side_effect = _http_error(503)
         broken = MagicMock()
-        broken.functions.getDataRecord.return_value.call.side_effect = _http_error(503)
+        for fn in (
+            "getDataRecord",
+            "getDataHashByStorageRef",
+            "getTransformationLinks",
+            "getTransformationParents",
+        ):
+            getattr(broken.functions, fn).return_value.call.side_effect = _http_error(
+                503
+            )
         broken.functions.registerData.return_value.build_transaction.side_effect = (
             _http_error(503)
         )

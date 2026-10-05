@@ -48,6 +48,25 @@ def _parse_rpc_fallbacks():
     return None
 
 
+def _chain_reader():
+    """
+    ChainClient for the read-only tools: the wallet client when configured,
+    otherwise a read-only client, so reads get the same RPC failover either way.
+    """
+    if chain_client:
+        return chain_client
+    from .chain.client import ChainClient
+
+    return ChainClient(
+        chain=settings.chain_name,
+        rpc_url=settings.chain_rpc_url,
+        contract_address=settings.chain_contract_address,
+        explorer_url=settings.chain_explorer_url,
+        rpc_fallbacks=_parse_rpc_fallbacks(),
+        read_only=True,
+    )
+
+
 if settings.chain_enabled:
     try:
         from .chain import CHAIN_AVAILABLE as _chain_avail, ChainClient
@@ -76,7 +95,7 @@ if settings.chain_enabled:
     except Exception as e:
         # chain_client stays None but CHAIN_AVAILABLE remains True —
         # read-only tools (verify_hash, get_provenance, etc.) work
-        # without a wallet via temporary provider+contract fallback.
+        # without a wallet via _chain_reader().
         err_msg = str(e).lower()
         if "wallet" in err_msg or "private key" in err_msg:
             logger.info(
@@ -2397,8 +2416,8 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
 async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle verify_hash requests — check if a Swarm hash is registered on-chain.
 
-    Read-only: works without PROVENANCE_WALLET_KEY by creating a temporary
-    provider + contract for direct contract reads (no signing needed).
+    Read-only: works without PROVENANCE_WALLET_KEY via a read-only
+    ChainClient (no signing needed), with the same RPC failover.
     """
     if not CHAIN_AVAILABLE:
         return CallToolResult(
@@ -2420,77 +2439,11 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
             raise ValueError("swarm_hash is required")
         clean_hash = validate_and_clean_reference_hash(swarm_hash)
 
-        # Use chain_client if available, otherwise create temporary provider + contract
-        if chain_client:
-            is_registered = await asyncio.to_thread(chain_client.verify, clean_hash)
-            if is_registered:
-                record = await asyncio.to_thread(chain_client.get, clean_hash)
-            else:
-                record = None
-        else:
-            from .chain.provider import ChainProvider
-            from .chain.contract import DataProvenanceContract
-            from .chain.exceptions import DataNotRegisteredError
-
-            provider = ChainProvider(
-                chain=settings.chain_name,
-                rpc_url=settings.chain_rpc_url,
-                contract_address=settings.chain_contract_address,
-                explorer_url=settings.chain_explorer_url,
-                rpc_fallbacks=_parse_rpc_fallbacks(),
-            )
-            contract = DataProvenanceContract(
-                web3=provider.web3,
-                contract_address=provider.contract_address,
-            )
-            raw = await asyncio.to_thread(contract.get_data_record, clean_hash)
-            zero_address = "0x" + "0" * 40
-            if raw[1] == zero_address:
-                is_registered = False
-                record = None
-            else:
-                is_registered = True
-                from .chain.models import (
-                    ChainProvenanceRecord,
-                    ChainTransformation,
-                    DataStatusEnum,
-                )
-
-                # Handle both 8-field (v3+, with storageRef) and 7-field tuples
-                if len(raw) >= 8:
-                    storage_ref_bytes = raw[4]
-                    transformations_raw = raw[5]
-                    accessors_raw = raw[6]
-                    status_raw = raw[7]
-                else:
-                    storage_ref_bytes = None
-                    transformations_raw = raw[4]
-                    accessors_raw = raw[5]
-                    status_raw = raw[6]
-
-                parsed_storage_ref = None
-                if (
-                    storage_ref_bytes
-                    and isinstance(storage_ref_bytes, bytes)
-                    and storage_ref_bytes != b"\x00" * 32
-                ):
-                    parsed_storage_ref = storage_ref_bytes.hex()
-
-                record = ChainProvenanceRecord(
-                    data_hash=(
-                        raw[0].hex() if isinstance(raw[0], bytes) else str(raw[0])
-                    ),
-                    owner=raw[1],
-                    timestamp=raw[2],
-                    data_type=raw[3],
-                    storage_ref=parsed_storage_ref,
-                    status=DataStatusEnum(status_raw),
-                    accessors=list(accessors_raw),
-                    transformations=[
-                        ChainTransformation(description=str(t))
-                        for t in transformations_raw
-                    ],
-                )
+        reader = _chain_reader()
+        is_registered = await asyncio.to_thread(reader.verify, clean_hash)
+        record = (
+            await asyncio.to_thread(reader.get, clean_hash) if is_registered else None
+        )
 
         if is_registered and record:
             from datetime import datetime, timezone
@@ -2559,8 +2512,8 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
 async def handle_get_provenance(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle get_provenance requests — retrieve full on-chain provenance record.
 
-    Read-only: works without PROVENANCE_WALLET_KEY by creating a temporary
-    provider + contract for direct contract reads (no signing needed).
+    Read-only: works without PROVENANCE_WALLET_KEY via a read-only
+    ChainClient (no signing needed), with the same RPC failover.
     """
     if not CHAIN_AVAILABLE:
         return CallToolResult(
@@ -2582,69 +2535,7 @@ async def handle_get_provenance(arguments: Dict[str, Any]) -> CallToolResult:
             raise ValueError("swarm_hash is required")
         clean_hash = validate_and_clean_reference_hash(swarm_hash)
 
-        # Use chain_client if available, otherwise create temporary provider + contract
-        if chain_client:
-            record = await asyncio.to_thread(chain_client.get, clean_hash)
-        else:
-            from .chain.provider import ChainProvider
-            from .chain.contract import DataProvenanceContract
-            from .chain.exceptions import DataNotRegisteredError
-            from .chain.models import (
-                ChainProvenanceRecord,
-                ChainTransformation,
-                DataStatusEnum,
-            )
-
-            provider = ChainProvider(
-                chain=settings.chain_name,
-                rpc_url=settings.chain_rpc_url,
-                contract_address=settings.chain_contract_address,
-                explorer_url=settings.chain_explorer_url,
-                rpc_fallbacks=_parse_rpc_fallbacks(),
-            )
-            contract = DataProvenanceContract(
-                web3=provider.web3,
-                contract_address=provider.contract_address,
-            )
-            raw = await asyncio.to_thread(contract.get_data_record, clean_hash)
-            zero_address = "0x" + "0" * 40
-            if raw[1] == zero_address:
-                raise DataNotRegisteredError(
-                    f"Data hash {clean_hash} is not registered on-chain",
-                    data_hash=clean_hash,
-                )
-            # Handle both 8-field (v3+, with storageRef) and 7-field tuples
-            if len(raw) >= 8:
-                storage_ref_bytes = raw[4]
-                transformations_raw = raw[5]
-                accessors_raw = raw[6]
-                status_raw = raw[7]
-            else:
-                storage_ref_bytes = None
-                transformations_raw = raw[4]
-                accessors_raw = raw[5]
-                status_raw = raw[6]
-
-            parsed_storage_ref = None
-            if (
-                storage_ref_bytes
-                and isinstance(storage_ref_bytes, bytes)
-                and storage_ref_bytes != b"\x00" * 32
-            ):
-                parsed_storage_ref = storage_ref_bytes.hex()
-
-            record = ChainProvenanceRecord(
-                data_hash=(raw[0].hex() if isinstance(raw[0], bytes) else str(raw[0])),
-                owner=raw[1],
-                timestamp=raw[2],
-                data_type=raw[3],
-                storage_ref=parsed_storage_ref,
-                status=DataStatusEnum(status_raw),
-                accessors=list(accessors_raw),
-                transformations=[
-                    ChainTransformation(description=str(t)) for t in transformations_raw
-                ],
-            )
+        record = await asyncio.to_thread(_chain_reader().get, clean_hash)
 
         from datetime import datetime, timezone
 
@@ -3196,8 +3087,8 @@ async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolRe
 async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle get_provenance_chain requests — traverse transformation lineage.
 
-    Read-only: works without PROVENANCE_WALLET_KEY by creating a temporary
-    provider + contract for direct contract reads (no signing needed).
+    Read-only: works without PROVENANCE_WALLET_KEY via a read-only
+    ChainClient (no signing needed), with the same RPC failover.
     """
     if not CHAIN_AVAILABLE:
         return CallToolResult(
@@ -3223,170 +3114,10 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
         if not isinstance(max_depth, int) or max_depth < 1 or max_depth > 50:
             raise ValueError("max_depth must be an integer between 1 and 50")
 
-        if chain_client:
-            chain_records = await asyncio.to_thread(
-                lambda: chain_client.get_provenance_chain(
-                    clean_hash, max_depth=max_depth
-                )
-            )
-        else:
-            # Read-only fallback without wallet key
-            from .chain.provider import ChainProvider
-            from .chain.contract import DataProvenanceContract
-            from .chain.exceptions import DataNotRegisteredError
-            from .chain.models import (
-                ChainProvenanceRecord,
-                ChainTransformation,
-                DataStatusEnum,
-            )
-
-            provider = ChainProvider(
-                chain=settings.chain_name,
-                rpc_url=settings.chain_rpc_url,
-                contract_address=settings.chain_contract_address,
-                explorer_url=settings.chain_explorer_url,
-                rpc_fallbacks=_parse_rpc_fallbacks(),
-            )
-            contract = DataProvenanceContract(
-                web3=provider.web3,
-                contract_address=provider.contract_address,
-            )
-
-            def _readonly_traverse():
-                """BFS traversal in a thread to avoid blocking the event loop."""
-                import logging as _log
-
-                _logger = _log.getLogger(__name__)
-
-                # Build in-memory transformation index via cached event scan
-                from .chain.event_cache import get_cache as _get_event_cache
-
-                forward = {}  # original_hex -> [(new_hex, desc)]
-                reverse = {}  # new_hex -> [(original_hex, desc)]
-                deploy_block = provider.deploy_block
-                use_local_index = False
-
-                if deploy_block is not None:
-                    try:
-                        cache = _get_event_cache(
-                            provider.chain, provider.contract_address
-                        )
-                        current_block = provider.web3.eth.block_number
-                        forward, reverse = cache.get_maps(
-                            contract, deploy_block, current_block
-                        )
-                        use_local_index = True
-                    except Exception as e:
-                        _logger.warning(
-                            "Full event scan failed, per-node fallback: %s", e
-                        )
-
-                records = []
-                visited = set()
-                to_visit = [(clean_hash, 0)]
-                zero_address = "0x" + "0" * 40
-
-                while to_visit:
-                    current_hash, depth = to_visit.pop(0)
-                    if current_hash in visited or depth > max_depth:
-                        continue
-                    visited.add(current_hash)
-
-                    try:
-                        raw = contract.get_data_record(current_hash)
-                        if raw[1] == zero_address:
-                            continue
-                        record = ChainProvenanceRecord(
-                            data_hash=(
-                                raw[0].hex()
-                                if isinstance(raw[0], bytes)
-                                else str(raw[0])
-                            ),
-                            owner=raw[1],
-                            timestamp=raw[2],
-                            data_type=raw[3],
-                            status=DataStatusEnum(raw[6]),
-                            accessors=list(raw[5]),
-                            transformations=[
-                                ChainTransformation(description=str(t)) for t in raw[4]
-                            ],
-                        )
-
-                        if use_local_index:
-                            fwd = forward.get(current_hash, [])
-                            if fwd:
-                                record.transformations = [
-                                    ChainTransformation(
-                                        description=desc,
-                                        new_data_hash=nh,
-                                    )
-                                    for nh, desc in fwd
-                                ]
-                                for nh, _ in fwd:
-                                    if nh not in visited:
-                                        to_visit.append((nh, depth + 1))
-                            for orig_hex, _ in reverse.get(current_hash, []):
-                                if orig_hex not in visited:
-                                    to_visit.append((orig_hex, depth + 1))
-                        else:
-                            try:
-                                events = contract.get_transformations_from(current_hash)
-                                if events:
-                                    enriched = []
-                                    for orig_bytes, new_bytes, desc in events:
-                                        new_hash = (
-                                            new_bytes.hex()
-                                            if isinstance(new_bytes, bytes)
-                                            else str(new_bytes)
-                                        )
-                                        enriched.append(
-                                            ChainTransformation(
-                                                description=desc,
-                                                new_data_hash=new_hash,
-                                            )
-                                        )
-                                        if new_hash not in visited:
-                                            to_visit.append((new_hash, depth + 1))
-                                    record.transformations = enriched
-                            except Exception as e:
-                                _logger.warning(
-                                    "Event query failed for %s: %s",
-                                    current_hash,
-                                    e,
-                                )
-                                for t in record.transformations:
-                                    if (
-                                        t.new_data_hash
-                                        and t.new_data_hash not in visited
-                                    ):
-                                        to_visit.append((t.new_data_hash, depth + 1))
-
-                            try:
-                                reverse_events = contract.get_transformations_to(
-                                    current_hash
-                                )
-                                for orig_bytes, new_bytes, desc in reverse_events:
-                                    orig_hash = (
-                                        orig_bytes.hex()
-                                        if isinstance(orig_bytes, bytes)
-                                        else str(orig_bytes)
-                                    )
-                                    if orig_hash not in visited:
-                                        to_visit.append((orig_hash, depth + 1))
-                            except Exception as e:
-                                _logger.warning(
-                                    "Reverse event query failed for %s: %s",
-                                    current_hash,
-                                    e,
-                                )
-
-                        records.append(record)
-                    except Exception:
-                        continue
-
-                return records
-
-            chain_records = await asyncio.to_thread(_readonly_traverse)
+        reader = _chain_reader()
+        chain_records = await asyncio.to_thread(
+            lambda: reader.get_provenance_chain(clean_hash, max_depth=max_depth)
+        )
 
         if not chain_records:
             response_text = f"⛓️  No provenance chain found\n\n"
@@ -3663,8 +3394,8 @@ async def handle_set_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
 async def handle_lookup_by_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle lookup_by_storage_ref requests — reverse lookup by storage reference.
 
-    Read-only: works without PROVENANCE_WALLET_KEY by creating a temporary
-    provider + contract for direct contract reads (no signing needed).
+    Read-only: works without PROVENANCE_WALLET_KEY via a read-only
+    ChainClient (no signing needed), with the same RPC failover.
     """
     if not CHAIN_AVAILABLE:
         return CallToolResult(
@@ -3686,81 +3417,15 @@ async def handle_lookup_by_storage_ref(arguments: Dict[str, Any]) -> CallToolRes
             raise ValueError("storage_ref is required")
         clean_ref = validate_and_clean_reference_hash(storage_ref)
 
-        # Use chain_client if available, otherwise create temporary provider + contract
-        if chain_client:
+        from .chain.exceptions import DataNotRegisteredError
+
+        try:
             record = await asyncio.to_thread(
-                chain_client.lookup_by_storage_ref, clean_ref
+                _chain_reader().lookup_by_storage_ref, clean_ref
             )
-        else:
-            from .chain.provider import ChainProvider
-            from .chain.contract import DataProvenanceContract
-
-            provider = ChainProvider(
-                chain=settings.chain_name,
-                rpc_url=settings.chain_rpc_url,
-                contract_address=settings.chain_contract_address,
-                explorer_url=settings.chain_explorer_url,
-                rpc_fallbacks=_parse_rpc_fallbacks(),
-            )
-            contract = DataProvenanceContract(
-                web3=provider.web3,
-                contract_address=provider.contract_address,
-            )
-            data_hash_bytes = await asyncio.to_thread(
-                contract.get_data_hash_by_storage_ref, clean_ref
-            )
-            if data_hash_bytes == b"\x00" * 32:
-                record = None
-            else:
-                # Fetch the full record
-                from .chain.models import (
-                    ChainProvenanceRecord,
-                    ChainTransformation,
-                    DataStatusEnum,
-                )
-
-                raw = await asyncio.to_thread(
-                    contract.get_data_record, data_hash_bytes.hex()
-                )
-                zero_address = "0x" + "0" * 40
-                if raw[1] == zero_address:
-                    record = None
-                else:
-                    # Handle both 8-field (v3+) and 7-field (v2) tuples
-                    if len(raw) >= 8:
-                        storage_ref_bytes = raw[4]
-                        transformations_raw = raw[5]
-                        accessors_raw = raw[6]
-                        status_raw = raw[7]
-                    else:
-                        storage_ref_bytes = None
-                        transformations_raw = raw[4]
-                        accessors_raw = raw[5]
-                        status_raw = raw[6]
-
-                    parsed_storage_ref = None
-                    if (
-                        storage_ref_bytes
-                        and isinstance(storage_ref_bytes, bytes)
-                        and storage_ref_bytes != b"\x00" * 32
-                    ):
-                        parsed_storage_ref = storage_ref_bytes.hex()
-
-                    record = ChainProvenanceRecord(
-                        data_hash=(
-                            raw[0].hex() if isinstance(raw[0], bytes) else str(raw[0])
-                        ),
-                        owner=raw[1],
-                        timestamp=raw[2],
-                        data_type=raw[3],
-                        storage_ref=parsed_storage_ref,
-                        status=DataStatusEnum(status_raw),
-                        accessors=list(accessors_raw),
-                        transformations=[
-                            ChainTransformation(description=str(t))
-                            for t in transformations_raw
-                        ],
-                    )
+        except DataNotRegisteredError:
+            # Mapping exists but points at an unregistered hash
+            record = None
 
         if record:
             from datetime import datetime, timezone

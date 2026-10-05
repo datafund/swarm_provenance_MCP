@@ -406,6 +406,68 @@ def _is_retryable_error(e: Exception) -> bool:
     return False
 
 
+def _recovery_hint(e: Exception) -> Optional[str]:
+    """Point at health_check only when the failure may be transient.
+
+    For a permanent error health_check cannot change the outcome, so an agent
+    following the hint would loop without progress.
+    """
+    return "health_check" if _is_retryable_error(e) else None
+
+
+def _gateway_error_text(message: str, e: Exception) -> str:
+    """Append an explicit note when only the gateway operator can fix the error."""
+    if _is_insufficient_funds_error(e):
+        message += (
+            "\n\nOperator action required: the gateway's wallet cannot pay for "
+            "this operation. Retrying or calling other tools will not help — "
+            "report it to the gateway operator."
+        )
+    return message
+
+
+def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Summarise whether the gateway's Bee node can reach the Swarm network.
+
+    Gateway liveness says nothing about this: a node with no peers serves
+    its own local data and accepts uploads that never propagate.
+
+    Returns:
+        None if the gateway does not report ``bee_node``, otherwise a dict with
+        ``ok`` (bool), ``summary`` (str) and ``problems`` (list of str).
+    """
+    bee = gateway_response.get("bee_node")
+    if not isinstance(bee, dict):
+        return None
+
+    peers = bee.get("connected_peers")
+    availability = bee.get("network_availability")
+    problems = []
+    if bee.get("healthy") is False:
+        problems.append("gateway reports the Bee node unhealthy")
+    if availability is not None and availability != "Available":
+        problems.append(f"network availability is {availability}")
+    if peers is not None and peers == 0:
+        problems.append("Bee node has no connected peers")
+    if bee.get("warming_up"):
+        problems.append("Bee node is still warming up")
+    problems.extend(str(w) for w in bee.get("warnings") or [])
+
+    parts = []
+    if peers is not None:
+        parts.append(f"{peers} peers")
+    if availability:
+        parts.append(f"availability {availability}")
+    if bee.get("reachability"):
+        parts.append(f"reachability {bee['reachability']}")
+    return {
+        "ok": not problems,
+        "summary": ", ".join(parts) or "no details reported",
+        "problems": problems,
+    }
+
+
 # Chain balance thresholds and funding URLs
 _MIN_BALANCE_WEI = 10**14  # 0.0001 ETH — cannot reliably transact
 _LOW_BALANCE_WEI = 10**15  # 0.001 ETH — may run out soon
@@ -589,7 +651,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="download_data",
-                description="Download data from the Swarm network using a reference hash. The reference hash is returned by upload_data after a successful upload. Returns the decoded content for text/JSON, or size and type metadata for binary data.",
+                description="Download data from the Swarm network using a reference hash, retrieved through the gateway's Bee node. The reference can come from upload_data or any other Swarm upload. Returns the decoded content for text/JSON, or size and type metadata for binary data. A not-found result says whether the gateway is connected to the Swarm network — do not re-upload when it is not.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -912,7 +974,7 @@ def create_server() -> Server:
                         text=_format_error(
                             f"Error executing {name}: {str(e)}",
                             retryable=retryable,
-                            next_tool="health_check",
+                            next_tool=_recovery_hint(e),
                         ),
                     )
                 ],
@@ -1232,7 +1294,7 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
             isError=True,
         )
     except RequestException as e:
-        error_msg = f"Failed to purchase stamp: {str(e)}"
+        error_msg = _gateway_error_text(f"Failed to purchase stamp: {str(e)}", e)
         logger.error(error_msg)
         return CallToolResult(
             content=[
@@ -1241,7 +1303,7 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         error_msg,
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],
@@ -1350,7 +1412,7 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         error_msg,
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],
@@ -1426,7 +1488,7 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         error_msg,
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],
@@ -1478,7 +1540,7 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
             isError=True,
         )
     except RequestException as e:
-        error_msg = f"Failed to extend stamp: {str(e)}"
+        error_msg = _gateway_error_text(f"Failed to extend stamp: {str(e)}", e)
         logger.error(error_msg)
         return CallToolResult(
             content=[
@@ -1487,7 +1549,7 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         error_msg,
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],
@@ -1599,7 +1661,7 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         error_msg,
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],
@@ -1607,8 +1669,63 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
         )
 
 
+def _download_not_found(reference: str) -> CallToolResult:
+    """
+    Explain a download 404 so the agent can tell its causes apart.
+
+    "Not found" can mean the content is not on Swarm, or that the gateway's
+    Bee node cannot reach the network. Re-uploading is wrong in the second
+    case, so the gateway's network status is checked before answering.
+    """
+    network = None
+    try:
+        gw_resp = gateway_client.health_check().get("gateway_response") or {}
+        network = _bee_network_status(gw_resp)
+    except RequestException:
+        pass
+
+    msg = f"Not found: the gateway could not retrieve `{reference}`.\n\n"
+    if network is not None and not network["ok"]:
+        msg += (
+            f"The gateway's Bee node cannot reliably reach the Swarm network "
+            f"({'; '.join(network['problems'])}), so it can only return data "
+            "stored on this node. The content may well exist on Swarm.\n"
+            "Do not re-upload it. Operator action required; retry once "
+            "health_check reports the Swarm network as connected."
+        )
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(msg, retryable=True, next_tool="health_check"),
+                )
+            ],
+            isError=True,
+        )
+
+    if network is not None:
+        msg += (
+            f"The gateway is connected to the Swarm network "
+            f"({network['summary']}), so the reference is most likely not "
+            "available on Swarm: it was never uploaded, its postage stamp "
+            "expired, or the reference is wrong.\n"
+        )
+    else:
+        msg += (
+            "Possible causes: the reference was never uploaded, its postage "
+            "stamp expired, the reference is wrong, or the gateway's Bee node "
+            "cannot reach the Swarm network (not reported by this gateway).\n"
+        )
+    msg += "Check the reference. Re-upload only if you have the original content."
+    return CallToolResult(
+        content=[TextContent(type="text", text=_format_error(msg, retryable=False))],
+        isError=True,
+    )
+
+
 async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle data download requests."""
+    clean_reference = None
     try:
         reference = arguments.get("reference")
         if not reference:
@@ -1678,6 +1795,9 @@ async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
             isError=True,
         )
     except RequestException as e:
+        response = getattr(e, "response", None)
+        if response is not None and response.status_code == 404:
+            return _download_not_found(clean_reference)
         error_msg = f"Failed to download data: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
@@ -1687,7 +1807,7 @@ async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         error_msg,
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],
@@ -1740,6 +1860,25 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         elif x402:
             response_text += "\n💰 Payment: x402 enabled\n"
 
+        # Swarm network reachability — gateway liveness does not imply the
+        # Bee node can publish uploads or retrieve data it did not store.
+        network = _bee_network_status(gw_resp) if gateway_ok else None
+        if network is None:
+            if gateway_ok:
+                response_text += "\n🐝 Swarm network: not reported by gateway\n"
+        elif network["ok"]:
+            response_text += f"\n🐝 Swarm network: connected ({network['summary']})\n"
+        else:
+            response_text += (
+                f"\n🐝 Swarm network: DEGRADED ({network['summary']})\n"
+                f"   {'; '.join(network['problems'])}\n"
+            )
+            recommendations.append(
+                "The gateway's Bee node cannot reliably reach the Swarm network: "
+                "uploads may never propagate and only data stored on this node can "
+                "be downloaded. Operator action required — retrying will not help."
+            )
+
         # Adaptive: also check stamp availability
         stamps_info = ""
         usable_count = 0
@@ -1755,9 +1894,11 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     f"\n📋 Stamps: {usable_count} usable / {total_stamps} local\n"
                 )
 
-                if usable_count > 0:
+                if usable_count > 0 and (network is None or network["ok"]):
                     ready = True
                     next_tool = "upload_data"
+                elif usable_count > 0:
+                    next_tool = None
                 elif total_stamps > 0:
                     recommendations.append(
                         f"Found {total_stamps} stamp(s) but none are usable — poll check_stamp_health, stamps take up to 2 minutes to propagate"
@@ -1837,7 +1978,10 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"\n  - swarm_connect gateway: {gateway_url} (required, {'connected' if gateway_ok else 'unreachable'})"
         response_text += f"\n  - fds-id MCP: optional (identity/signing for provenance chain anchoring)"
 
-        response_text += f"\n\n_next: {next_tool}"
+        if next_tool:
+            response_text += f"\n\n_next: {next_tool}"
+        else:
+            response_text += "\n"
         response_text += f"\n_related: list_stamps, purchase_stamp, get_wallet_info"
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
@@ -1860,7 +2004,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         error_msg,
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],
@@ -1988,7 +2132,7 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
                     text=_format_error(
                         f"Failed to check stamp health: {str(e)}",
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],
@@ -2016,7 +2160,7 @@ async def handle_get_wallet_info(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         f"Failed to get wallet info: {str(e)}",
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],
@@ -3855,7 +3999,7 @@ async def handle_get_notary_info(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         f"Failed to get notary info: {str(e)}",
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],

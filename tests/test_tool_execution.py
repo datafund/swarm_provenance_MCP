@@ -6485,3 +6485,195 @@ class TestLocalhostChainPreset:
             preset["contract_address"] == "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9"
         )
         assert preset["deploy_block"] == 0
+
+
+# --- Swarm network reachability and terminal-error hints (issue #141) ---
+
+
+def _bee_node(**overrides):
+    """A gateway /health ``bee_node`` block, healthy by default."""
+    bee = {
+        "connected_peers": 140,
+        "network_availability": "Available",
+        "reachability": "Public",
+        "warming_up": False,
+        "healthy": True,
+        "warnings": [],
+    }
+    bee.update(overrides)
+    return bee
+
+
+def _gateway_health(bee_node=None):
+    resp = {"status": "ok"}
+    if bee_node is not None:
+        resp["bee_node"] = bee_node
+    return {
+        "status": "healthy",
+        "gateway_url": "http://localhost:8000",
+        "response_time_ms": 10,
+        "gateway_response": resp,
+    }
+
+
+def _http_error(status: int, detail: str = "error"):
+    from requests import Response
+    from requests.exceptions import HTTPError
+
+    response = Response()
+    response.status_code = status
+    return HTTPError(f"{status} Client Error: {detail}", response=response)
+
+
+class TestSwarmNetworkStatus:
+    """health_check must report whether the Bee node can reach Swarm."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_connected_network_reported(self, server):
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.health_check.return_value = _gateway_health(_bee_node())
+            mock_client.list_stamps.return_value = {
+                "stamps": [{"batchID": TEST_STAMP_ID, "usable": True}]
+            }
+            result = await call_tool_directly(server, "health_check", {})
+        text = result.content[0].text
+        assert "Swarm network: connected (140 peers" in text
+        assert "ready: true" in text
+        assert "_next: upload_data" in text
+
+    async def test_no_peers_is_not_ready(self, server):
+        """The swarm_connect#250 state: gateway up, stamps usable, no network."""
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.health_check.return_value = _gateway_health(
+                _bee_node(connected_peers=0, healthy=False)
+            )
+            mock_client.list_stamps.return_value = {
+                "stamps": [{"batchID": TEST_STAMP_ID, "usable": True}]
+            }
+            result = await call_tool_directly(server, "health_check", {})
+        text = result.content[0].text
+        assert "Swarm network: DEGRADED" in text
+        assert "no connected peers" in text
+        assert "ready: false" in text
+        assert "Operator action required" in text
+        assert "_next: upload_data" not in text
+
+    async def test_unavailable_network_and_warnings_surface(self, server):
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.health_check.return_value = _gateway_health(
+                _bee_node(
+                    network_availability="Unavailable",
+                    warnings=["reserve not synced"],
+                )
+            )
+            mock_client.list_stamps.return_value = {"stamps": []}
+            result = await call_tool_directly(server, "health_check", {})
+        text = result.content[0].text
+        assert "network availability is Unavailable" in text
+        assert "reserve not synced" in text
+
+    async def test_older_gateway_without_bee_node(self, server):
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.health_check.return_value = _gateway_health()
+            mock_client.list_stamps.return_value = {
+                "stamps": [{"batchID": TEST_STAMP_ID, "usable": True}]
+            }
+            result = await call_tool_directly(server, "health_check", {})
+        text = result.content[0].text
+        assert "Swarm network: not reported by gateway" in text
+        assert "ready: true" in text
+
+
+class TestDownloadNotFound:
+    """A download 404 must say which kind of 'not found' it is."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_not_found_with_connected_network(self, server):
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.download_data.side_effect = _http_error(404)
+            mock_client.health_check.return_value = _gateway_health(_bee_node())
+            result = await call_tool_directly(
+                server, "download_data", {"reference": TEST_REFERENCE}
+            )
+        text = result.content[0].text
+        assert result.isError
+        assert "connected to the Swarm network" in text
+        assert "most likely not available on Swarm" in text
+        assert "retryable: false" in text
+        assert "_next: health_check" not in text
+
+    async def test_not_found_with_disconnected_network(self, server):
+        """Re-uploading is the wrong move when the node cannot reach Swarm."""
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.download_data.side_effect = _http_error(404)
+            mock_client.health_check.return_value = _gateway_health(
+                _bee_node(connected_peers=0)
+            )
+            result = await call_tool_directly(
+                server, "download_data", {"reference": TEST_REFERENCE}
+            )
+        text = result.content[0].text
+        assert "cannot reliably reach the Swarm network" in text
+        assert "Do not re-upload" in text
+        assert "retryable: true" in text
+        assert "_next: health_check" in text
+
+    async def test_not_found_when_health_unavailable(self, server):
+        from requests.exceptions import ConnectionError
+
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.download_data.side_effect = _http_error(404)
+            mock_client.health_check.side_effect = ConnectionError("down")
+            result = await call_tool_directly(
+                server, "download_data", {"reference": TEST_REFERENCE}
+            )
+        text = result.content[0].text
+        assert "cannot reach the Swarm network (not reported" in text
+        assert "retryable: false" in text
+
+    async def test_other_errors_unchanged(self, server):
+        from requests.exceptions import ConnectionError
+
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.download_data.side_effect = ConnectionError("refused")
+            result = await call_tool_directly(
+                server, "download_data", {"reference": TEST_REFERENCE}
+            )
+        text = result.content[0].text
+        assert "Failed to download data" in text
+        assert "retryable: true" in text
+        assert "_next: health_check" in text
+
+
+class TestTerminalErrorHints:
+    """Permanent errors must not point at health_check, which cannot fix them."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_insufficient_funds_purchase(self, server):
+        """The 2026-08-21 review case: purchase_stamp insufficient funds."""
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.purchase_stamp.side_effect = _http_error(
+                400, "Insufficient funds to purchase stamp"
+            )
+            result = await call_tool_directly(server, "purchase_stamp", {})
+        text = result.content[0].text
+        assert "retryable: false" in text
+        assert "_next: health_check" not in text
+        assert "Operator action required" in text
+
+    async def test_transient_error_keeps_hint(self, server):
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.list_stamps.side_effect = _http_error(503)
+            result = await call_tool_directly(server, "list_stamps", {})
+        text = result.content[0].text
+        assert "retryable: true" in text
+        assert "_next: health_check" in text

@@ -504,19 +504,32 @@ _EXTENSION_HINT = (
 )
 
 
+def _format_age(seconds: float) -> str:
+    """Compact age: 45s, 12m, 3h, 2d."""
+    seconds = int(seconds)
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
 def _new_batch_hint(arguments: Dict[str, Any]) -> str:
-    """How to spot a batch the unanswered purchase may have created."""
-    traits = []
+    """How to spot, in list_stamps output, a batch the unanswered purchase made.
+
+    Only fields list_stamps prints. Free-tier purchases are shared batches,
+    so access mode does not identify them.
+    """
+    traits = ["a batch ID that was not listed before this call"]
     if arguments.get("label"):
-        traits.append(f"label '{arguments['label']}'")
+        traits.append(f"'Label: {arguments['label']}'")
     if arguments.get("depth") is not None:
-        traits.append(f"depth {arguments['depth']}")
-    elif arguments.get("size"):
-        traits.append(f"size {arguments['size']}")
-    hint = "A new batch from this call appears as an owned stamp created in the last few minutes"
-    if traits:
-        hint += " with " + ", ".join(traits)
-    return hint + " (it may still be propagating, so not yet usable)."
+        traits.append(f"'Depth: {arguments['depth']}'")
+    return (
+        "In list_stamps, a batch from this call shows "
+        + ", ".join(traits)
+        + "; where the gateway reports it, 'Purchased' is a few minutes ago. "
+        "It may still be propagating."
+    )
 
 
 def _gateway_error_text(message: str, e: Exception) -> str:
@@ -1589,6 +1602,18 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                 propagation_status = stamp.get("propagationStatus")
                 if propagation_status:
                     detail_line += f" | Propagation: {propagation_status}"
+
+                # What identifies a batch from an unanswered purchase
+                identity = []
+                if stamp.get("label"):
+                    identity.append(f"Label: {stamp['label']}")
+                if stamp.get("depth") is not None:
+                    identity.append(f"Depth: {stamp['depth']}")
+                age = stamp.get("secondsSincePurchase")
+                if isinstance(age, (int, float)):
+                    identity.append(f"Purchased: {_format_age(age)} ago")
+                if identity:
+                    detail_line += "\n  " + " | ".join(identity)
 
                 response_text += detail_line + "\n\n"
 

@@ -135,7 +135,8 @@ class TestMoreUnknownOutcomes:
         assert "outcome unknown" in text, text
         assert "retryable: false" in text
         assert "_next: list_stamps" in text
-        assert "label 'run-42'" in text
+        assert "'Label: run-42'" in text
+        assert "owned" not in text  # free-tier batches are shared
 
     @pytest.mark.parametrize(
         "error",
@@ -192,3 +193,38 @@ def test_extend_waits_at_least_two_minutes():
         patch_call.return_value.json.return_value = {"batchID": TEST_STAMP_ID}
         client.extend_stamp(TEST_STAMP_ID, 24)
     assert patch_call.call_args.kwargs["timeout"] >= 120
+
+
+class TestListStampsShowsIdentity:
+    """The outcome-unknown hint names fields list_stamps must actually print."""
+
+    async def test_label_depth_and_age_listed(self, server):
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.list_stamps.return_value = {
+                "stamps": [
+                    {
+                        "batchID": TEST_STAMP_ID,
+                        "usable": False,
+                        "accessMode": "shared",
+                        "propagationStatus": "propagating",
+                        "label": "run-42",
+                        "depth": 17,
+                        "secondsSincePurchase": 95,
+                    }
+                ],
+                "total_count": 1,
+            }
+            result = await call_tool_directly(server, "list_stamps", {})
+        text = result.content[0].text
+        assert "Label: run-42 | Depth: 17 | Purchased: 1m ago" in text
+
+    async def test_missing_fields_are_omitted(self, server):
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.list_stamps.return_value = {
+                "stamps": [{"batchID": TEST_STAMP_ID, "usable": True, "label": ""}],
+                "total_count": 1,
+            }
+            result = await call_tool_directly(server, "list_stamps", {})
+        text = result.content[0].text
+        assert "Label:" not in text
+        assert "Purchased:" not in text

@@ -61,6 +61,17 @@ class TestAdvisoryWarnings:
         assert "connected to the Swarm network" in text
         assert "retryable: false" in text
 
+    async def test_warnings_without_state_still_shown(self, server):
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.health_check.return_value = _gateway_health(
+                {"warnings": ["Chain sync lag is 150 blocks"]}
+            )
+            gw.list_stamps.return_value = {"stamps": []}
+            result = await call_tool_directly(server, "health_check", {})
+        text = result.content[0].text
+        assert "Swarm network: not reported by gateway" in text
+        assert "Gateway advisory: Chain sync lag is 150 blocks" in text
+
     def test_bee_node_without_state_is_not_reported(self):
         """{} must not read as 'connected (no details reported)'."""
         assert _bee_network_status({"bee_node": {}}) is None
@@ -158,6 +169,7 @@ class TestMoreUnknownOutcomes:
 
     async def test_extension_non_json_and_ttl_hint(self, server):
         with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.get_stamp_details.side_effect = requests.exceptions.ConnectionError()
             gw.extend_stamp.side_effect = requests.exceptions.JSONDecodeError(
                 "Expecting value", "", 0
             )
@@ -168,8 +180,30 @@ class TestMoreUnknownOutcomes:
             )
         text = result.content[0].text
         assert "Stamp extension outcome unknown" in text
-        assert "TTL" in text
+        assert "could not be read" in text
         assert "_next: get_stamp_status" in text
+
+    async def test_extension_hint_carries_before_state(self, server):
+        """The agent needs the pre-extension expiry to compare against."""
+        from requests.exceptions import ReadTimeout
+
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.get_stamp_details.return_value = {
+                "expectedExpiration": "2026-10-08-11-02",
+                "batchTTL": 93165,
+            }
+            gw.extend_stamp.side_effect = ReadTimeout("read timed out")
+            result = await call_tool_directly(
+                server,
+                "extend_stamp",
+                {"stamp_id": TEST_STAMP_ID, "duration_hours": 48},
+            )
+        text = result.content[0].text
+        assert (
+            "Before this call the stamp had expiry 2026-10-08-11-02, TTL 93165s" in text
+        )
+        assert "about 48h later" in text
+        gw.get_stamp_details.assert_called_once_with(TEST_STAMP_ID)
 
     async def test_refused_connection_stays_retryable(self, server):
         from swarm_provenance_mcp.gateway_client import SwarmGatewayClient

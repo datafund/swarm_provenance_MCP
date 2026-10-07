@@ -498,10 +498,31 @@ def _ambiguous_write_result(
     )
 
 
-_EXTENSION_HINT = (
-    "Compare the stamp's remaining TTL / expiry with its value before this "
-    "call: a jump of about the requested hours means it worked."
-)
+def _stamp_baseline(stamp_id: str) -> str:
+    """The stamp's expiry before an extension, to compare against afterwards."""
+    try:
+        details = gateway_client.get_stamp_details(stamp_id)
+    except RequestException:
+        return ""
+    parts = []
+    if details.get("expectedExpiration"):
+        parts.append(f"expiry {details['expectedExpiration']}")
+    if details.get("batchTTL") is not None:
+        parts.append(f"TTL {details['batchTTL']}s")
+    return ", ".join(parts)
+
+
+def _extension_hint(baseline: str, hours: Any) -> str:
+    """How to tell from get_stamp_status whether the extension went through."""
+    if baseline:
+        return (
+            f"Before this call the stamp had {baseline}. If get_stamp_status now "
+            f"shows an expiry about {hours}h later, the extension went through."
+        )
+    return (
+        "The stamp's state before this call could not be read. If its expiry is "
+        f"about {hours}h later than you expected, the extension went through."
+    )
 
 
 def _format_age(seconds: float) -> str:
@@ -549,6 +570,14 @@ def _gateway_error_text(message: str, e: Exception) -> str:
     return message
 
 
+def _bee_advisories(gateway_response: Dict[str, Any]) -> List[str]:
+    """The gateway's advisory ``bee_node.warnings`` (few peers, chain lag)."""
+    bee = gateway_response.get("bee_node")
+    if not isinstance(bee, dict):
+        return []
+    return [str(w) for w in bee.get("warnings") or []]
+
+
 def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Summarise whether the gateway's Bee node can reach the Swarm network.
@@ -581,7 +610,7 @@ def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, 
         problems.append("Bee node has no connected peers")
     if bee.get("warming_up"):
         problems.append("Bee node is still warming up")
-    advisories = [str(w) for w in bee.get("warnings") or []]
+    advisories = _bee_advisories(gateway_response)
 
     parts = []
     if peers is not None:
@@ -1651,6 +1680,7 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
 
 async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle stamp extension requests."""
+    baseline = ""
     try:
         stamp_id = arguments.get("stamp_id")
         duration_hours = arguments.get("duration_hours")
@@ -1664,6 +1694,9 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         clean_stamp_id = validate_and_clean_stamp_id(stamp_id)
         validate_stamp_duration_hours(duration_hours)
 
+        # Read before writing: if the answer is lost, this is what the agent
+        # compares against to tell whether the extension happened.
+        baseline = _stamp_baseline(clean_stamp_id)
         result = gateway_client.extend_stamp(clean_stamp_id, duration_hours)
 
         response_text = f"✅ Stamp extended successfully!\n\n"
@@ -1684,7 +1717,10 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         if isinstance(e, JSONDecodeError):
             # A 2xx with an unreadable body — the write probably succeeded
             return _ambiguous_write_result(
-                "Stamp extension", e, "get_stamp_status", _EXTENSION_HINT
+                "Stamp extension",
+                e,
+                "get_stamp_status",
+                _extension_hint(baseline, arguments.get("duration_hours")),
             )
         error_msg = f"Validation error: {str(e)}"
         logger.error(error_msg)
@@ -1702,7 +1738,10 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
     except RequestException as e:
         if _is_ambiguous_write_error(e):
             return _ambiguous_write_result(
-                "Stamp extension", e, "get_stamp_status", _EXTENSION_HINT
+                "Stamp extension",
+                e,
+                "get_stamp_status",
+                _extension_hint(baseline, arguments.get("duration_hours")),
             )
         error_msg = _gateway_error_text(f"Failed to extend stamp: {str(e)}", e)
         logger.error(error_msg)
@@ -2042,11 +2081,10 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 "uploads may never propagate and only data stored on this node can "
                 "be downloaded. Operator action required — retrying will not help."
             )
-        if network and network["advisories"]:
-            # Advisory only: the gateway still reports the node healthy
-            response_text += (
-                f"   ⚠️  Gateway advisory: {'; '.join(network['advisories'])}\n"
-            )
+        advisories = _bee_advisories(gw_resp) if gateway_ok else []
+        if advisories:
+            # Advisory only: does not change readiness
+            response_text += f"   ⚠️  Gateway advisory: {'; '.join(advisories)}\n"
 
         # Adaptive: also check stamp availability
         stamps_info = ""

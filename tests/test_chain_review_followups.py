@@ -121,6 +121,7 @@ def test_http_provider_without_web3_7_retry_api():
     web3_cls.HTTPProvider.assert_called_once_with(
         "http://rpc", request_kwargs={"timeout": 7}
     )
+    assert web3_cls.HTTPProvider.return_value.middlewares == ()
 
 
 class TestLineageUnderFailover:
@@ -193,6 +194,46 @@ class TestLineageUnderFailover:
         forward, _ = cache.get_maps(contract, deploy_block=100, current_block=200)
 
         assert forward[DUMMY_HASH] == [(CHILD_HASH, "Anonymized")]
+
+    @pytest.mark.parametrize(
+        "error,expected",
+        [(_http_error(503), "raises"), (ValueError("no DataMerged event"), [])],
+    )
+    def test_contract_merge_events_classify_errors(
+        self, mock_chain_deps, error, expected
+    ):
+        """get_all_merge_events itself must not turn an outage into 'no merges'."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address="0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322",
+        )
+        events = mock_chain_deps["contract"].events.DataMerged
+        events.get_logs.side_effect = error
+        if expected == "raises":
+            with pytest.raises(Exception, match="503"):
+                contract.get_all_merge_events(from_block=0, to_block=10)
+        else:
+            assert contract.get_all_merge_events(from_block=0, to_block=10) == []
+
+    def test_cache_not_advanced_through_real_contract_wrapper(self, mock_chain_deps):
+        """End to end: wrapper + cache, as the review's v1 scenario."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+        from swarm_provenance_mcp.chain.event_cache import TransformationEventCache
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address="0x3945aDfd5Df9ab2F5cB4Ca0eb3D4384CC3650322",
+        )
+        abi_events = mock_chain_deps["contract"].events
+        abi_events.DataTransformed.get_logs.return_value = []
+        abi_events.DataMerged.get_logs.side_effect = _http_error(503)
+
+        cache = TransformationEventCache()
+        with pytest.raises(Exception, match="503"):
+            cache.get_maps(contract, deploy_block=0, current_block=10)
+        assert cache._last_scanned_block is None
 
     def test_v1_merge_scan_failure_still_skipped(self):
         from swarm_provenance_mcp.chain.event_cache import TransformationEventCache

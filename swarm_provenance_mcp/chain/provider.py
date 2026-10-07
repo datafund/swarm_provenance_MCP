@@ -129,8 +129,12 @@ def _http_provider(Web3, url: str, timeout: int):
             ExceptionRetryConfiguration,
         )
     except ImportError:
-        # web3 < 7 has no exception_retry_configuration (pyproject allows 6.x)
-        return Web3.HTTPProvider(url, request_kwargs={"timeout": timeout})
+        # web3 6 (pyproject allows it) retries through a provider middleware
+        # instead — 5 attempts, eth_sendRawTransaction included. Drop it and
+        # leave retries to failover.
+        provider = Web3.HTTPProvider(url, request_kwargs={"timeout": timeout})
+        provider.middlewares = ()
+        return provider
 
     return Web3.HTTPProvider(
         url,

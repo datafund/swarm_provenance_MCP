@@ -141,7 +141,7 @@ class SwarmGatewayClient:
         return response.json()
 
     def upload_data(
-        self, data: str, stamp_id: str, content_type: str = "application/json"
+        self, data: str, stamp_id: str, content_type: str = "application/json", sign: Optional[str] = None
     ) -> Dict[str, Any]:
         """Upload data to Swarm network.
 
@@ -149,6 +149,8 @@ class SwarmGatewayClient:
             data: Data content as string (max 4096 bytes)
             stamp_id: Postage stamp ID to use for upload
             content_type: MIME type of the content (default: application/json)
+            sign: Signing method for provenance. Use 'notary' to have the gateway
+                  cryptographically sign the data at upload time.
 
         Returns:
             Upload response with reference hash
@@ -170,6 +172,8 @@ class SwarmGatewayClient:
         files = {"file": ("data", data_bytes, content_type)}
 
         params = {"stamp_id": stamp_id, "content_type": content_type}
+        if sign:
+            params["sign"] = sign
 
         # For file uploads, temporarily remove Content-Type from session to let requests set multipart/form-data
         original_content_type = self.session.headers.pop("Content-Type", None)

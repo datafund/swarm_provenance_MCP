@@ -179,3 +179,31 @@ class TestSwarmGatewayClient:
             assert "swarm-provenance-mcp" in request_headers["User-Agent"]
             assert "X-Payment-Mode" in request_headers
             assert request_headers["X-Payment-Mode"] == "free"
+
+    def test_upload_data_unsigned(self):
+        """Test that unsigned upload sends no sign query param."""
+        with requests_mock.Mocker() as m:
+            stamp_id = "a" * 64
+            expected_response = {"reference": "b" * 64}
+            m.post(f"{self.base_url}/api/v1/data/", json=expected_response)
+
+            result = self.client.upload_data('{"key": "value"}', stamp_id)
+
+            assert result["reference"] == "b" * 64
+            assert "sign" not in m.last_request.qs
+
+    def test_upload_data_with_notary_sign(self):
+        """Test that notary sign upload includes ?sign=notary query param."""
+        with requests_mock.Mocker() as m:
+            stamp_id = "a" * 64
+            signer_address = "0xabcdef1234567890abcdef1234567890abcdef12"
+            expected_response = {
+                "reference": "c" * 64,
+                "notary": {"signer": signer_address},
+            }
+            m.post(f"{self.base_url}/api/v1/data/", json=expected_response)
+
+            result = self.client.upload_data('{"key": "value"}', stamp_id, sign="notary")
+
+            assert result["reference"] == "c" * 64
+            assert m.last_request.qs.get("sign") == ["notary"]

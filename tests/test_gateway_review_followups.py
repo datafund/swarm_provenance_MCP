@@ -262,3 +262,14 @@ class TestListStampsShowsIdentity:
         text = result.content[0].text
         assert "Label:" not in text
         assert "Purchased:" not in text
+
+
+@pytest.mark.parametrize("details", [None, [], "oops"])
+async def test_unreadable_baseline_does_not_block_extension(server, details):
+    with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+        gw.get_stamp_details.return_value = details
+        gw.extend_stamp.return_value = {"batchID": TEST_STAMP_ID}
+        await call_tool_directly(
+            server, "extend_stamp", {"stamp_id": TEST_STAMP_ID, "duration_hours": 24}
+        )
+    gw.extend_stamp.assert_called_once_with(TEST_STAMP_ID, 24)

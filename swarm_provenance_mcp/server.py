@@ -426,9 +426,10 @@ def _is_retryable_error(e: Exception) -> bool:
 
 
 def _recovery_hint(e: Exception) -> Optional[str]:
-    """Point at health_check only when the failure may be transient.
+    """Point at health_check only when it can explain or change the outcome.
 
-    For a permanent error health_check cannot change the outcome, so an agent
+    That is a transient failure, or any 5xx (health_check reports whether the
+    Bee node can reach the Swarm network). For other permanent errors an agent
     following the hint would loop without progress.
     """
     response = getattr(e, "response", None)
@@ -500,9 +501,12 @@ def _ambiguous_write_result(
 
 def _stamp_baseline(stamp_id: str) -> str:
     """The stamp's expiry before an extension, to compare against afterwards."""
+    # Best effort: nothing here may stop the extension itself.
     try:
         details = gateway_client.get_stamp_details(stamp_id)
-    except RequestException:
+    except Exception:
+        return ""
+    if not isinstance(details, dict):
         return ""
     parts = []
     if details.get("expectedExpiration"):

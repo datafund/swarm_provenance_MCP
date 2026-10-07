@@ -1246,9 +1246,11 @@ class TestToolParameterValidation:
                 server, "purchase_stamp", {"duration_hours": 25, "depth": 20}
             )
             assert not result.isError
-            mock_gw.purchase_stamp.assert_called_once_with(
-                25, size="small", depth=20, label=None
-            )
+            mock_gw.purchase_stamp.assert_called_once()
+            args, kwargs = mock_gw.purchase_stamp.call_args
+            assert args == (25,)
+            assert kwargs["size"] == "small" and kwargs["depth"] == 20
+            assert kwargs["label"].startswith("mcp-")  # generated (#189)
             assert "Depth: 20" in result.content[0].text
 
     async def test_empty_string_parameters(self, server):

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import secrets
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -462,10 +463,15 @@ def _is_ambiguous_write_error(e: Exception) -> bool:
         # JSONDecodeError: a 2xx whose body could not be parsed — it succeeded.
         return True
     if isinstance(e, ReqConnectionError) and not isinstance(e, ConnectTimeout):
-        # Dropped after sending ("Connection aborted", RemoteDisconnected),
-        # unlike a refused or unresolvable connection.
+        # Dropped after sending ("Connection aborted", RemoteDisconnected), or
+        # a 2xx whose body stalled: requests wraps that read timeout as a
+        # ConnectionError("... Read timed out."), not ReadTimeout. Unlike a
+        # refused or unresolvable connection, the write may have happened.
         text = str(e)
-        return "Connection aborted" in text or "RemoteDisconnected" in text
+        return any(
+            marker in text
+            for marker in ("Connection aborted", "RemoteDisconnected", "Read timed out")
+        )
     response = getattr(e, "response", None)
     # 500 too: the gateway returns it for errors raised after the purchase call.
     return response is not None and response.status_code in (500, 502, 504)
@@ -516,16 +522,27 @@ def _stamp_baseline(stamp_id: str) -> str:
     return ", ".join(parts)
 
 
+# A top-up is an on-chain transaction the node applies when it processes the
+# event, so get_stamp_status may show the old expiry for a while. How long has
+# not been measured against the gateway (#188); err on the side of waiting.
+_TOP_UP_DELAY_NOTE = (
+    " A top-up can take a few minutes to show: if the expiry has not moved, "
+    "wait a few minutes and check again before extending again."
+)
+
+
 def _extension_hint(baseline: str, hours: Any) -> str:
     """How to tell from get_stamp_status whether the extension went through."""
     if baseline:
         return (
             f"Before this call the stamp had {baseline}. If get_stamp_status now "
             f"shows an expiry about {hours}h later, the extension went through."
+            + _TOP_UP_DELAY_NOTE
         )
     return (
         "The stamp's state before this call could not be read. If its expiry is "
         f"about {hours}h later than you expected, the extension went through."
+        + _TOP_UP_DELAY_NOTE
     )
 
 
@@ -538,17 +555,19 @@ def _format_age(seconds: float) -> str:
     return f"{seconds}s"
 
 
-def _new_batch_hint(arguments: Dict[str, Any]) -> str:
+def _new_batch_hint(label: Optional[str], depth: Optional[int]) -> str:
     """How to spot, in list_stamps output, a batch the unanswered purchase made.
 
     Only fields list_stamps prints. Free-tier purchases are shared batches,
-    so access mode does not identify them.
+    so access mode does not identify them. Every purchase carries a label
+    (generated when the caller gave none), so the label always identifies it.
     """
-    traits = ["a batch ID that was not listed before this call"]
-    if arguments.get("label"):
-        traits.append(f"'Label: {arguments['label']}'")
-    if arguments.get("depth") is not None:
-        traits.append(f"'Depth: {arguments['depth']}'")
+    traits = []
+    if label:
+        traits.append(f"'Label: {label}'")
+    if depth is not None:
+        traits.append(f"'Depth: {depth}'")
+    traits.append("a batch ID that was not listed before this call")
     return (
         "In list_stamps, a batch from this call shows "
         + ", ".join(traits)
@@ -740,7 +759,7 @@ def create_server() -> Server:
                         },
                         "label": {
                             "type": "string",
-                            "description": "Optional human-readable label for easier stamp identification",
+                            "description": "Optional human-readable label for easier stamp identification. If omitted, a unique label (mcp-<hex>) is generated so the batch can be found in list_stamps.",
                             "maxLength": 100,
                         },
                     },
@@ -1356,13 +1375,16 @@ def create_server() -> Server:
 
 async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle stamp purchase requests."""
+    label, depth = None, None
     try:
         duration_hours = arguments.get(
             "duration_hours", settings.default_stamp_duration_hours
         )
         size = arguments.get("size", settings.default_stamp_size)
         depth = arguments.get("depth")
-        label = arguments.get("label")
+        # Always label the batch: if the answer to this call is lost, the
+        # label is how the agent finds the batch again instead of buying twice.
+        label = arguments.get("label") or f"mcp-{secrets.token_hex(4)}"
 
         # Validate inputs
         validate_stamp_duration_hours(duration_hours)
@@ -1448,7 +1470,7 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         if isinstance(e, JSONDecodeError):
             # A 2xx with an unreadable body — the write probably succeeded
             return _ambiguous_write_result(
-                "Stamp purchase", e, "list_stamps", _new_batch_hint(arguments)
+                "Stamp purchase", e, "list_stamps", _new_batch_hint(label, depth)
             )
         error_msg = f"Validation error: {str(e)}"
         logger.error(error_msg)
@@ -1466,7 +1488,7 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
     except RequestException as e:
         if _is_ambiguous_write_error(e):
             return _ambiguous_write_result(
-                "Stamp purchase", e, "list_stamps", _new_batch_hint(arguments)
+                "Stamp purchase", e, "list_stamps", _new_batch_hint(label, depth)
             )
         error_msg = _gateway_error_text(f"Failed to purchase stamp: {str(e)}", e)
         logger.error(error_msg)

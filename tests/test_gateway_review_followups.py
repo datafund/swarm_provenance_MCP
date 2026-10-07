@@ -273,3 +273,82 @@ async def test_unreadable_baseline_does_not_block_extension(server, details):
             server, "extend_stamp", {"stamp_id": TEST_STAMP_ID, "duration_hours": 24}
         )
     gw.extend_stamp.assert_called_once_with(TEST_STAMP_ID, 24)
+
+
+class TestReviewRoundTwo:
+    """#187, #188, #189."""
+
+    def test_body_read_timeout_after_2xx_is_ambiguous(self):
+        """#187: requests wraps a stalled 2xx body as ConnectionError."""
+        import time
+
+        from swarm_provenance_mcp.server import _is_ambiguous_write_error
+
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+
+        def serve():
+            conn, _ = sock.accept()
+            conn.recv(65536)
+            conn.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                b'Content-Length: 50\r\n\r\n{"batch'
+            )
+            time.sleep(2)
+            conn.close()
+
+        threading.Thread(target=serve, daemon=True).start()
+        try:
+            with pytest.raises(requests.exceptions.ConnectionError) as exc_info:
+                requests.post(
+                    f"http://127.0.0.1:{sock.getsockname()[1]}/", json={}, timeout=0.3
+                ).json()
+        finally:
+            sock.close()
+        assert "Read timed out" in str(exc_info.value)
+        assert _is_ambiguous_write_error(exc_info.value)
+
+    async def test_purchase_body_read_timeout_not_retryable(self, server):
+        err = requests.exceptions.ConnectionError(
+            "HTTPConnectionPool(host='gw', port=443): Read timed out."
+        )
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.purchase_stamp.side_effect = err
+            result = await call_tool_directly(server, "purchase_stamp", {})
+        text = result.content[0].text
+        assert "outcome unknown" in text
+        assert "retryable: false" in text
+
+    async def test_extension_hint_warns_about_delay(self, server):
+        """#188."""
+        from requests.exceptions import ReadTimeout
+
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.get_stamp_details.return_value = {"expectedExpiration": "2026-10-08"}
+            gw.extend_stamp.side_effect = ReadTimeout("read timed out")
+            result = await call_tool_directly(
+                server,
+                "extend_stamp",
+                {"stamp_id": TEST_STAMP_ID, "duration_hours": 24},
+            )
+        assert "wait a few minutes and check again" in result.content[0].text
+
+    async def test_unlabelled_purchase_gets_generated_label(self, server):
+        """#189: without a label the hint had nothing to identify the batch by."""
+        from requests.exceptions import ReadTimeout
+
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.purchase_stamp.side_effect = ReadTimeout("read timed out")
+            result = await call_tool_directly(
+                server, "purchase_stamp", {"size": "small"}
+            )
+        sent_label = gw.purchase_stamp.call_args.kwargs["label"]
+        assert sent_label.startswith("mcp-") and len(sent_label) == 12
+        assert f"'Label: {sent_label}'" in result.content[0].text
+
+    async def test_caller_label_is_kept(self, server):
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.purchase_stamp.return_value = {"batchID": TEST_STAMP_ID}
+            await call_tool_directly(server, "purchase_stamp", {"label": "mine"})
+        assert gw.purchase_stamp.call_args.kwargs["label"] == "mine"

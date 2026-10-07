@@ -122,10 +122,15 @@ def _http_provider(Web3, url: str, timeout: int):
     """
     from requests.exceptions import ConnectionError as ReqConnectionError
     from requests.exceptions import HTTPError, Timeout
-    from web3.providers.rpc.utils import (
-        REQUEST_RETRY_ALLOWLIST,
-        ExceptionRetryConfiguration,
-    )
+
+    try:
+        from web3.providers.rpc.utils import (
+            REQUEST_RETRY_ALLOWLIST,
+            ExceptionRetryConfiguration,
+        )
+    except ImportError:
+        # web3 < 7 has no exception_retry_configuration (pyproject allows 6.x)
+        return Web3.HTTPProvider(url, request_kwargs={"timeout": timeout})
 
     return Web3.HTTPProvider(
         url,

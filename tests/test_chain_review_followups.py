@@ -109,6 +109,20 @@ class TestHttpProviderRetries:
         assert hits["eth_gasPrice"] == 2  # one retry for reads
 
 
+def test_http_provider_without_web3_7_retry_api():
+    """pyproject allows web3 6, which lacks ExceptionRetryConfiguration."""
+    import sys
+
+    from swarm_provenance_mcp.chain.provider import _http_provider
+
+    web3_cls = MagicMock()
+    with patch.dict(sys.modules, {"web3.providers.rpc.utils": None}):
+        _http_provider(web3_cls, "http://rpc", 7)
+    web3_cls.HTTPProvider.assert_called_once_with(
+        "http://rpc", request_kwargs={"timeout": 7}
+    )
+
+
 class TestLineageUnderFailover:
     """#178: transport errors mid-traversal must fail over, not truncate."""
 
@@ -162,6 +176,23 @@ class TestLineageUnderFailover:
         with pytest.raises(Exception, match="503"):
             cache.get_maps(contract, deploy_block=100, current_block=200)
         assert cache._last_scanned_block is None
+
+    def test_retry_after_merge_outage_does_not_duplicate(self):
+        """The failover retry re-runs get_maps over the same block range."""
+        from swarm_provenance_mcp.chain.event_cache import TransformationEventCache
+
+        cache = TransformationEventCache()
+        contract = MagicMock()
+        contract.get_all_transformations.return_value = [
+            (DUMMY_HASH_BYTES, bytes.fromhex(CHILD_HASH), "Anonymized")
+        ]
+        contract.get_all_merge_events.side_effect = [_http_error(503), []]
+
+        with pytest.raises(Exception, match="503"):
+            cache.get_maps(contract, deploy_block=100, current_block=200)
+        forward, _ = cache.get_maps(contract, deploy_block=100, current_block=200)
+
+        assert forward[DUMMY_HASH] == [(CHILD_HASH, "Anonymized")]
 
     def test_v1_merge_scan_failure_still_skipped(self):
         from swarm_provenance_mcp.chain.event_cache import TransformationEventCache

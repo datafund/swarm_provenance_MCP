@@ -70,10 +70,28 @@ class TransformationEventCache:
             if from_block > current_block:
                 return self._forward, self._reverse
 
+            # Query both event kinds before touching the maps: a failed scan
+            # must leave the cache unchanged, or the retry on another RPC
+            # appends the same events a second time.
             events = contract.get_all_transformations(
                 from_block=from_block,
                 to_block=current_block,
             )
+            try:
+                # DataMerged exists on v2+ contracts only.
+                merge_events = contract.get_all_merge_events(
+                    from_block=from_block,
+                    to_block=current_block,
+                )
+            except Exception as e:
+                # An unavailable endpoint must not advance _last_scanned_block
+                # past merges; a v1 contract without the event is skipped.
+                from .provider import is_transport_error
+
+                if is_transport_error(e):
+                    raise
+                logger.debug("DataMerged event scan skipped: %s", e)
+                merge_events = []
 
             for orig_bytes, new_bytes, desc in events:
                 orig_hex = (
@@ -87,38 +105,22 @@ class TransformationEventCache:
                 self._forward.setdefault(orig_hex, []).append((new_hex, desc))
                 self._reverse.setdefault(new_hex, []).append((orig_hex, desc))
 
-            # Also scan DataMerged events (v2+ contracts).
-            # For each merge: each source → new_hash (forward),
-            # new_hash → each source (reverse).
-            try:
-                merge_events = contract.get_all_merge_events(
-                    from_block=from_block,
-                    to_block=current_block,
+            # Each merge: each source → new_hash (forward), new_hash → each
+            # source (reverse).
+            for evt in merge_events:
+                new_bytes = evt.args.newDataHash
+                new_hex = (
+                    new_bytes.hex() if isinstance(new_bytes, bytes) else str(new_bytes)
                 )
-                for evt in merge_events:
-                    new_bytes = evt.args.newDataHash
-                    new_hex = (
-                        new_bytes.hex()
-                        if isinstance(new_bytes, bytes)
-                        else str(new_bytes)
+                desc = evt.args.transformation
+                for src_bytes in evt.args.sourceDataHashes:
+                    src_hex = (
+                        src_bytes.hex()
+                        if isinstance(src_bytes, bytes)
+                        else str(src_bytes)
                     )
-                    desc = evt.args.transformation
-                    for src_bytes in evt.args.sourceDataHashes:
-                        src_hex = (
-                            src_bytes.hex()
-                            if isinstance(src_bytes, bytes)
-                            else str(src_bytes)
-                        )
-                        self._forward.setdefault(src_hex, []).append((new_hex, desc))
-                        self._reverse.setdefault(new_hex, []).append((src_hex, desc))
-            except Exception as e:
-                # A v1 contract has no DataMerged event — skip. An unavailable
-                # endpoint must not advance _last_scanned_block past merges.
-                from .provider import is_transport_error
-
-                if is_transport_error(e):
-                    raise
-                logger.debug("DataMerged event scan skipped: %s", e)
+                    self._forward.setdefault(src_hex, []).append((new_hex, desc))
+                    self._reverse.setdefault(new_hex, []).append((src_hex, desc))
 
             self._last_scanned_block = current_block
             logger.debug(

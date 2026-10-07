@@ -434,6 +434,10 @@ def _recovery_hint(e: Exception) -> Optional[str]:
     response = getattr(e, "response", None)
     if response is not None and response.status_code == 429:
         return None  # the fix is to wait, which the error text says
+    if response is not None and response.status_code >= 500:
+        # Even when not retryable: health_check reports whether the gateway's
+        # Bee node can reach the Swarm network, the usual cause of a 5xx.
+        return "health_check"
     return "health_check" if _is_retryable_error(e) else None
 
 
@@ -445,16 +449,29 @@ def _is_ambiguous_write_error(e: Exception) -> bool:
     stopped waiting. A connect failure means it never arrived, so it is not
     ambiguous.
     """
-    from requests.exceptions import ReadTimeout
+    from requests.exceptions import (
+        ChunkedEncodingError,
+        ConnectTimeout,
+        JSONDecodeError,
+        ReadTimeout,
+    )
+    from requests.exceptions import ConnectionError as ReqConnectionError
 
-    if isinstance(e, ReadTimeout):
+    if isinstance(e, (ReadTimeout, ChunkedEncodingError, JSONDecodeError)):
+        # JSONDecodeError: a 2xx whose body could not be parsed — it succeeded.
         return True
+    if isinstance(e, ReqConnectionError) and not isinstance(e, ConnectTimeout):
+        # Dropped after sending ("Connection aborted", RemoteDisconnected),
+        # unlike a refused or unresolvable connection.
+        text = str(e)
+        return "Connection aborted" in text or "RemoteDisconnected" in text
     response = getattr(e, "response", None)
-    return response is not None and response.status_code in (502, 504)
+    # 500 too: the gateway returns it for errors raised after the purchase call.
+    return response is not None and response.status_code in (500, 502, 504)
 
 
 def _ambiguous_write_result(
-    action: str, e: Exception, check_tool: str
+    action: str, e: Exception, check_tool: str, how_to_check: str = ""
 ) -> CallToolResult:
     """Tell the agent not to repeat a write whose outcome is unknown.
 
@@ -463,10 +480,12 @@ def _ambiguous_write_result(
     """
     msg = (
         f"{action} outcome unknown: {e}\n\n"
-        "The request reached the gateway but no answer came back, so it may "
-        "have completed. Do not repeat it yet: call "
+        "The request reached the gateway but no usable answer came back, so "
+        "it may have completed. Do not repeat it yet: call "
         f"{check_tool} first and only retry if the change is not there."
     )
+    if how_to_check:
+        msg += f"\n{how_to_check}"
     logger.error(msg)
     return CallToolResult(
         content=[
@@ -477,6 +496,27 @@ def _ambiguous_write_result(
         ],
         isError=True,
     )
+
+
+_EXTENSION_HINT = (
+    "Compare the stamp's remaining TTL / expiry with its value before this "
+    "call: a jump of about the requested hours means it worked."
+)
+
+
+def _new_batch_hint(arguments: Dict[str, Any]) -> str:
+    """How to spot a batch the unanswered purchase may have created."""
+    traits = []
+    if arguments.get("label"):
+        traits.append(f"label '{arguments['label']}'")
+    if arguments.get("depth") is not None:
+        traits.append(f"depth {arguments['depth']}")
+    elif arguments.get("size"):
+        traits.append(f"size {arguments['size']}")
+    hint = "A new batch from this call appears as an owned stamp created in the last few minutes"
+    if traits:
+        hint += " with " + ", ".join(traits)
+    return hint + " (it may still be propagating, so not yet usable)."
 
 
 def _gateway_error_text(message: str, e: Exception) -> str:
@@ -504,11 +544,17 @@ def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, 
     its own local data and accepts uploads that never propagate.
 
     Returns:
-        None if the gateway does not report ``bee_node``, otherwise a dict with
-        ``ok`` (bool), ``summary`` (str) and ``problems`` (list of str).
+        None if the gateway does not report the node's network state, otherwise
+        a dict with ``ok`` (bool), ``summary`` (str), ``problems`` (list of
+        str) and ``advisories`` (list of str).
+
+    ``bee_node.warnings`` are advisory (few peers, chain lag) and the gateway
+    keeps ``healthy: true`` for them, so they are reported without changing
+    ``ok``.
     """
     bee = gateway_response.get("bee_node")
-    if not isinstance(bee, dict):
+    state_keys = ("healthy", "network_availability", "connected_peers", "warming_up")
+    if not isinstance(bee, dict) or not any(k in bee for k in state_keys):
         return None
 
     peers = bee.get("connected_peers")
@@ -522,7 +568,7 @@ def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, 
         problems.append("Bee node has no connected peers")
     if bee.get("warming_up"):
         problems.append("Bee node is still warming up")
-    problems.extend(str(w) for w in bee.get("warnings") or [])
+    advisories = [str(w) for w in bee.get("warnings") or []]
 
     parts = []
     if peers is not None:
@@ -535,6 +581,7 @@ def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, 
         "ok": not problems,
         "summary": ", ".join(parts) or "no details reported",
         "problems": problems,
+        "advisories": advisories,
     }
 
 
@@ -1350,6 +1397,13 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
     except ValueError as e:
+        from requests.exceptions import JSONDecodeError
+
+        if isinstance(e, JSONDecodeError):
+            # A 2xx with an unreadable body — the write probably succeeded
+            return _ambiguous_write_result(
+                "Stamp purchase", e, "list_stamps", _new_batch_hint(arguments)
+            )
         error_msg = f"Validation error: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
@@ -1365,7 +1419,9 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         )
     except RequestException as e:
         if _is_ambiguous_write_error(e):
-            return _ambiguous_write_result("Stamp purchase", e, "list_stamps")
+            return _ambiguous_write_result(
+                "Stamp purchase", e, "list_stamps", _new_batch_hint(arguments)
+            )
         error_msg = _gateway_error_text(f"Failed to purchase stamp: {str(e)}", e)
         logger.error(error_msg)
         return CallToolResult(
@@ -1598,6 +1654,13 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
     except ValueError as e:
+        from requests.exceptions import JSONDecodeError
+
+        if isinstance(e, JSONDecodeError):
+            # A 2xx with an unreadable body — the write probably succeeded
+            return _ambiguous_write_result(
+                "Stamp extension", e, "get_stamp_status", _EXTENSION_HINT
+            )
         error_msg = f"Validation error: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
@@ -1613,7 +1676,9 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         )
     except RequestException as e:
         if _is_ambiguous_write_error(e):
-            return _ambiguous_write_result("Stamp extension", e, "get_stamp_status")
+            return _ambiguous_write_result(
+                "Stamp extension", e, "get_stamp_status", _EXTENSION_HINT
+            )
         error_msg = _gateway_error_text(f"Failed to extend stamp: {str(e)}", e)
         logger.error(error_msg)
         return CallToolResult(
@@ -1951,6 +2016,11 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 "The gateway's Bee node cannot reliably reach the Swarm network: "
                 "uploads may never propagate and only data stored on this node can "
                 "be downloaded. Operator action required — retrying will not help."
+            )
+        if network and network["advisories"]:
+            # Advisory only: the gateway still reports the node healthy
+            response_text += (
+                f"   ⚠️  Gateway advisory: {'; '.join(network['advisories'])}\n"
             )
 
         # Adaptive: also check stamp availability

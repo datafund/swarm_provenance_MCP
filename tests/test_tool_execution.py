@@ -4366,6 +4366,14 @@ class TestHealthCheckBalanceWarning:
     def server(self):
         return create_server()
 
+    @pytest.fixture(autouse=True)
+    def _chain_enabled(self):
+        """The chain section depends on CHAIN_ENABLED; don't read it from .env."""
+        from swarm_provenance_mcp.server import settings
+
+        with patch.object(settings, "chain_enabled", True):
+            yield
+
     async def test_low_balance_shows_warning(self, server):
         """health_check should warn when wallet balance is too low."""
         mock_chain = MagicMock()

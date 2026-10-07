@@ -26,11 +26,17 @@ class ChainConnectionError(ChainError):
 
 
 class ChainTransactionError(ChainError):
-    """Transaction reverted, ran out of gas, or otherwise failed."""
+    """Transaction reverted, ran out of gas, or otherwise failed.
 
-    def __init__(self, message: str, tx_hash: str = None):
+    ``broadcast`` is True once ``send_raw_transaction`` has been attempted:
+    the transaction may be in the mempool, so the operation must not be
+    re-run automatically.
+    """
+
+    def __init__(self, message: str, tx_hash: str = None, *, broadcast: bool = False):
         super().__init__(message)
         self.tx_hash = tx_hash
+        self.broadcast = broadcast
 
 
 class ChainValidationError(ChainError):

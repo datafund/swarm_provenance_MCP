@@ -13,6 +13,7 @@ from enum import IntEnum
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from .provider import is_transport_error
 from .exceptions import ChainConfigurationError, ChainValidationError
 
 logger = logging.getLogger(__name__)
@@ -761,7 +762,11 @@ class DataProvenanceContract:
             test_hash = b"\x00" * 32
             self._contract.functions.getDataHashByStorageRef(test_hash).call()
             self._supports_storage_ref_cache = True
-        except Exception:
+        except Exception as e:
+            # An unavailable endpoint says nothing about the contract —
+            # let it propagate (and fail over) instead of caching "no".
+            if is_transport_error(e):
+                raise
             self._supports_storage_ref_cache = False
         return self._supports_storage_ref_cache
 
@@ -779,7 +784,11 @@ class DataProvenanceContract:
             test_hash = b"\x00" * 32
             self._contract.functions.getTransformationLinks(test_hash).call()
             self._supports_v2 = True
-        except Exception:
+        except Exception as e:
+            # An unavailable endpoint says nothing about the contract —
+            # let it propagate (and fail over) instead of caching "no".
+            if is_transport_error(e):
+                raise
             self._supports_v2 = False
         return self._supports_v2
 

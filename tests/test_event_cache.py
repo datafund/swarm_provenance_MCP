@@ -234,6 +234,8 @@ class TestReadonlyPathCacheIntegration:
         mock_provider.deploy_block = 37_562_100
 
         mock_contract = MagicMock()
+        # v1 contract: lineage comes from event logs, not state reads
+        mock_contract.supports_transformation_links.return_value = False
         # Event scan returns one transformation
         mock_contract.get_all_transformations.return_value = [
             (bytes.fromhex(parent_hash), bytes.fromhex(child_hash), "Anonymized"),

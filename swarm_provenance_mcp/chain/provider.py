@@ -33,6 +33,48 @@ def _import_web3():
     return _Web3
 
 
+# HTTP statuses that mean "this endpoint cannot serve right now" rather than
+# "this request is wrong" — another endpoint may well succeed.
+_TRANSPORT_HTTP_STATUSES = (429, 502, 503, 504)
+
+# JSON-RPC errors that some providers return with HTTP 200 when their backend
+# pool is unhealthy (e.g. -32011 "no backend is currently healthy...").
+_TRANSPORT_RPC_MARKERS = ("-32011", "no backend is currently healthy")
+
+# RPC methods exercised by the liveness probe. eth_chainId alone is answered
+# from cache by some providers even when every state method is failing, so
+# the probe also runs the state methods a write needs.
+PROBE_METHODS = ("eth_chainId", "eth_gasPrice", "eth_getTransactionCount")
+
+
+def is_transport_error(exc: BaseException) -> bool:
+    """
+    Check whether an exception means the RPC endpoint itself is unavailable.
+
+    Walks the ``__cause__``/``__context__`` chain, so wrapped errors (e.g. a
+    ``ChainTransactionError`` raised from an ``HTTPError``) are recognised.
+    Reverts, validation errors and insufficient funds are not transport errors.
+    """
+    from requests.exceptions import ConnectionError as ReqConnectionError
+    from requests.exceptions import HTTPError, Timeout
+
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, (ReqConnectionError, Timeout)):
+            return True
+        if isinstance(exc, HTTPError):
+            response = getattr(exc, "response", None)
+            if response is not None:
+                return response.status_code in _TRANSPORT_HTTP_STATUSES
+            return any(f"{code} " in str(exc) for code in _TRANSPORT_HTTP_STATUSES)
+        message = str(exc).lower()
+        if any(marker in message for marker in _TRANSPORT_RPC_MARKERS):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
 # Network presets for supported chains
 CHAIN_PRESETS = {
     "base-sepolia": {
@@ -44,6 +86,7 @@ CHAIN_PRESETS = {
         "rpc_fallbacks": [
             "https://base-sepolia-rpc.publicnode.com",
             "https://base-sepolia.drpc.org",
+            "https://base-sepolia.gateway.tenderly.co",
         ],
     },
     "base": {
@@ -157,13 +200,30 @@ class ChainProvider:
         """Get the Web3 instance."""
         return self._web3
 
+    def _probe(self, web3) -> None:
+        """
+        Run the liveness probe (``PROBE_METHODS``) against a Web3 instance.
+
+        Raises:
+            ChainConnectionError: If the chain ID does not match.
+            Exception: Whatever the RPC call raised if a method fails.
+        """
+        actual_chain_id = web3.eth.chain_id
+        if actual_chain_id != self.chain_id:
+            raise ChainConnectionError(
+                f"Chain ID mismatch: expected {self.chain_id}, got {actual_chain_id}",
+                rpc_url=self.rpc_url,
+            )
+        _ = web3.eth.gas_price  # the call is the probe; the value is unused
+        web3.eth.get_transaction_count(self.contract_address)
+
     def _try_fallback(self) -> bool:
         """
         Try fallback RPC URLs when the current one fails.
 
         Iterates through remaining URLs in ``_rpc_urls`` (skipping the
-        current ``rpc_url``), attempts ``is_connected()``, and switches
-        ``_web3`` and ``rpc_url`` on the first success.
+        current ``rpc_url``), runs the liveness probe against each, and
+        switches ``_web3`` and ``rpc_url`` on the first that passes.
 
         Returns:
             True if a working fallback was found and switched to.
@@ -180,49 +240,42 @@ class ChainProvider:
                         request_kwargs={"timeout": self._request_timeout},
                     )
                 )
-                if candidate.is_connected():
-                    logger.info(
-                        "RPC fallback: switched from %s to %s",
-                        self.rpc_url,
-                        url,
-                    )
-                    self._web3 = candidate
-                    self.rpc_url = url
-                    return True
-            except Exception:
+                self._probe(candidate)
+            except Exception as e:
+                logger.debug("RPC fallback %s failed probe: %s", url, e)
                 continue
+            logger.info(
+                "RPC fallback: switched from %s to %s",
+                self.rpc_url,
+                url,
+            )
+            self._web3 = candidate
+            self.rpc_url = url
+            return True
         return False
 
     def health_check(self) -> bool:
         """
-        Check if the RPC endpoint is reachable and responding.
+        Check if the RPC endpoint can serve the methods a write needs.
+
+        Runs ``PROBE_METHODS`` rather than a cached-method liveness check, so
+        an endpoint that answers ``eth_chainId`` but fails state methods is
+        reported unhealthy (and a fallback is tried).
 
         Returns:
-            True if connected and chain ID matches.
+            True if every probe method succeeded and chain ID matches.
 
         Raises:
-            ChainConnectionError: If connection fails (after trying fallbacks).
+            ChainConnectionError: If the probe fails (after trying fallbacks).
         """
         try:
-            if not self._web3.is_connected():
-                raise ChainConnectionError(
-                    f"Cannot connect to RPC endpoint: {self.rpc_url}",
-                    rpc_url=self.rpc_url,
-                )
-            actual_chain_id = self._web3.eth.chain_id
-            if actual_chain_id != self.chain_id:
-                raise ChainConnectionError(
-                    f"Chain ID mismatch: expected {self.chain_id}, got {actual_chain_id}",
-                    rpc_url=self.rpc_url,
-                )
+            self._probe(self._web3)
             return True
-        except ChainConnectionError:
-            if self._try_fallback():
-                return self.health_check()
-            raise
         except Exception as e:
             if self._try_fallback():
                 return self.health_check()
+            if isinstance(e, ChainConnectionError):
+                raise
             raise ChainConnectionError(
                 f"RPC health check failed: {e}",
                 rpc_url=self.rpc_url,

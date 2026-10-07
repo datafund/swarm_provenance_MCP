@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import secrets
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -426,14 +427,19 @@ def _is_retryable_error(e: Exception) -> bool:
 
 
 def _recovery_hint(e: Exception) -> Optional[str]:
-    """Point at health_check only when the failure may be transient.
+    """Point at health_check only when it can explain or change the outcome.
 
-    For a permanent error health_check cannot change the outcome, so an agent
+    That is a transient failure, or any 5xx (health_check reports whether the
+    Bee node can reach the Swarm network). For other permanent errors an agent
     following the hint would loop without progress.
     """
     response = getattr(e, "response", None)
     if response is not None and response.status_code == 429:
         return None  # the fix is to wait, which the error text says
+    if response is not None and response.status_code >= 500:
+        # Even when not retryable: health_check reports whether the gateway's
+        # Bee node can reach the Swarm network, the usual cause of a 5xx.
+        return "health_check"
     return "health_check" if _is_retryable_error(e) else None
 
 
@@ -445,16 +451,34 @@ def _is_ambiguous_write_error(e: Exception) -> bool:
     stopped waiting. A connect failure means it never arrived, so it is not
     ambiguous.
     """
-    from requests.exceptions import ReadTimeout
+    from requests.exceptions import (
+        ChunkedEncodingError,
+        ConnectTimeout,
+        JSONDecodeError,
+        ReadTimeout,
+    )
+    from requests.exceptions import ConnectionError as ReqConnectionError
 
-    if isinstance(e, ReadTimeout):
+    if isinstance(e, (ReadTimeout, ChunkedEncodingError, JSONDecodeError)):
+        # JSONDecodeError: a 2xx whose body could not be parsed — it succeeded.
         return True
+    if isinstance(e, ReqConnectionError) and not isinstance(e, ConnectTimeout):
+        # Dropped after sending ("Connection aborted", RemoteDisconnected), or
+        # a 2xx whose body stalled: requests wraps that read timeout as a
+        # ConnectionError("... Read timed out."), not ReadTimeout. Unlike a
+        # refused or unresolvable connection, the write may have happened.
+        text = str(e)
+        return any(
+            marker in text
+            for marker in ("Connection aborted", "RemoteDisconnected", "Read timed out")
+        )
     response = getattr(e, "response", None)
-    return response is not None and response.status_code in (502, 504)
+    # 500 too: the gateway returns it for errors raised after the purchase call.
+    return response is not None and response.status_code in (500, 502, 504)
 
 
 def _ambiguous_write_result(
-    action: str, e: Exception, check_tool: str
+    action: str, e: Exception, check_tool: str, how_to_check: str = ""
 ) -> CallToolResult:
     """Tell the agent not to repeat a write whose outcome is unknown.
 
@@ -463,10 +487,12 @@ def _ambiguous_write_result(
     """
     msg = (
         f"{action} outcome unknown: {e}\n\n"
-        "The request reached the gateway but no answer came back, so it may "
-        "have completed. Do not repeat it yet: call "
+        "The request reached the gateway but no usable answer came back, so "
+        "it may have completed. Do not repeat it yet: call "
         f"{check_tool} first and only retry if the change is not there."
     )
+    if how_to_check:
+        msg += f"\n{how_to_check}"
     logger.error(msg)
     return CallToolResult(
         content=[
@@ -476,6 +502,77 @@ def _ambiguous_write_result(
             )
         ],
         isError=True,
+    )
+
+
+def _stamp_baseline(stamp_id: str) -> str:
+    """The stamp's expiry before an extension, to compare against afterwards."""
+    # Best effort: nothing here may stop the extension itself.
+    try:
+        details = gateway_client.get_stamp_details(stamp_id)
+    except Exception:
+        return ""
+    if not isinstance(details, dict):
+        return ""
+    parts = []
+    if details.get("expectedExpiration"):
+        parts.append(f"expiry {details['expectedExpiration']}")
+    if details.get("batchTTL") is not None:
+        parts.append(f"TTL {details['batchTTL']}s")
+    return ", ".join(parts)
+
+
+# A top-up is an on-chain transaction the node applies when it processes the
+# event, so get_stamp_status may show the old expiry for a while. How long has
+# not been measured against the gateway (#188); err on the side of waiting.
+_TOP_UP_DELAY_NOTE = (
+    " A top-up can take a few minutes to show: if the expiry has not moved, "
+    "wait a few minutes and check again before extending again."
+)
+
+
+def _extension_hint(baseline: str, hours: Any) -> str:
+    """How to tell from get_stamp_status whether the extension went through."""
+    if baseline:
+        return (
+            f"Before this call the stamp had {baseline}. If get_stamp_status now "
+            f"shows an expiry about {hours}h later, the extension went through."
+            + _TOP_UP_DELAY_NOTE
+        )
+    return (
+        "The stamp's state before this call could not be read. If its expiry is "
+        f"about {hours}h later than you expected, the extension went through."
+        + _TOP_UP_DELAY_NOTE
+    )
+
+
+def _format_age(seconds: float) -> str:
+    """Compact age: 45s, 12m, 3h, 2d."""
+    seconds = int(seconds)
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
+def _new_batch_hint(label: Optional[str], depth: Optional[int]) -> str:
+    """How to spot, in list_stamps output, a batch the unanswered purchase made.
+
+    Only fields list_stamps prints. Free-tier purchases are shared batches,
+    so access mode does not identify them. Every purchase carries a label
+    (generated when the caller gave none), so the label always identifies it.
+    """
+    traits = []
+    if label:
+        traits.append(f"'Label: {label}'")
+    if depth is not None:
+        traits.append(f"'Depth: {depth}'")
+    traits.append("a batch ID that was not listed before this call")
+    return (
+        "In list_stamps, a batch from this call shows "
+        + ", ".join(traits)
+        + "; where the gateway reports it, 'Purchased' is a few minutes ago. "
+        "It may still be propagating."
     )
 
 
@@ -496,6 +593,14 @@ def _gateway_error_text(message: str, e: Exception) -> str:
     return message
 
 
+def _bee_advisories(gateway_response: Dict[str, Any]) -> List[str]:
+    """The gateway's advisory ``bee_node.warnings`` (few peers, chain lag)."""
+    bee = gateway_response.get("bee_node")
+    if not isinstance(bee, dict):
+        return []
+    return [str(w) for w in bee.get("warnings") or []]
+
+
 def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Summarise whether the gateway's Bee node can reach the Swarm network.
@@ -504,11 +609,17 @@ def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, 
     its own local data and accepts uploads that never propagate.
 
     Returns:
-        None if the gateway does not report ``bee_node``, otherwise a dict with
-        ``ok`` (bool), ``summary`` (str) and ``problems`` (list of str).
+        None if the gateway does not report the node's network state, otherwise
+        a dict with ``ok`` (bool), ``summary`` (str), ``problems`` (list of
+        str) and ``advisories`` (list of str).
+
+    ``bee_node.warnings`` are advisory (few peers, chain lag) and the gateway
+    keeps ``healthy: true`` for them, so they are reported without changing
+    ``ok``.
     """
     bee = gateway_response.get("bee_node")
-    if not isinstance(bee, dict):
+    state_keys = ("healthy", "network_availability", "connected_peers", "warming_up")
+    if not isinstance(bee, dict) or not any(k in bee for k in state_keys):
         return None
 
     peers = bee.get("connected_peers")
@@ -522,7 +633,7 @@ def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, 
         problems.append("Bee node has no connected peers")
     if bee.get("warming_up"):
         problems.append("Bee node is still warming up")
-    problems.extend(str(w) for w in bee.get("warnings") or [])
+    advisories = _bee_advisories(gateway_response)
 
     parts = []
     if peers is not None:
@@ -535,6 +646,7 @@ def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, 
         "ok": not problems,
         "summary": ", ".join(parts) or "no details reported",
         "problems": problems,
+        "advisories": advisories,
     }
 
 
@@ -647,7 +759,7 @@ def create_server() -> Server:
                         },
                         "label": {
                             "type": "string",
-                            "description": "Optional human-readable label for easier stamp identification",
+                            "description": "Optional human-readable label for easier stamp identification. If omitted, a unique label (mcp-<hex>) is generated so the batch can be found in list_stamps.",
                             "maxLength": 100,
                         },
                     },
@@ -1263,13 +1375,16 @@ def create_server() -> Server:
 
 async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle stamp purchase requests."""
+    label, depth = None, None
     try:
         duration_hours = arguments.get(
             "duration_hours", settings.default_stamp_duration_hours
         )
         size = arguments.get("size", settings.default_stamp_size)
         depth = arguments.get("depth")
-        label = arguments.get("label")
+        # Always label the batch: if the answer to this call is lost, the
+        # label is how the agent finds the batch again instead of buying twice.
+        label = arguments.get("label") or f"mcp-{secrets.token_hex(4)}"
 
         # Validate inputs
         validate_stamp_duration_hours(duration_hours)
@@ -1350,6 +1465,13 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
     except ValueError as e:
+        from requests.exceptions import JSONDecodeError
+
+        if isinstance(e, JSONDecodeError):
+            # A 2xx with an unreadable body — the write probably succeeded
+            return _ambiguous_write_result(
+                "Stamp purchase", e, "list_stamps", _new_batch_hint(label, depth)
+            )
         error_msg = f"Validation error: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
@@ -1365,7 +1487,9 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         )
     except RequestException as e:
         if _is_ambiguous_write_error(e):
-            return _ambiguous_write_result("Stamp purchase", e, "list_stamps")
+            return _ambiguous_write_result(
+                "Stamp purchase", e, "list_stamps", _new_batch_hint(label, depth)
+            )
         error_msg = _gateway_error_text(f"Failed to purchase stamp: {str(e)}", e)
         logger.error(error_msg)
         return CallToolResult(
@@ -1534,6 +1658,18 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                 if propagation_status:
                     detail_line += f" | Propagation: {propagation_status}"
 
+                # What identifies a batch from an unanswered purchase
+                identity = []
+                if stamp.get("label"):
+                    identity.append(f"Label: {stamp['label']}")
+                if stamp.get("depth") is not None:
+                    identity.append(f"Depth: {stamp['depth']}")
+                age = stamp.get("secondsSincePurchase")
+                if isinstance(age, (int, float)):
+                    identity.append(f"Purchased: {_format_age(age)} ago")
+                if identity:
+                    detail_line += "\n  " + " | ".join(identity)
+
                 response_text += detail_line + "\n\n"
 
         # Public-only hint: all stamps are shared, none owned
@@ -1570,6 +1706,7 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
 
 async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle stamp extension requests."""
+    baseline = ""
     try:
         stamp_id = arguments.get("stamp_id")
         duration_hours = arguments.get("duration_hours")
@@ -1583,6 +1720,9 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         clean_stamp_id = validate_and_clean_stamp_id(stamp_id)
         validate_stamp_duration_hours(duration_hours)
 
+        # Read before writing: if the answer is lost, this is what the agent
+        # compares against to tell whether the extension happened.
+        baseline = _stamp_baseline(clean_stamp_id)
         result = gateway_client.extend_stamp(clean_stamp_id, duration_hours)
 
         response_text = f"✅ Stamp extended successfully!\n\n"
@@ -1598,6 +1738,16 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
     except ValueError as e:
+        from requests.exceptions import JSONDecodeError
+
+        if isinstance(e, JSONDecodeError):
+            # A 2xx with an unreadable body — the write probably succeeded
+            return _ambiguous_write_result(
+                "Stamp extension",
+                e,
+                "get_stamp_status",
+                _extension_hint(baseline, arguments.get("duration_hours")),
+            )
         error_msg = f"Validation error: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
@@ -1613,7 +1763,12 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         )
     except RequestException as e:
         if _is_ambiguous_write_error(e):
-            return _ambiguous_write_result("Stamp extension", e, "get_stamp_status")
+            return _ambiguous_write_result(
+                "Stamp extension",
+                e,
+                "get_stamp_status",
+                _extension_hint(baseline, arguments.get("duration_hours")),
+            )
         error_msg = _gateway_error_text(f"Failed to extend stamp: {str(e)}", e)
         logger.error(error_msg)
         return CallToolResult(
@@ -1952,6 +2107,10 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 "uploads may never propagate and only data stored on this node can "
                 "be downloaded. Operator action required — retrying will not help."
             )
+        advisories = _bee_advisories(gw_resp) if gateway_ok else []
+        if advisories:
+            # Advisory only: does not change readiness
+            response_text += f"   ⚠️  Gateway advisory: {'; '.join(advisories)}\n"
 
         # Adaptive: also check stamp availability
         stamps_info = ""

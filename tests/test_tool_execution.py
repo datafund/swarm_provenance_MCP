@@ -1246,9 +1246,11 @@ class TestToolParameterValidation:
                 server, "purchase_stamp", {"duration_hours": 25, "depth": 20}
             )
             assert not result.isError
-            mock_gw.purchase_stamp.assert_called_once_with(
-                25, size="small", depth=20, label=None
-            )
+            mock_gw.purchase_stamp.assert_called_once()
+            args, kwargs = mock_gw.purchase_stamp.call_args
+            assert args == (25,)
+            assert kwargs["size"] == "small" and kwargs["depth"] == 20
+            assert kwargs["label"].startswith("mcp-")  # generated (#189)
             assert "Depth: 20" in result.content[0].text
 
     async def test_empty_string_parameters(self, server):
@@ -4365,6 +4367,14 @@ class TestHealthCheckBalanceWarning:
     @pytest.fixture
     def server(self):
         return create_server()
+
+    @pytest.fixture(autouse=True)
+    def _chain_enabled(self):
+        """The chain section depends on CHAIN_ENABLED; don't read it from .env."""
+        from swarm_provenance_mcp.server import settings
+
+        with patch.object(settings, "chain_enabled", True):
+            yield
 
     async def test_low_balance_shows_warning(self, server):
         """health_check should warn when wallet balance is too low."""

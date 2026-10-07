@@ -431,11 +431,62 @@ def _recovery_hint(e: Exception) -> Optional[str]:
     For a permanent error health_check cannot change the outcome, so an agent
     following the hint would loop without progress.
     """
+    response = getattr(e, "response", None)
+    if response is not None and response.status_code == 429:
+        return None  # the fix is to wait, which the error text says
     return "health_check" if _is_retryable_error(e) else None
 
 
+def _is_ambiguous_write_error(e: Exception) -> bool:
+    """Whether a write may have completed even though no answer came back.
+
+    A read timeout or a proxy 502/504 means the request reached the gateway,
+    which may have finished it (bought or topped up a batch) after the client
+    stopped waiting. A connect failure means it never arrived, so it is not
+    ambiguous.
+    """
+    from requests.exceptions import ReadTimeout
+
+    if isinstance(e, ReadTimeout):
+        return True
+    response = getattr(e, "response", None)
+    return response is not None and response.status_code in (502, 504)
+
+
+def _ambiguous_write_result(
+    action: str, e: Exception, check_tool: str
+) -> CallToolResult:
+    """Tell the agent not to repeat a write whose outcome is unknown.
+
+    The free tier carries no payment, so the gateway's Idempotency-Key support
+    does not apply to it; a blind retry buys (or extends) a second time.
+    """
+    msg = (
+        f"{action} outcome unknown: {e}\n\n"
+        "The request reached the gateway but no answer came back, so it may "
+        "have completed. Do not repeat it yet: call "
+        f"{check_tool} first and only retry if the change is not there."
+    )
+    logger.error(msg)
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=_format_error(msg, retryable=False, next_tool=check_tool),
+            )
+        ],
+        isError=True,
+    )
+
+
 def _gateway_error_text(message: str, e: Exception) -> str:
-    """Append an explicit note when only the gateway operator can fix the error."""
+    """Append what the caller can do when the error says more than its status."""
+    response = getattr(e, "response", None)
+    if response is not None and response.status_code == 429:
+        wait = response.headers.get("Retry-After")
+        message += "\n\nRate limited by the gateway"
+        message += f": wait {wait} seconds before retrying." if wait else "."
+        message += " The free tier allows a few write requests per minute."
     if _is_insufficient_funds_error(e):
         message += (
             "\n\nOperator action required: the gateway's wallet cannot pay for "
@@ -1313,6 +1364,8 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
             isError=True,
         )
     except RequestException as e:
+        if _is_ambiguous_write_error(e):
+            return _ambiguous_write_result("Stamp purchase", e, "list_stamps")
         error_msg = _gateway_error_text(f"Failed to purchase stamp: {str(e)}", e)
         logger.error(error_msg)
         return CallToolResult(
@@ -1559,6 +1612,8 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
             isError=True,
         )
     except RequestException as e:
+        if _is_ambiguous_write_error(e):
+            return _ambiguous_write_result("Stamp extension", e, "get_stamp_status")
         error_msg = _gateway_error_text(f"Failed to extend stamp: {str(e)}", e)
         logger.error(error_msg)
         return CallToolResult(
@@ -1671,7 +1726,7 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
             isError=True,
         )
     except RequestException as e:
-        error_msg = f"Failed to upload data: {str(e)}"
+        error_msg = _gateway_error_text(f"Failed to upload data: {str(e)}", e)
         logger.error(error_msg)
         return CallToolResult(
             content=[

@@ -6679,3 +6679,100 @@ class TestTerminalErrorHints:
         text = result.content[0].text
         assert "retryable: true" in text
         assert "_next: health_check" in text
+
+
+# --- Free-tier write safety (issue #142) ---
+
+
+class TestAmbiguousWriteOutcome:
+    """A purchase/extension whose answer was lost must not be blindly retried.
+
+    The free tier carries no payment, so the gateway's Idempotency-Key
+    protection does not apply; a retry buys a second batch.
+    """
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    @pytest.mark.parametrize("status", [502, 504])
+    async def test_purchase_proxy_error_is_not_retryable(self, server, status):
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.purchase_stamp.side_effect = _http_error(status)
+            result = await call_tool_directly(server, "purchase_stamp", {})
+        text = result.content[0].text
+        assert result.isError
+        assert "outcome unknown" in text
+        assert "retryable: false" in text
+        assert "_next: list_stamps" in text
+
+    async def test_purchase_read_timeout_is_not_retryable(self, server):
+        from requests.exceptions import ReadTimeout
+
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.purchase_stamp.side_effect = ReadTimeout("read timed out")
+            result = await call_tool_directly(server, "purchase_stamp", {})
+        text = result.content[0].text
+        assert "may have completed" in text
+        assert "retryable: false" in text
+
+    async def test_purchase_connect_failure_stays_retryable(self, server):
+        """Never reached the gateway — nothing was bought, retry is safe."""
+        from requests.exceptions import ConnectTimeout
+
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.purchase_stamp.side_effect = ConnectTimeout("connect timed out")
+            result = await call_tool_directly(server, "purchase_stamp", {})
+        text = result.content[0].text
+        assert "outcome unknown" not in text
+        assert "retryable: true" in text
+
+    async def test_extend_timeout_points_at_stamp_status(self, server):
+        from requests.exceptions import ReadTimeout
+
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.extend_stamp.side_effect = ReadTimeout("read timed out")
+            result = await call_tool_directly(
+                server,
+                "extend_stamp",
+                {"stamp_id": TEST_STAMP_ID, "duration_hours": 24},
+            )
+        text = result.content[0].text
+        assert "Stamp extension outcome unknown" in text
+        assert "_next: get_stamp_status" in text
+
+
+class TestRateLimitGuidance:
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    @pytest.mark.parametrize(
+        "tool,method,args",
+        [
+            ("purchase_stamp", "purchase_stamp", {}),
+            ("upload_data", "upload_data", {"data": "x", "stamp_id": TEST_STAMP_ID}),
+        ],
+    )
+    async def test_retry_after_is_surfaced(self, server, tool, method, args):
+        err = _http_error(429, "Free tier rate limit exceeded")
+        err.response.headers["Retry-After"] = "60"
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            getattr(mock_client, method).side_effect = err
+            result = await call_tool_directly(server, tool, args)
+        text = result.content[0].text
+        assert "wait 60 seconds before retrying" in text
+        assert "retryable: true" in text
+        assert "_next: health_check" not in text
+
+
+class TestPurchaseTimeout:
+    def test_purchase_waits_at_least_two_minutes(self):
+        from swarm_provenance_mcp.gateway_client import SwarmGatewayClient
+
+        client = SwarmGatewayClient(base_url="http://gw")
+        with patch.object(client.session, "post") as post:
+            post.return_value.ok = True
+            post.return_value.json.return_value = {"batchID": TEST_STAMP_ID}
+            client.purchase_stamp(duration_hours=25)
+        assert post.call_args.kwargs["timeout"] >= 120

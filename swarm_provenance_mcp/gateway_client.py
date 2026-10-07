@@ -85,7 +85,9 @@ class SwarmGatewayClient:
         if label:
             payload["label"] = label
 
-        response = self.session.post(url, json=payload, timeout=60)
+        # A purchase waits for an on-chain batch; giving up early turns a
+        # success into an apparent failure that invites a second purchase.
+        response = self.session.post(url, json=payload, timeout=120)
         self._raise_with_detail(response)
         return response.json()
 

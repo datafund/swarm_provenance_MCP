@@ -10,6 +10,7 @@ Dependencies (web3, eth-account) are included in the default install.
 
 import functools
 import logging
+import threading
 from typing import List, Optional
 
 from .contract import DataStatus
@@ -36,6 +37,10 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Clients are shared across asyncio.to_thread workers; serialise endpoint
+# switches so concurrent failures do not each switch (and switch back).
+_FAILOVER_LOCK = threading.Lock()
 
 
 def _should_fail_over(e: Exception) -> bool:
@@ -64,14 +69,15 @@ def _rpc_failover(method):
         failovers = 0
         while True:
             self._sync_contract()
+            attempt_url = self._provider.rpc_url
             try:
                 return method(self, *args, **kwargs)
             except Exception as e:
                 if not _should_fail_over(e):
                     raise
-                failed_url = self._provider.rpc_url
+                failed_url = attempt_url
                 max_failovers = len(self._provider._rpc_urls) - 1
-                if failovers < max_failovers and self._failover():
+                if failovers < max_failovers and self._failover(failed_url):
                     failovers += 1
                     logger.warning(
                         "%s: RPC %s unavailable (%s), retrying on %s",
@@ -208,21 +214,30 @@ class ChainClient:
             self._contract_web3 = current
         if current is self._contract_web3:
             return
+        # Build on the snapshot: another thread may switch the provider
+        # meanwhile, and the next sync must then still see a mismatch.
         self._contract = DataProvenanceContract(
-            web3=self._provider.web3,
+            web3=current,
             contract_address=self._provider.contract_address,
         )
-        self._contract_web3 = self._provider.web3
+        self._contract_web3 = current
 
-    def _failover(self) -> bool:
+    def _failover(self, failed_url: str) -> bool:
         """
         Switch the provider to the next healthy RPC and rebind the contract.
 
+        Args:
+            failed_url: The endpoint the failed attempt used. If another
+                thread has already moved off it, that switch is reused
+                instead of switching again.
+
         Returns:
-            True if a fallback endpoint was switched to.
+            True if the client is now on a different endpoint.
         """
-        if not self._provider._try_fallback():
-            return False
+        with _FAILOVER_LOCK:
+            if self._provider.rpc_url == failed_url:
+                if not self._provider._try_fallback():
+                    return False
         self._sync_contract()
         return True
 

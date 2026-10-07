@@ -72,6 +72,47 @@ class TestContractFollowsProviderSwitch:
         assert client._contract._web3 is endpoints["web3"][healthy]
 
 
+class TestConcurrentFailover:
+    """A shared client must not switch twice for one outage."""
+
+    def test_second_failure_reuses_first_switch(self, endpoints):
+        from swarm_provenance_mcp.chain.client import ChainClient
+
+        primary, first_fb = endpoints["urls"][:2]
+        client = ChainClient(chain="base-sepolia")
+        assert client._failover(primary) is True
+        assert client._provider.rpc_url == first_fb
+        # A second thread whose attempt also failed on the primary
+        assert client._failover(primary) is True
+        assert client._provider.rpc_url == first_fb
+
+    def test_sync_uses_one_snapshot(self, endpoints):
+        """A switch during the rebuild must still be picked up next time."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+
+        primary, first_fb, second_fb = endpoints["urls"][:3]
+        client = ChainClient(chain="base-sepolia")
+        provider = client._provider
+        provider._web3 = endpoints["web3"][first_fb]
+
+        real_contract_cls = __import__(
+            "swarm_provenance_mcp.chain.contract", fromlist=["x"]
+        ).DataProvenanceContract
+
+        def switch_mid_build(*args, **kwargs):
+            provider._web3 = endpoints["web3"][second_fb]  # another thread
+            return real_contract_cls(*args, **kwargs)
+
+        with patch(
+            "swarm_provenance_mcp.chain.contract.DataProvenanceContract",
+            side_effect=switch_mid_build,
+        ):
+            client._sync_contract()
+        assert client._contract_web3 is endpoints["web3"][first_fb]
+        client._sync_contract()
+        assert client._contract._web3 is endpoints["web3"][second_fb]
+
+
 class TestHttpProviderRetries:
     """#171 should-fix: web3's default retries re-sent a tx five times."""
 

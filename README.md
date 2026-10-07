@@ -687,7 +687,9 @@ cp .env.example .env
 
 *Note: Replace `/path/to/swarm_provenance_mcp` with the actual path where you cloned the repository.*
 
-The `run.sh` launcher auto-recreates the venv if it breaks after moving or renaming the repo directory — no manual fix needed.
+The `run.sh` launcher (macOS/Linux) starts the server from the repo's venv, with the repo as working directory so `.env` is loaded. If the venv stops working — typically after moving or renaming the repo directory — it rebuilds it automatically. Make it executable once with `chmod +x run.sh`.
+
+The rebuild installs all dependencies and can take a few minutes, longer than an MCP client waits for the server on startup. If the first launch after a move times out, run `./run.sh < /dev/null` once in a terminal to finish the rebuild, then restart the client. The Windows config above does not use the launcher yet; after moving the repo on Windows, recreate the venv manually.
 
 **Alternative (if package is installed)**: You can use `"command": "swarm-provenance-mcp"` instead after running `pip install -e .`
 
@@ -781,9 +783,9 @@ Claude will register the hash on the blockchain and confirm the provenance recor
 
 If Claude Desktop doesn't show the Swarm tools:
 1. Check the config file path is correct for your OS
-2. Verify the `command` path points to the Python executable inside your venv
+2. Verify the `command` path points to `run.sh` in your clone (macOS/Linux), or to the Python executable inside your venv (Windows)
 3. Check Claude Desktop logs: **Help > Show Logs** (look for MCP connection errors)
-4. Test manually: run `swarm-provenance-mcp` in your terminal — it should start without errors and wait for MCP input
+4. Test manually: run `./run.sh` (or `swarm-provenance-mcp`) in your terminal — it should start without errors and wait for MCP input. Launcher messages, including a venv rebuild, go to stderr
 
 ## Development
 

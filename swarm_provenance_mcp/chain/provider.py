@@ -8,6 +8,7 @@ Dependencies (web3, eth-account) are included in the default install.
 """
 
 import logging
+import threading
 from typing import List, Optional
 
 from .exceptions import ChainConfigurationError, ChainConnectionError
@@ -73,6 +74,12 @@ def is_transport_error(exc: BaseException) -> bool:
             return True
         exc = exc.__cause__ or exc.__context__
     return False
+
+
+# Serialises endpoint switches. Providers and clients are shared across
+# asyncio.to_thread workers; reentrant because a client's failover holds it
+# while calling _try_fallback.
+SWITCH_LOCK = threading.RLock()
 
 
 # Network presets for supported chains
@@ -264,6 +271,26 @@ class ChainProvider:
         """
         Web3 = _import_web3()
 
+        with SWITCH_LOCK:
+            return self._switch_to_first_healthy(Web3)
+
+    def _fallback_from(self, failed_web3) -> bool:
+        """
+        Fail over away from ``failed_web3`` unless that already happened.
+
+        A concurrent caller may have switched since the failing call started;
+        switching again would move away from the endpoint it just chose.
+
+        Returns:
+            True if the provider is now on a different endpoint.
+        """
+        with SWITCH_LOCK:
+            if self._web3 is not failed_web3:
+                return True
+            return self._try_fallback()
+
+    def _switch_to_first_healthy(self, Web3) -> bool:
+        """Body of _try_fallback; call with SWITCH_LOCK held."""
         for url in self._rpc_urls:
             if url == self.rpc_url:
                 continue
@@ -297,11 +324,12 @@ class ChainProvider:
         Raises:
             ChainConnectionError: If the probe fails (after trying fallbacks).
         """
+        probed = self._web3
         try:
-            self._probe(self._web3)
+            self._probe(probed)
             return True
         except Exception as e:
-            if self._try_fallback():
+            if self._fallback_from(probed):
                 return self.health_check()
             if isinstance(e, ChainConnectionError):
                 raise
@@ -320,10 +348,11 @@ class ChainProvider:
         Raises:
             ChainConnectionError: If RPC call fails (after trying fallbacks).
         """
+        used = self._web3
         try:
-            return self._web3.eth.block_number
+            return used.eth.block_number
         except Exception as e:
-            if self._try_fallback():
+            if self._fallback_from(used):
                 return self.get_block_number()
             raise ChainConnectionError(
                 f"Failed to get block number: {e}",

@@ -38,9 +38,9 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
-# Clients are shared across asyncio.to_thread workers; serialise endpoint
-# switches so concurrent failures do not each switch (and switch back).
-_FAILOVER_LOCK = threading.Lock()
+# Guards the (contract, Web3) pair so it is rebuilt and assigned as one step.
+# Held only briefly, unlike SWITCH_LOCK, which spans endpoint probes.
+_BINDING_LOCK = threading.Lock()
 
 
 def _should_fail_over(e: Exception) -> bool:
@@ -68,8 +68,8 @@ def _rpc_failover(method):
     def wrapper(self, *args, **kwargs):
         failovers = 0
         while True:
-            self._sync_contract()
-            attempt_url = self._provider.rpc_url
+            attempt_web3 = self._sync_contract()
+            attempt_url = self._provider.rpc_url  # for messages only
             try:
                 return method(self, *args, **kwargs)
             except Exception as e:
@@ -77,7 +77,7 @@ def _rpc_failover(method):
                     raise
                 failed_url = attempt_url
                 max_failovers = len(self._provider._rpc_urls) - 1
-                if failovers < max_failovers and self._failover(failed_url):
+                if failovers < max_failovers and self._failover(attempt_web3):
                     failovers += 1
                     logger.warning(
                         "%s: RPC %s unavailable (%s), retrying on %s",
@@ -198,46 +198,48 @@ class ChainClient:
 
     # --- Internal helpers ---
 
-    def _sync_contract(self) -> None:
+    def _sync_contract(self):
         """
         Rebuild the contract wrapper if the provider switched endpoints.
 
         The wrapper holds its own Web3 reference. The provider can switch
         outside an operation (``health_check`` fails over too), so this runs
         before every attempt rather than only after ``_failover``.
+
+        Returns:
+            The Web3 instance the contract is bound to after the sync — the
+            endpoint an attempt that follows will actually use.
         """
         from .contract import DataProvenanceContract
 
-        current = self._provider.web3
-        if self._contract_web3 is None:
-            # Contract set without __init__ (tests inject one): assume current.
-            self._contract_web3 = current
-        if current is self._contract_web3:
-            return
-        # Build on the snapshot: another thread may switch the provider
-        # meanwhile, and the next sync must then still see a mismatch.
-        self._contract = DataProvenanceContract(
-            web3=current,
-            contract_address=self._provider.contract_address,
-        )
-        self._contract_web3 = current
+        with _BINDING_LOCK:
+            current = self._provider.web3
+            if self._contract_web3 is None:
+                # Contract set without __init__ (tests inject one): assume current.
+                self._contract_web3 = current
+            if current is not self._contract_web3:
+                self._contract = DataProvenanceContract(
+                    web3=current,
+                    contract_address=self._provider.contract_address,
+                )
+                self._contract_web3 = current
+            return self._contract_web3
 
-    def _failover(self, failed_url: str) -> bool:
+    def _failover(self, failed_web3) -> bool:
         """
         Switch the provider to the next healthy RPC and rebind the contract.
 
         Args:
-            failed_url: The endpoint the failed attempt used. If another
-                thread has already moved off it, that switch is reused
-                instead of switching again.
+            failed_web3: The Web3 instance the failed attempt ran on. If the
+                provider has already moved off it (another thread failed over,
+                or health_check switched), that switch is reused instead of
+                switching away from a healthy endpoint.
 
         Returns:
             True if the client is now on a different endpoint.
         """
-        with _FAILOVER_LOCK:
-            if self._provider.rpc_url == failed_url:
-                if not self._provider._try_fallback():
-                    return False
+        if not self._provider._fallback_from(failed_web3):
+            return False
         self._sync_contract()
         return True
 

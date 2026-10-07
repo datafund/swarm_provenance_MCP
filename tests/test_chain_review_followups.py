@@ -80,11 +80,65 @@ class TestConcurrentFailover:
 
         primary, first_fb = endpoints["urls"][:2]
         client = ChainClient(chain="base-sepolia")
-        assert client._failover(primary) is True
+        failed = endpoints["web3"][primary]
+        assert client._failover(failed) is True
         assert client._provider.rpc_url == first_fb
-        # A second thread whose attempt also failed on the primary
-        assert client._failover(primary) is True
+        # A second thread whose attempt also ran on the primary
+        assert client._failover(failed) is True
         assert client._provider.rpc_url == first_fb
+
+    def test_health_check_does_not_switch_away_from_new_endpoint(self, endpoints):
+        """A probe that failed on the old endpoint must not move off the new one."""
+        from swarm_provenance_mcp.chain.client import ChainClient
+
+        primary, first_fb = endpoints["urls"][:2]
+        client = ChainClient(chain="base-sepolia")
+        provider = client._provider
+        old = provider.web3
+        provider._web3 = endpoints["web3"][first_fb]  # another thread switched
+        provider.rpc_url = first_fb
+        assert provider._fallback_from(old) is True
+        assert provider.rpc_url == first_fb
+
+    def test_rebuilds_are_serialised(self, endpoints):
+        """#186: a second sync must not interleave with a rebuild in progress.
+
+        Interleaving the two assignments (contract, recorded Web3) of two
+        threads is what left the contract on one endpoint while recording
+        another, after which every sync was a no-op.
+        """
+        from swarm_provenance_mcp.chain import contract as contract_module
+        from swarm_provenance_mcp.chain.client import ChainClient
+
+        primary, first_fb, second_fb = endpoints["urls"][:3]
+        client = ChainClient(chain="base-sepolia")
+        provider = client._provider
+        real_cls = contract_module.DataProvenanceContract
+        in_build, release = threading.Event(), threading.Event()
+
+        def blocking_build(*args, **kwargs):
+            if not in_build.is_set():
+                in_build.set()
+                release.wait(5)
+            return real_cls(*args, **kwargs)
+
+        with patch.object(contract_module, "DataProvenanceContract", blocking_build):
+            provider._web3 = endpoints["web3"][first_fb]
+            a = threading.Thread(target=client._sync_contract)
+            a.start()
+            assert in_build.wait(5)
+            # Thread B: the provider moves again while A is mid-rebuild
+            provider._web3 = endpoints["web3"][second_fb]
+            b = threading.Thread(target=client._sync_contract)
+            b.start()
+            b.join(0.2)
+            assert b.is_alive(), "second sync did not wait for the rebuild"
+            release.set()
+            a.join(5)
+            b.join(5)
+
+        assert client._contract._web3 is client._contract_web3
+        assert client._contract_web3 is endpoints["web3"][second_fb]
 
     def test_sync_uses_one_snapshot(self, endpoints):
         """A switch during the rebuild must still be picked up next time."""

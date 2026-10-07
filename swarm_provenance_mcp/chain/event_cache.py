@@ -112,6 +112,12 @@ class TransformationEventCache:
                         self._forward.setdefault(src_hex, []).append((new_hex, desc))
                         self._reverse.setdefault(new_hex, []).append((src_hex, desc))
             except Exception as e:
+                # A v1 contract has no DataMerged event — skip. An unavailable
+                # endpoint must not advance _last_scanned_block past merges.
+                from .provider import is_transport_error
+
+                if is_transport_error(e):
+                    raise
                 logger.debug("DataMerged event scan skipped: %s", e)
 
             self._last_scanned_block = current_block

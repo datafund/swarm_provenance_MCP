@@ -2269,7 +2269,6 @@ class TestVerifyHash:
     async def test_verify_registered(self, server):
         """Registered hash should show provenance info."""
         mock_client = MagicMock()
-        mock_client.verify.return_value = True
         mock_client.get.return_value = self._mock_record()
 
         with (
@@ -2291,12 +2290,13 @@ class TestVerifyHash:
         assert "0x1234" in text
         assert "2023" in text  # timestamp 1700000000
         assert "ACTIVE" in text
-        mock_client.verify.assert_called_once_with(TEST_REFERENCE)
+        # One read: get() answers both "registered?" and "what is the record?"
+        mock_client.get.assert_called_once_with(TEST_REFERENCE)
+        mock_client.verify.assert_not_called()
 
     async def test_verify_registered_timestamp_zero(self, server):
         """Timestamp=0 (epoch) should display as 'unknown' since it's falsy."""
         mock_client = MagicMock()
-        mock_client.verify.return_value = True
         mock_rec = self._mock_record()
         mock_rec.timestamp = 0
         mock_client.get.return_value = mock_rec
@@ -2320,8 +2320,10 @@ class TestVerifyHash:
 
     async def test_verify_not_registered(self, server):
         """Unregistered hash should show not-found message."""
+        from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
+
         mock_client = MagicMock()
-        mock_client.verify.return_value = False
+        mock_client.get.side_effect = DataNotRegisteredError("not registered")
 
         with (
             patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
@@ -2343,7 +2345,6 @@ class TestVerifyHash:
     async def test_verify_registered_hints(self, server):
         """Registered hash should suggest download_data next."""
         mock_client = MagicMock()
-        mock_client.verify.return_value = True
         mock_client.get.return_value = self._mock_record()
 
         with (
@@ -2364,8 +2365,10 @@ class TestVerifyHash:
 
     async def test_verify_not_registered_hints(self, server):
         """Unregistered hash should suggest anchor_hash next."""
+        from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
+
         mock_client = MagicMock()
-        mock_client.verify.return_value = False
+        mock_client.get.side_effect = DataNotRegisteredError("not registered")
 
         with (
             patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
@@ -2557,7 +2560,7 @@ class TestVerifyHash:
         from swarm_provenance_mcp.chain.exceptions import ChainConnectionError
 
         mock_client = MagicMock()
-        mock_client.verify.side_effect = ChainConnectionError(
+        mock_client.get.side_effect = ChainConnectionError(
             "RPC unreachable", rpc_url="https://sepolia.base.org"
         )
 
@@ -6452,7 +6455,6 @@ class TestGetProvenanceShowsStorageRef:
     async def test_verify_hash_shows_storage_ref(self, server):
         """verify_hash should display storage_ref when set."""
         mock_client = MagicMock()
-        mock_client.verify.return_value = True
         mock_client.get.return_value = self._mock_record(storage_ref=TEST_STORAGE_REF)
 
         with (

@@ -111,6 +111,36 @@ CHAIN_PRESETS = {
 }
 
 
+def _http_provider(Web3, url: str, timeout: int):
+    """
+    Build an HTTPProvider with explicit retry behaviour.
+
+    web3's default retries each failing call 5 times with backoff (~1.9 s per
+    503), including eth_sendRawTransaction, so one 503 re-sent the same signed
+    transaction five times and every failover waited out the backoff first.
+    Reads retry once; sends never do — failover handles the rest.
+    """
+    from requests.exceptions import ConnectionError as ReqConnectionError
+    from requests.exceptions import HTTPError, Timeout
+    from web3.providers.rpc.utils import (
+        REQUEST_RETRY_ALLOWLIST,
+        ExceptionRetryConfiguration,
+    )
+
+    return Web3.HTTPProvider(
+        url,
+        request_kwargs={"timeout": timeout},
+        exception_retry_configuration=ExceptionRetryConfiguration(
+            errors=(ReqConnectionError, HTTPError, Timeout),
+            retries=2,  # total attempts: one retry
+            backoff_factor=0.1,
+            method_allowlist=[
+                m for m in REQUEST_RETRY_ALLOWLIST if m != "eth_sendRawTransaction"
+            ],
+        ),
+    )
+
+
 class ChainProvider:
     """Provider for Web3 connections to supported EVM chains.
 
@@ -178,12 +208,7 @@ class ChainProvider:
             )
 
         # Initialize Web3 connection
-        self._web3 = Web3(
-            Web3.HTTPProvider(
-                self.rpc_url,
-                request_kwargs={"timeout": self._request_timeout},
-            )
-        )
+        self._web3 = Web3(_http_provider(Web3, self.rpc_url, self._request_timeout))
 
         # When a custom RPC is provided, auto-detect chain ID from the node
         # (e.g. local Hardhat uses chain ID 31337, not the preset chain ID)
@@ -234,12 +259,7 @@ class ChainProvider:
             if url == self.rpc_url:
                 continue
             try:
-                candidate = Web3(
-                    Web3.HTTPProvider(
-                        url,
-                        request_kwargs={"timeout": self._request_timeout},
-                    )
-                )
+                candidate = Web3(_http_provider(Web3, url, self._request_timeout))
                 self._probe(candidate)
             except Exception as e:
                 logger.debug("RPC fallback %s failed probe: %s", url, e)

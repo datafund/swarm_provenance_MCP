@@ -10,9 +10,11 @@ Dependencies (web3, eth-account) are included in the default install.
 
 import functools
 import logging
+import threading
 from typing import List, Optional
 
 from .contract import DataStatus
+from .provider import is_transport_error
 from .exceptions import (
     ChainConfigurationError,
     ChainConnectionError,
@@ -36,11 +38,13 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+# Guards the (contract, Web3) pair so it is rebuilt and assigned as one step.
+# Held only briefly, unlike SWITCH_LOCK, which spans endpoint probes.
+_BINDING_LOCK = threading.Lock()
+
 
 def _should_fail_over(e: Exception) -> bool:
     """Whether an error is an unavailable endpoint that another RPC may serve."""
-    from .provider import is_transport_error
-
     if isinstance(e, ChainTransactionError):
         # Once broadcast was attempted the tx may be pending — never re-run.
         return not e.broadcast and is_transport_error(e)
@@ -64,14 +68,16 @@ def _rpc_failover(method):
     def wrapper(self, *args, **kwargs):
         failovers = 0
         while True:
+            attempt_web3 = self._sync_contract()
+            attempt_url = self._provider.rpc_url  # for messages only
             try:
                 return method(self, *args, **kwargs)
             except Exception as e:
                 if not _should_fail_over(e):
                     raise
-                failed_url = self._provider.rpc_url
+                failed_url = attempt_url
                 max_failovers = len(self._provider._rpc_urls) - 1
-                if failovers < max_failovers and self._failover():
+                if failovers < max_failovers and self._failover(attempt_web3):
                     failovers += 1
                     logger.warning(
                         "%s: RPC %s unavailable (%s), retrying on %s",
@@ -90,11 +96,19 @@ def _rpc_failover(method):
     return wrapper
 
 
+class WalletRequiredError(ChainConfigurationError, AttributeError):
+    """A write was attempted on a read-only client.
+
+    Also an AttributeError, so ``hasattr()`` on a read-only wallet is False
+    instead of raising.
+    """
+
+
 class _NoWallet:
     """Stands in for ChainWallet in a read-only client: any use raises."""
 
     def __getattr__(self, name):
-        raise ChainConfigurationError(
+        raise WalletRequiredError(
             "This operation requires a wallet. Set PROVENANCE_WALLET_KEY."
         )
 
@@ -106,6 +120,8 @@ class ChainClient:
     anchoring Swarm hashes on-chain, recording transformations and access,
     and querying provenance records.
     """
+
+    _contract_web3 = None  # the Web3 instance _contract was built on
 
     def __init__(
         self,
@@ -161,6 +177,7 @@ class ChainClient:
             web3=self._provider.web3,
             contract_address=self._provider.contract_address,
         )
+        self._contract_web3 = self._provider.web3
         self._gas_limit_multiplier = gas_limit_multiplier
         self._gas_limit = gas_limit
 
@@ -181,24 +198,49 @@ class ChainClient:
 
     # --- Internal helpers ---
 
-    def _failover(self) -> bool:
+    def _sync_contract(self):
         """
-        Switch the provider to the next healthy RPC and rebind the contract.
+        Rebuild the contract wrapper if the provider switched endpoints.
 
-        The contract wrapper holds its own Web3 reference, so it must be
-        rebuilt or it keeps calling the endpoint that just failed.
+        The wrapper holds its own Web3 reference. The provider can switch
+        outside an operation (``health_check`` fails over too), so this runs
+        before every attempt rather than only after ``_failover``.
 
         Returns:
-            True if a fallback endpoint was switched to.
+            The Web3 instance the contract is bound to after the sync — the
+            endpoint an attempt that follows will actually use.
         """
         from .contract import DataProvenanceContract
 
-        if not self._provider._try_fallback():
+        with _BINDING_LOCK:
+            current = self._provider.web3
+            if self._contract_web3 is None:
+                # Contract set without __init__ (tests inject one): assume current.
+                self._contract_web3 = current
+            if current is not self._contract_web3:
+                self._contract = DataProvenanceContract(
+                    web3=current,
+                    contract_address=self._provider.contract_address,
+                )
+                self._contract_web3 = current
+            return self._contract_web3
+
+    def _failover(self, failed_web3) -> bool:
+        """
+        Switch the provider to the next healthy RPC and rebind the contract.
+
+        Args:
+            failed_web3: The Web3 instance the failed attempt ran on. If the
+                provider has already moved off it (another thread failed over,
+                or health_check switched), that switch is reused instead of
+                switching away from a healthy endpoint.
+
+        Returns:
+            True if the client is now on a different endpoint.
+        """
+        if not self._provider._fallback_from(failed_web3):
             return False
-        self._contract = DataProvenanceContract(
-            web3=self._provider.web3,
-            contract_address=self._provider.contract_address,
-        )
+        self._sync_contract()
         return True
 
     def _send_transaction(self, tx: dict) -> dict:
@@ -490,6 +532,8 @@ class ChainClient:
             except TransformationAlreadyExistsError:
                 raise
             except Exception as e:
+                if is_transport_error(e):
+                    raise  # retry on another endpoint, don't truncate
                 logger.warning("State-based duplicate check failed: %s", e)
         else:
             deploy_block = self._provider.deploy_block
@@ -515,6 +559,8 @@ class ChainClient:
                 except TransformationAlreadyExistsError:
                     raise
                 except Exception as e:
+                    if is_transport_error(e):
+                        raise  # retry on another endpoint, don't truncate
                     logger.warning("Duplicate check failed, proceeding: %s", e)
 
         tx = self._contract.build_record_transformation_tx(
@@ -1038,6 +1084,7 @@ class ChainClient:
         )
 
         result = self._provider.health_check()
+        self._sync_contract()
 
         logger.debug("Connected, block: %d", self._provider.get_block_number())
 
@@ -1076,8 +1123,9 @@ class ChainClient:
         try:
             if self._contract.supports_transformation_links():
                 use_state_reads = True
-        except Exception:
-            pass
+        except Exception as e:
+            if is_transport_error(e):
+                raise
 
         # Fall back to event cache for v1 contracts
         from .event_cache import get_cache
@@ -1096,6 +1144,8 @@ class ChainClient:
                 )
                 use_local_index = True
             except Exception as e:
+                if is_transport_error(e):
+                    raise  # retry on another endpoint, don't truncate
                 logger.warning(
                     "Full event scan failed, falling back to per-node queries: %s",
                     e,
@@ -1139,6 +1189,8 @@ class ChainClient:
                             if nh_hex not in visited:
                                 to_visit.append((nh_hex, current_depth + 1))
                 except Exception as e:
+                    if is_transport_error(e):
+                        raise  # retry on another endpoint, don't truncate
                     logger.warning(
                         "State-based forward read failed for %s: %s",
                         current_hash,
@@ -1152,6 +1204,8 @@ class ChainClient:
                         if p_hex not in visited:
                             to_visit.append((p_hex, current_depth + 1))
                 except Exception as e:
+                    if is_transport_error(e):
+                        raise  # retry on another endpoint, don't truncate
                     logger.warning(
                         "State-based reverse read failed for %s: %s",
                         current_hash,
@@ -1194,6 +1248,8 @@ class ChainClient:
                     if enriched:
                         record.transformations = enriched
                 except Exception as e:
+                    if is_transport_error(e):
+                        raise  # retry on another endpoint, don't truncate
                     logger.warning("Event query failed for %s: %s", current_hash, e)
                     for t in record.transformations:
                         if t.new_data_hash and t.new_data_hash not in visited:
@@ -1210,6 +1266,8 @@ class ChainClient:
                         if orig_hash not in visited:
                             to_visit.append((orig_hash, current_depth + 1))
                 except Exception as e:
+                    if is_transport_error(e):
+                        raise  # retry on another endpoint, don't truncate
                     logger.warning(
                         "Reverse event query failed for %s: %s",
                         current_hash,

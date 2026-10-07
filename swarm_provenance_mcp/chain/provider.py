@@ -8,6 +8,7 @@ Dependencies (web3, eth-account) are included in the default install.
 """
 
 import logging
+import threading
 from typing import List, Optional
 
 from .exceptions import ChainConfigurationError, ChainConnectionError
@@ -75,6 +76,12 @@ def is_transport_error(exc: BaseException) -> bool:
     return False
 
 
+# Serialises endpoint switches. Providers and clients are shared across
+# asyncio.to_thread workers; reentrant because a client's failover holds it
+# while calling _try_fallback.
+SWITCH_LOCK = threading.RLock()
+
+
 # Network presets for supported chains
 CHAIN_PRESETS = {
     "base-sepolia": {
@@ -109,6 +116,45 @@ CHAIN_PRESETS = {
         "rpc_fallbacks": [],
     },
 }
+
+
+def _http_provider(Web3, url: str, timeout: int):
+    """
+    Build an HTTPProvider with explicit retry behaviour.
+
+    web3's default retries each failing call 5 times with backoff (~1.9 s per
+    503), including eth_sendRawTransaction, so one 503 re-sent the same signed
+    transaction five times and every failover waited out the backoff first.
+    Reads retry once; sends never do — failover handles the rest.
+    """
+    from requests.exceptions import ConnectionError as ReqConnectionError
+    from requests.exceptions import HTTPError, Timeout
+
+    try:
+        from web3.providers.rpc.utils import (
+            REQUEST_RETRY_ALLOWLIST,
+            ExceptionRetryConfiguration,
+        )
+    except ImportError:
+        # web3 6 (pyproject allows it) retries through a provider middleware
+        # instead — 5 attempts, eth_sendRawTransaction included. Drop it and
+        # leave retries to failover.
+        provider = Web3.HTTPProvider(url, request_kwargs={"timeout": timeout})
+        provider.middlewares = ()
+        return provider
+
+    return Web3.HTTPProvider(
+        url,
+        request_kwargs={"timeout": timeout},
+        exception_retry_configuration=ExceptionRetryConfiguration(
+            errors=(ReqConnectionError, HTTPError, Timeout),
+            retries=2,  # total attempts: one retry
+            backoff_factor=0.1,
+            method_allowlist=[
+                m for m in REQUEST_RETRY_ALLOWLIST if m != "eth_sendRawTransaction"
+            ],
+        ),
+    )
 
 
 class ChainProvider:
@@ -178,12 +224,7 @@ class ChainProvider:
             )
 
         # Initialize Web3 connection
-        self._web3 = Web3(
-            Web3.HTTPProvider(
-                self.rpc_url,
-                request_kwargs={"timeout": self._request_timeout},
-            )
-        )
+        self._web3 = Web3(_http_provider(Web3, self.rpc_url, self._request_timeout))
 
         # When a custom RPC is provided, auto-detect chain ID from the node
         # (e.g. local Hardhat uses chain ID 31337, not the preset chain ID)
@@ -230,16 +271,31 @@ class ChainProvider:
         """
         Web3 = _import_web3()
 
+        with SWITCH_LOCK:
+            return self._switch_to_first_healthy(Web3)
+
+    def _fallback_from(self, failed_web3) -> bool:
+        """
+        Fail over away from ``failed_web3`` unless that already happened.
+
+        A concurrent caller may have switched since the failing call started;
+        switching again would move away from the endpoint it just chose.
+
+        Returns:
+            True if the provider is now on a different endpoint.
+        """
+        with SWITCH_LOCK:
+            if self._web3 is not failed_web3:
+                return True
+            return self._try_fallback()
+
+    def _switch_to_first_healthy(self, Web3) -> bool:
+        """Body of _try_fallback; call with SWITCH_LOCK held."""
         for url in self._rpc_urls:
             if url == self.rpc_url:
                 continue
             try:
-                candidate = Web3(
-                    Web3.HTTPProvider(
-                        url,
-                        request_kwargs={"timeout": self._request_timeout},
-                    )
-                )
+                candidate = Web3(_http_provider(Web3, url, self._request_timeout))
                 self._probe(candidate)
             except Exception as e:
                 logger.debug("RPC fallback %s failed probe: %s", url, e)
@@ -268,11 +324,12 @@ class ChainProvider:
         Raises:
             ChainConnectionError: If the probe fails (after trying fallbacks).
         """
+        probed = self._web3
         try:
-            self._probe(self._web3)
+            self._probe(probed)
             return True
         except Exception as e:
-            if self._try_fallback():
+            if self._fallback_from(probed):
                 return self.health_check()
             if isinstance(e, ChainConnectionError):
                 raise
@@ -291,10 +348,11 @@ class ChainProvider:
         Raises:
             ChainConnectionError: If RPC call fails (after trying fallbacks).
         """
+        used = self._web3
         try:
-            return self._web3.eth.block_number
+            return used.eth.block_number
         except Exception as e:
-            if self._try_fallback():
+            if self._fallback_from(used):
                 return self.get_block_number()
             raise ChainConnectionError(
                 f"Failed to get block number: {e}",

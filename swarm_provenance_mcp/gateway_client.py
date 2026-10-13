@@ -138,7 +138,9 @@ class SwarmGatewayClient:
         url = f"{self.base_url}/api/v1/stamps/{stamp_id}/extend"
         payload = {"duration_hours": duration_hours}
 
-        response = self.session.patch(url, json=payload, timeout=30)
+        # Like a purchase, a top-up waits on chain; a short timeout turns a
+        # success into an "outcome unknown" the agent has to resolve.
+        response = self.session.patch(url, json=payload, timeout=120)
         self._raise_with_detail(response)
         return response.json()
 

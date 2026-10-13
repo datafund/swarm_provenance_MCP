@@ -48,16 +48,25 @@ def _parse_rpc_fallbacks():
     return None
 
 
+_read_only_client = None
+
+
 def _chain_reader():
     """
     ChainClient for the read-only tools: the wallet client when configured,
     otherwise a read-only client, so reads get the same RPC failover either way.
+
+    The read-only client is kept across calls so a switch to a fallback RPC
+    persists instead of every call starting on the degraded primary again.
     """
+    global _read_only_client
     if chain_client:
         return chain_client
+    if _read_only_client is not None:
+        return _read_only_client
     from .chain.client import ChainClient
 
-    return ChainClient(
+    _read_only_client = ChainClient(
         chain=settings.chain_name,
         rpc_url=settings.chain_rpc_url,
         contract_address=settings.chain_contract_address,
@@ -65,6 +74,7 @@ def _chain_reader():
         rpc_fallbacks=_parse_rpc_fallbacks(),
         read_only=True,
     )
+    return _read_only_client
 
 
 if settings.chain_enabled:
@@ -405,6 +415,46 @@ def _format_error(
     if next_tool:
         lines += f"\n_next: {next_tool}"
     return lines
+
+
+def _may_be_pending(e: Exception) -> bool:
+    """Whether a failed write may still land: it was broadcast and then the
+    endpoint dropped out or the receipt wait timed out."""
+    if not getattr(e, "broadcast", False):
+        return False
+    from .chain.provider import is_transport_error
+
+    if is_transport_error(e):
+        return True
+    cause = e
+    while cause is not None:
+        if type(cause).__name__ == "TimeExhausted":  # web3 receipt timeout
+            return True
+        cause = cause.__cause__ or cause.__context__
+    return False
+
+
+def _pending_tx_result(e: Exception, check_tool: str) -> CallToolResult:
+    """Report a broadcast write with an unknown outcome as possibly pending."""
+    msg = (
+        "Transaction outcome unknown: it was sent, but the RPC failed or the "
+        f"receipt did not arrive in time ({e}).\n"
+    )
+    if getattr(e, "tx_hash", None):
+        msg += f"   Tx Hash: {e.tx_hash}\n"
+    msg += (
+        "\nIt may be pending or already mined. Do not send it again: check "
+        f"with {check_tool} first, and retry only if the change is not there."
+    )
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=_format_error(msg, retryable=False, next_tool=check_tool),
+            )
+        ],
+        isError=True,
+    )
 
 
 def _is_retryable_error(e: Exception) -> bool:
@@ -2385,7 +2435,6 @@ async def handle_chain_health(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         error_msg,
                         retryable=is_connection_error,
-                        next_tool="health_check",
                     ),
                 )
             ],
@@ -2538,6 +2587,8 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
             )
 
         if isinstance(e, ChainTransactionError):
+            if _may_be_pending(e):
+                return _pending_tx_result(e, "verify_hash")
             if _is_insufficient_funds_error(e):
                 msg = _format_insufficient_funds_error("anchor_hash", chain_client)
             else:
@@ -2638,11 +2689,14 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
             raise ValueError("swarm_hash is required")
         clean_hash = validate_and_clean_reference_hash(swarm_hash)
 
-        reader = _chain_reader()
-        is_registered = await asyncio.to_thread(reader.verify, clean_hash)
-        record = (
-            await asyncio.to_thread(reader.get, clean_hash) if is_registered else None
-        )
+        from .chain.exceptions import DataNotRegisteredError
+
+        try:
+            record = await asyncio.to_thread(_chain_reader().get, clean_hash)
+            is_registered = True
+        except DataNotRegisteredError:
+            record = None
+            is_registered = False
 
         if is_registered and record:
             from datetime import datetime, timezone
@@ -2989,6 +3043,8 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
             )
 
         if isinstance(e, ChainTransactionError):
+            if _may_be_pending(e):
+                return _pending_tx_result(e, "get_provenance_chain")
             if _is_insufficient_funds_error(e):
                 msg = _format_insufficient_funds_error("record_transform", chain_client)
             else:
@@ -3207,6 +3263,8 @@ async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolRe
             )
 
         if isinstance(e, ChainTransactionError):
+            if _may_be_pending(e):
+                return _pending_tx_result(e, "get_provenance_chain")
             if _is_insufficient_funds_error(e):
                 msg = _format_insufficient_funds_error(
                     "record_merge_transform", chain_client
@@ -3532,6 +3590,8 @@ async def handle_set_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
             )
 
         if isinstance(e, ChainTransactionError):
+            if _may_be_pending(e):
+                return _pending_tx_result(e, "get_provenance")
             if _is_insufficient_funds_error(e):
                 msg = _format_insufficient_funds_error("set_storage_ref", chain_client)
             else:

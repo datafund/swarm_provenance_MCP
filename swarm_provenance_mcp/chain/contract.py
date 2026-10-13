@@ -1023,7 +1023,11 @@ class DataProvenanceContract:
                 from_block,
                 latest,
             )
-        except Exception:
+        except Exception as e:
+            # An unavailable endpoint is not "no merges": let it propagate so
+            # the caller fails over and the event cache is not advanced.
+            if is_transport_error(e):
+                raise
             # Contract may not have DataMerged event (v1)
             return []
 

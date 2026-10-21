@@ -76,24 +76,31 @@ def test_redact_urls_on_http_error_with_ipv6_host():
     )
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "a." * 500_000,
-        "ab+" * 333_333,
-        "a://" * 250_000,
-        "http://" + "@" * 1_000_000,
-        "http://[" + ":" * 1_000_000,
-        "http://h/" + ".(" * 500_000,
-        "http://h/" + "a://" * 250_000,
-    ],
-)
-def test_redact_urls_is_linear_on_long_input(text):
+# Inputs of about 1,000,000 characters, built inside the test so that no
+# test ID or assertion message contains them.
+LONG_INPUTS = {
+    "dotted-words": lambda: "a." * 500_000,
+    "plus-runs": lambda: "ab+" * 333_333,
+    "scheme-runs": lambda: "a://" * 250_000,
+    "at-signs": lambda: "http://" + "@" * 1_000_000,
+    "open-bracket": lambda: "http://[" + ":" * 1_000_000,
+    "dot-paren-path": lambda: "http://h/" + ".(" * 500_000,
+    "schemes-in-path": lambda: "http://h/" + "a://" * 250_000,
+    "one-word": lambda: "a" * 1_000_000,
+    "escaped-schemes": lambda: "a:\\/\\/" * 166_666,
+    "long-scheme-runs": lambda: ("a" * 32 + ":") * 30_000,
+}
+
+
+@pytest.mark.parametrize("name", sorted(LONG_INPUTS))
+def test_redact_urls_is_linear_on_long_input(name):
     import time
 
+    text = LONG_INPUTS[name]()
     start = time.monotonic()
     redact_urls(text)
-    assert time.monotonic() - start < 2.0
+    elapsed = time.monotonic() - start
+    assert elapsed < 2.0, f"{name}: {elapsed:.2f} s for {len(text):,} characters"
 
 
 def test_url_host():

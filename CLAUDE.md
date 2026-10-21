@@ -131,10 +131,12 @@ On-chain provenance module. Dependencies (web3, eth-account) included in default
 Blockchain dependencies (web3, eth-account) are included in the default install. Set `CHAIN_ENABLED=true` to activate chain tools. Read-only tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `lookup_by_storage_ref`, `chain_health`) work without `PROVENANCE_WALLET_KEY` by creating a temporary provider + contract for direct contract reads. Write tools (`anchor_hash`, `record_transform`, `record_merge_transform`, `set_storage_ref`) and `chain_balance` require a funded wallet. Default RPC is `https://sepolia.base.org` (public, no API key needed); override with `CHAIN_RPC_URL`. The contract supports v1 (event-log only), v2 (state-based traversal with `TransformationLink` struct), and v3+ (storageRef bidirectional linking) — versions are auto-detected via `supports_transformation_links()` and `supports_storage_ref()`.
 
 ### Dependencies Architecture
-- **MCP Framework**: Uses `mcp>=1.0.0` for protocol implementation
-- **HTTP Client**: Uses `requests>=2.31.0` for gateway communication
-- **Data Validation**: Uses `pydantic>=2.0.0` for settings and request validation
-- **Configuration**: Uses `python-dotenv>=1.0.0` for environment management
+- **MCP Framework**: Uses `mcp>=1.26,<2` for protocol implementation (mcp 2.x breaks `@server.list_tools()`)
+- **HTTP Client**: Uses `requests>=2.31.0,<3` for gateway communication
+- **Data Validation**: Uses `pydantic>=2,<3` and `pydantic-settings>=2,<3` for settings and request validation
+- **Configuration**: Uses `python-dotenv>=1,<2` for environment management
+- **Chain**: Uses `web3>=7,<8`, `eth-account>=0.13,<0.14` and `eth-utils>=5,<6` (bounded: a new release can change signing or hashing)
+- Every third-party import must be declared in `pyproject.toml`, and `mcp`, `web3`, `eth-account`, `eth-utils` and `pydantic-settings` must keep an upper bound; `tests/test_install_and_release_safety.py` enforces both
 
 ### Testing Strategy
 - **Gateway Client Tests** (`test_gateway_client.py`): Mock-based testing of HTTP client
@@ -143,6 +145,8 @@ Blockchain dependencies (web3, eth-account) are included in the default install.
 - **Integration Tests** (`test_integration.py`): End-to-end MCP tool testing
 - **Performance Tests** (`test_performance_regression.py`): Handler response time and concurrency regression tests
 - **User Tests** (`user-tests/`): Live end-to-end UX audit against real gateway and blockchain (not run in CI)
+- **Production gateway guard** (`tests/conftest.py`): the test run forces `SWARM_GATEWAY_URL` to `SWARM_TEST_GATEWAY_URL` (default: a closed local port), skips `integration` tests unless `--run-integration` is passed, and fails any test that sends a request to the production gateway
+- **Release gate**: `.github/workflows/tests.yml` (unit tests, fresh-install stdio smoke, image stdio smoke) runs on PRs to `main`/`development` and is called by `docker-publish.yml` before any push; `scripts/mcp_stdio_smoke.py` is the stdio `initialize` + `tools/list` check
 - **Async Support**: Uses `pytest-asyncio` for async test execution
 - **Mocking**: Uses `pytest-mock` and `unittest.mock` for external dependency mocking
 

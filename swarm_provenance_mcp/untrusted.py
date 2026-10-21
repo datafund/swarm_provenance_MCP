@@ -48,10 +48,39 @@ HINT_KEYS = (
     "_recommendations",
     "_companion_servers",
 )
+# A hint key at the start of a line, after any run of non-word characters
+# (spaces, NBSP, "> ", "- ", "**", backticks), then a colon.
 _HINT_LINE_RE = re.compile(
-    r"^([ \t]*)(" + "|".join(re.escape(k) for k in HINT_KEYS) + r")([ \t]*:)",
+    r"^([^\w\n]*)(" + "|".join(re.escape(k) for k in HINT_KEYS) + r")([^\w\n:]*:)",
     re.IGNORECASE | re.MULTILINE,
 )
+
+# Characters that look like the fence's angle brackets: fullwidth, small
+# form, guillemets, mathematical and CJK angle brackets, Canadian syllabics.
+_ANGLE_LOOKALIKES = frozenset(
+    chr(c)
+    for c in (
+        0x00AB,
+        0x00BB,
+        0x2039,
+        0x203A,
+        0x2329,
+        0x232A,
+        0x276E,
+        0x276F,
+        0x27E8,
+        0x27E9,
+        0x3008,
+        0x3009,
+        0xFE64,
+        0xFE65,
+        0xFF1C,
+        0xFF1E,
+        0x1433,
+        0x1438,
+    )
+)
+_ANGLE_RUN_RE = re.compile(r"<{3,}|>{3,}")
 
 QUOTED_NOTE = (
     "Quoted values are third-party data (written by other users or on-chain "
@@ -94,6 +123,28 @@ def _truncate_utf8(data: bytes, limit: int) -> bytes:
     return data[:limit].decode("utf-8", errors="ignore").encode("utf-8")
 
 
+def _escape_markers(text: str) -> str:
+    """Stop content from writing anything that reads like a fence marker.
+
+    Lookalike angle brackets become escapes, and every run of three or more
+    ``<`` or ``>`` keeps only its first two, so no line inside the fence can
+    contain ``<<<`` or ``>>>`` in any script.
+    """
+    text = "".join(_escape_char(ch) if ch in _ANGLE_LOOKALIKES else ch for ch in text)
+    return _ANGLE_RUN_RE.sub(
+        lambda m: m.group(0)[:2] + "".join(_escape_char(c) for c in m.group(0)[2:]),
+        text,
+    )
+
+
+def _render_body(text: str) -> str:
+    """Content as shown inside a fence."""
+    body = escape_hidden(text)
+    body = _escape_markers(body)
+    body = _MARKER_RE.sub("UNTRUSTED_DATA(escaped)", body)
+    return defang_hint_lines(body)
+
+
 def fence(content, source: str, max_bytes: int = MAX_FENCED_BYTES) -> str:
     """Wrap untrusted multi-line content so it cannot pass for server output.
 
@@ -108,14 +159,21 @@ def fence(content, source: str, max_bytes: int = MAX_FENCED_BYTES) -> str:
         a newline so callers place it.
     """
     raw = content if isinstance(content, bytes) else str(content).encode("utf-8")
-    shown = _truncate_utf8(raw, max_bytes)
-    body = escape_hidden(shown.decode("utf-8", errors="replace"))
-    # Marker text inside the content is escaped, so a fake end marker cannot
-    # look like the real one even to a reader who does not check the nonce.
-    body = _MARKER_RE.sub("UNTRUSTED_DATA(escaped)", body)
-    # Escapes can grow the text; keep the shown part within the cap.
+    text = _truncate_utf8(raw, max_bytes).decode("utf-8", errors="replace")
+    body = _render_body(text)
     if len(body) > max_bytes:
-        body = body[:max_bytes]
+        # Escapes grew the text past the cap. Show the longest prefix of whole
+        # characters that fits, so no escape sequence is cut in half.
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if len(_render_body(text[:mid])) <= max_bytes:
+                lo = mid
+            else:
+                hi = mid - 1
+        text = text[:lo]
+        body = _render_body(text)
+    shown_bytes = len(text.encode("utf-8", errors="replace"))
 
     nonce = secrets.token_hex(8)
     while nonce in body:  # practically never; keeps the end marker unique
@@ -129,9 +187,9 @@ def fence(content, source: str, max_bytes: int = MAX_FENCED_BYTES) -> str:
         body,
         f"{FENCE_END} nonce={nonce}>>>",
     ]
-    if len(shown) < len(raw):
+    if shown_bytes < len(raw):
         lines.append(
-            f"Truncated: showing the first {len(shown):,} of {len(raw):,} bytes."
+            f"Truncated: showing the first {shown_bytes:,} of {len(raw):,} bytes."
         )
     return "\n".join(lines)
 

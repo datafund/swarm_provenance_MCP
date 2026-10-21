@@ -182,13 +182,13 @@ The `config.py` module uses Pydantic Settings for type-safe configuration with a
 - Chain-specific error handling: insufficient funds detection with faucet/bridge guidance, "already registered" revert catch, duplicate transformation detection via state read (v2) or event cache (v1), proactive balance warnings in health_check
 
 ### Agent Guidance (MCP Design Guidelines)
-- **Adaptive health_check**: Returns `ready` boolean, `_recommendations`, `_companion_servers`, and contextual `_next` based on stamp availability
+- **Adaptive health_check**: Returns `ready` boolean, `_recommendations`, `_gateway`, and contextual `_next` based on stamp availability
 - **Response hints**: All success responses append `_next: <tool>` and `_related: <tools>` guiding agents to the logical next step
 - **Structured errors**: All error responses include `retryable: true|false` and `_next` recovery hint
 - **Typo correction**: Unknown tool names get Levenshtein-based "Did you mean?" suggestions
 - **MCP Prompts**: 4 workflow prompts (`provenance-upload`, `provenance-verify`, `stamp-management`, `provenance-chain-workflow`) registered via `@server.list_prompts()` / `@server.get_prompt()`
 - **MCP Resources**: `provenance://skills` resource (SKILLS.md content) via `@server.list_resources()` / `@server.read_resource()`
-- **Cross-server coordination**: health_check reports companion servers (swarm_connect gateway status, fds-id MCP availability)
+- **Gateway status**: health_check reports swarm_connect gateway connectivity in `_gateway` field
 - **Insufficient funds**: `_is_insufficient_funds_error()` and `_format_insufficient_funds_error()` provide faucet/bridge URLs
 - **Provenance lineage**: `get_provenance_chain` uses state reads on v2 contracts (`getTransformationLinks`/`getTransformationParents`) or `DataTransformed` event logs on v1 contracts for bidirectional traversal from any node. Events are cached in-memory (`chain/event_cache.py`): full scan on first call, incremental scans on subsequent calls (<1s vs ~20s). Also scans `DataMerged` events for merge traversal.
 - **Storage references**: v3+ contracts support bidirectional linking between data hashes and storage references (e.g. Swarm hashes). `anchor_hash` accepts optional `storage_ref`, `set_storage_ref` attaches a ref post-hoc (set-once), `lookup_by_storage_ref` does reverse lookup. Feature detected via `supports_storage_ref()`.
@@ -239,3 +239,58 @@ Write all communication in the style of the [Microsoft Writing Style Guide](http
 - Spell out an abbreviation the first time you use it. Don't use slang or filler.
 - Use bulleted lists for parallel items, numbered lists for steps, and tables for comparisons.
 - Say whether each claim is verified, and how, or whether it is a hypothesis.
+
+## PLUR Domain Scoping
+
+When calling `plur_learn`, always set:
+- `domain`: `provenance.mcp`
+- `scope`: `project:swarm-provenance-mcp`
+
+This ensures engrams are tagged for retrieval in the right context across the global store.
+
+## PLUR Memory
+
+You have persistent memory via PLUR. Corrections, preferences, and conventions persist across sessions as engrams.
+
+> **PLUR is its own MCP server.** The tools below come from the `plur` MCP server registered by `plur init` — `plur_session_start`, `plur_learn`, `plur_recall_hybrid`, `plur_feedback`, `plur_session_end`. If you do not see these exact tool names, **PLUR is not connected**: stop and run `plur doctor` to diagnose. Do **not** substitute tools from other MCP servers (e.g. `datacore_*`) — those belong to a different system and will not persist anything for PLUR.
+
+### Session Workflow
+
+1. **Start**: Call `plur_session_start` with task description — injects relevant engrams
+2. **Learn**: When corrected or discovering something new, call `plur_learn` immediately
+3. **Recall**: Before answering factual questions, call `plur_recall_hybrid` — check memory first
+4. **Feedback**: Rate injected engrams with `plur_feedback` (positive/negative) — trains relevance
+5. **End**: Call `plur_session_end` with summary + engram_suggestions
+
+Do not ask permission to use these tools — they are your memory system.
+
+### When to check memory
+
+Before reaching for web search, file reads, or guessing — apply this priority:
+1. Is the answer already in engrams? → `plur_recall_hybrid`
+2. Is the answer in the local filesystem? → Read/Grep/Glob
+3. Is the answer derivable from context already loaded? → Just answer
+4. Only if 1-3 fail → Use external tools
+
+| Domain | When to recall |
+|--------|----------------|
+| Decisions | Past design choices, architecture rationale |
+| Corrections | API quirks, bugs, wrong assumptions |
+| Preferences | Formatting, tone, workflow, tool choices |
+| Conventions | Tag formats, file routing, naming rules |
+| Infrastructure | Server IPs, SSH configs, deployment targets |
+
+### When corrected
+
+When the user corrects you ("no, use X not Y", "that's wrong"):
+1. Call `plur_learn` immediately — before continuing the task
+2. Call `plur_feedback` with negative signal on the wrong engram if one was injected
+3. Then continue with the corrected approach
+
+### Verification
+
+When recalling facts that will drive actions:
+1. State the recalled fact explicitly before acting on it
+2. Include the engram ID or search that produced it
+3. If no engram matches, say so and verify from the filesystem
+4. Never interpolate between two engrams to produce a "probably correct" composite

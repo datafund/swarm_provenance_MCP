@@ -131,8 +131,8 @@ async def step_health_check(results: List[StepResult]) -> StepResult:
             # Only flag if wallet is actually empty (we check balance > 0 wouldn't trigger)
             pass  # Can't know balance here; just verify field presence
 
-    if "_companion_servers" not in r.response_text:
-        r.ux_issues.append("Missing _companion_servers section")
+    if "_gateway:" not in r.response_text:
+        r.ux_issues.append("Missing _gateway field")
 
     if "_next:" not in r.response_text:
         r.ux_issues.append("Missing _next hint")

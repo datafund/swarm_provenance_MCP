@@ -538,9 +538,7 @@ The `health_check` tool returns additional fields:
 ready: true|false                # Whether the system is ready for uploads
 _recommendations:                # Actionable suggestions (only when issues exist)
   - No stamps found — purchase one before uploading
-_companion_servers:              # Related servers in the ecosystem
-  - swarm_connect gateway: <url> (connected|unreachable)
-  - fds-id MCP: optional (identity/signing for provenance chain anchoring)
+_gateway: <url> (connected|unreachable)
 ```
 
 ### MCP Prompts

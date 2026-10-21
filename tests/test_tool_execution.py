@@ -1118,15 +1118,15 @@ class TestMCPPrompts:
         assert "check_stamp_health" in text
 
 
-class TestCompanionServers:
-    """Test cross-server coordination info in health_check."""
+class TestGatewayStatus:
+    """Test gateway status info in health_check."""
 
     @pytest.fixture
     def server(self):
         return create_server()
 
-    async def test_health_check_includes_companion_servers(self, server):
-        """health_check response should list companion servers."""
+    async def test_health_check_includes_gateway_status(self, server):
+        """health_check response should include gateway status."""
         with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.health_check.return_value = {
                 "status": "healthy",
@@ -1139,12 +1139,11 @@ class TestCompanionServers:
             }
             result = await call_tool_directly(server, "health_check", {})
             text = result.content[0].text
-            assert "_companion_servers:" in text
-            assert "swarm_connect" in text
-            assert "fds-id" in text
+            assert "_gateway:" in text
+            assert "localhost:8000" in text
 
-    async def test_companion_server_status_reflects_gateway(self, server):
-        """Companion server status should reflect actual gateway connectivity."""
+    async def test_gateway_status_reflects_connectivity(self, server):
+        """Gateway status should reflect actual gateway connectivity."""
         with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.health_check.return_value = {
                 "status": "healthy",

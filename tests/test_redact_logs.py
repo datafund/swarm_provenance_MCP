@@ -171,3 +171,14 @@ def test_client_failover_warning_logs_hosts_only(endpoints, caplog):
     assert "unavailable" in ours and "retrying on fb1.rpc.test" in ours
     assert "SECRET" not in ours
 
+
+def test_client_health_check_debug_logs_host_only(endpoints, caplog):
+    from swarm_provenance_mcp.chain.client import ChainClient
+
+    caplog.set_level(logging.DEBUG)
+    client = ChainClient(chain="base-sepolia")
+    assert client.health_check() is True
+
+    ours = _ours(caplog)
+    assert "Chain health check: chain=base-sepolia rpc=primary.rpc.test" in ours
+    assert "SECRET" not in ours

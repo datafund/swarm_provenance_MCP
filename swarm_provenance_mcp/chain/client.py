@@ -1265,7 +1265,7 @@ class ChainClient:
         logger.debug(
             "Chain health check: chain=%s rpc=%s",
             self._provider.chain,
-            self._provider.rpc_url,
+            _rpc_host(self._provider.rpc_url),
         )
 
         result = self._provider.health_check()

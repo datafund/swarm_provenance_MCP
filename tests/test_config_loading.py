@@ -16,6 +16,7 @@ from swarm_provenance_mcp.config import (
     Settings,
     default_env_file,
     load_settings,
+    wallet_key_hint,
     resolve_env_file,
 )
 
@@ -128,6 +129,27 @@ class TestEnvFileLocation:
         monkeypatch.setenv(ENV_FILE_VAR, value)
         with pytest.raises(ValueError, match="absolute path"):
             load_settings()
+
+    def test_unknown_user_home_in_explicit_env_file_is_rejected(
+        self, clean_env, monkeypatch
+    ):
+        # Path.expanduser() raises a bare RuntimeError for an unknown ~user.
+        monkeypatch.setenv(ENV_FILE_VAR, "~nosuchuser-swarm-test/x.env")
+        with pytest.raises(ValueError, match=ENV_FILE_VAR):
+            load_settings()
+
+    @pytest.mark.parametrize("value", [".", "relative/config"])
+    def test_relative_xdg_config_home_is_ignored(self, clean_env, monkeypatch, value):
+        # The XDG spec says relative values must be ignored.
+        monkeypatch.setenv("XDG_CONFIG_HOME", value)
+        _write(
+            clean_env["workdir"] / value / "swarm-provenance-mcp" / ".env",
+            "PAYMENT_MODE=paid\n",
+        )
+        assert default_env_file() == (
+            clean_env["home"] / ".config" / "swarm-provenance-mcp" / ".env"
+        )
+        assert load_settings().payment_mode == "free"
 
     def test_home_relative_explicit_env_file_is_accepted(self, clean_env, monkeypatch):
         _write(clean_env["home"] / "my.env", "PAYMENT_MODE=paid\n")
@@ -272,11 +294,21 @@ class TestModuleLevelSettings:
 
 
 class TestWalletKeyHint:
-    def test_hint_names_the_places_that_are_read(self):
-        assert "PROVENANCE_WALLET_KEY" in WALLET_KEY_HINT
-        assert '"env" block' in WALLET_KEY_HINT
-        assert "~/.config/swarm-provenance-mcp/.env" in WALLET_KEY_HINT
-        assert ENV_FILE_VAR in WALLET_KEY_HINT
+    def test_hint_names_the_places_that_are_read(self, clean_env):
+        hint = wallet_key_hint()
+        assert "PROVENANCE_WALLET_KEY" in hint
+        assert '"env" block' in hint
+        assert "~/.config/swarm-provenance-mcp/.env" in hint
+        assert ENV_FILE_VAR in hint
+        assert WALLET_KEY_HINT.startswith("Set PROVENANCE_WALLET_KEY")
+
+    def test_hint_names_the_xdg_config_home_file(
+        self, clean_env, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        hint = wallet_key_hint()
+        assert str(tmp_path / "xdg" / "swarm-provenance-mcp" / ".env") in hint
+        assert "~/.config" not in hint
 
     def test_hint_does_not_send_users_to_a_working_directory_env(self):
         text = WALLET_KEY_HINT.lower()

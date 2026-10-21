@@ -14,13 +14,6 @@ logger = logging.getLogger(__name__)
 ENV_FILE_VAR = "SWARM_PROVENANCE_ENV_FILE"
 CONFIG_DIR_NAME = "swarm-provenance-mcp"
 
-# Where to put a wallet key, for the error that write tools return without one.
-WALLET_KEY_HINT = (
-    'Set PROVENANCE_WALLET_KEY in the MCP client\'s "env" block, or in '
-    f"~/.config/{CONFIG_DIR_NAME}/.env (or the file named by {ENV_FILE_VAR}). "
-    "A .env in the working directory is not read."
-)
-
 
 class Settings(BaseSettings):
     """Configuration settings for the MCP server."""
@@ -156,11 +149,33 @@ def _field_names(settings_cls) -> list:
 
 
 def default_env_file() -> Path:
-    """Per-user env file: $XDG_CONFIG_HOME (or ~/.config)/swarm-provenance-mcp/.env."""
-    config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
-        os.path.expanduser("~"), ".config"
-    )
+    """Per-user env file: $XDG_CONFIG_HOME (or ~/.config)/swarm-provenance-mcp/.env.
+
+    A relative XDG_CONFIG_HOME is ignored, as the XDG Base Directory spec
+    requires: it would resolve against the working directory.
+    """
+    config_home = os.environ.get("XDG_CONFIG_HOME", "")
+    if not os.path.isabs(config_home):
+        config_home = os.path.join(os.path.expanduser("~"), ".config")
     return Path(config_home) / CONFIG_DIR_NAME / ".env"
+
+
+def _short_path(path: Path) -> str:
+    """Path with the home directory shown as ~."""
+    home = Path(os.path.expanduser("~"))
+    try:
+        return "~/" + str(path.relative_to(home))
+    except ValueError:
+        return str(path)
+
+
+def wallet_key_hint() -> str:
+    """Where to put a wallet key, for the error write tools return without one."""
+    return (
+        'Set PROVENANCE_WALLET_KEY in the MCP client\'s "env" block, or in '
+        f"{_short_path(default_env_file())} (or the file named by {ENV_FILE_VAR}). "
+        "A .env in the working directory is not read."
+    )
 
 
 def resolve_env_file() -> Optional[Path]:
@@ -169,12 +184,15 @@ def resolve_env_file() -> Optional[Path]:
 
     The file is never taken from the working directory, which belongs to
     whichever program launched the server. It comes from SWARM_PROVENANCE_ENV_FILE
-    when that is set (and must then be an absolute path to an existing file), otherwise from default_env_file()
-    if that file exists.
+    when that is set (and must then be an absolute path to an existing file),
+    otherwise from default_env_file() if that file exists.
     """
     explicit = os.environ.get(ENV_FILE_VAR)
     if explicit:
-        path = Path(explicit).expanduser()
+        try:
+            path = Path(explicit).expanduser()
+        except RuntimeError:  # ~user that does not exist
+            path = Path(explicit)
         if not path.is_absolute():
             # A relative path would resolve against the working directory,
             # which is exactly the location this setting exists to avoid.
@@ -219,3 +237,6 @@ def load_settings() -> Settings:
 
 # Global settings instance
 settings = load_settings()
+
+# Error text for write tools called without a wallet key.
+WALLET_KEY_HINT = wallet_key_hint()

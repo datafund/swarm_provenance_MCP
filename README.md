@@ -162,7 +162,8 @@ Earlier versions read `.env` from the working directory, so the old setup was
 in `claude_desktop_config.json`. That file is no longer read: after upgrading, the server
 starts with the defaults (no wallet, `CHAIN_ENABLED=false`) and only logs a warning.
 
-- Move the file: `mkdir -p ~/.config/swarm-provenance-mcp && mv .env ~/.config/swarm-provenance-mcp/.env`,
+- Move the file: `mkdir -p ~/.config/swarm-provenance-mcp && mv .env ~/.config/swarm-provenance-mcp/.env`
+  (or under `$XDG_CONFIG_HOME` if you set it),
   or keep it where it is and set `SWARM_PROVENANCE_ENV_FILE` to its absolute path in the client's `"env"` block.
 - The `"env"` block in `claude_desktop_config.json` is unaffected and still overrides the env file.
 - `"cwd"` no longer has any effect on configuration. You can remove it.

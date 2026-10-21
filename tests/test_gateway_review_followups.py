@@ -146,7 +146,7 @@ class TestMoreUnknownOutcomes:
         assert "outcome unknown" in text, text
         assert "retryable: false" in text
         assert "_next: list_stamps" in text
-        assert "'Label: run-42'" in text
+        assert "'Label: \"run-42\"'" in text
         assert "owned" not in text  # free-tier batches are shared
 
     @pytest.mark.parametrize(
@@ -250,7 +250,7 @@ class TestListStampsShowsIdentity:
             }
             result = await call_tool_directly(server, "list_stamps", {})
         text = result.content[0].text
-        assert "Label: run-42 | Depth: 17 | Purchased: 1m ago" in text
+        assert 'Label: "run-42" | Depth: 17 | Purchased: 1m ago' in text
 
     async def test_missing_fields_are_omitted(self, server):
         with patch("swarm_provenance_mcp.server.gateway_client") as gw:
@@ -345,7 +345,7 @@ class TestReviewRoundTwo:
             )
         sent_label = gw.purchase_stamp.call_args.kwargs["label"]
         assert sent_label.startswith("mcp-") and len(sent_label) == 12
-        assert f"'Label: {sent_label}'" in result.content[0].text
+        assert f"'Label: \"{sent_label}\"'" in result.content[0].text
 
     async def test_caller_label_is_kept(self, server):
         with patch("swarm_provenance_mcp.server.gateway_client") as gw:

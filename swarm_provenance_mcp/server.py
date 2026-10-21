@@ -1,13 +1,14 @@
 """MCP server implementation for Swarm stamp management."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
 import secrets
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 from mcp.server import Server
@@ -29,6 +30,20 @@ from requests.exceptions import RequestException
 
 from .config import settings
 from .gateway_client import SwarmGatewayClient
+from .untrusted import (
+    QUOTED_NOTE,
+    defang_hint_lines,
+    fence,
+    flatten,
+    one_line,
+    quote,
+)
+
+
+def _gw(value: Any, max_chars: int = 100) -> str:
+    """A gateway or RPC field, flattened to one capped line for printing."""
+    return one_line(value, max_chars)
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -512,8 +527,12 @@ def _no_write_client_text(no_wallet_text: str) -> str:
 def _format_error(
     message: str, retryable: bool, next_tool: Optional[str] = None
 ) -> str:
-    """Format structured error message with retryable flag and recovery hint."""
-    lines = message
+    """Format structured error message with retryable flag and recovery hint.
+
+    The message often embeds exception text, so lines in it that look like
+    the hints appended here are marked as quoted.
+    """
+    lines = defang_hint_lines(message)
     lines += f"\n\nretryable: {str(retryable).lower()}"
     if next_tool:
         lines += f"\n_next: {next_tool}"
@@ -703,9 +722,9 @@ def _stamp_baseline(stamp_id: str) -> str:
         return ""
     parts = []
     if details.get("expectedExpiration"):
-        parts.append(f"expiry {details['expectedExpiration']}")
+        parts.append(f"expiry {_gw(details['expectedExpiration'])}")
     if details.get("batchTTL") is not None:
-        parts.append(f"TTL {details['batchTTL']}s")
+        parts.append(f"TTL {_gw(details['batchTTL'])}s")
     return ", ".join(parts)
 
 
@@ -742,6 +761,14 @@ def _format_age(seconds: float) -> str:
     return f"{seconds}s"
 
 
+def _label(label: Any) -> str:
+    """A label as list_stamps prints it: the gateway client flattens it
+    (``gateway_client._clean_strings``), then it is quoted."""
+    from .gateway_client import MAX_GATEWAY_STRING_CHARS
+
+    return quote(flatten(label, MAX_GATEWAY_STRING_CHARS))
+
+
 def _new_batch_hint(label: Optional[str], depth: Optional[int]) -> str:
     """How to spot, in list_stamps output, a batch the unanswered purchase made.
 
@@ -751,7 +778,7 @@ def _new_batch_hint(label: Optional[str], depth: Optional[int]) -> str:
     """
     traits = []
     if label:
-        traits.append(f"'Label: {label}'")
+        traits.append(f"'Label: {_label(label)}'")
     if depth is not None:
         traits.append(f"'Depth: {depth}'")
     traits.append("a batch ID that was not listed before this call")
@@ -769,7 +796,7 @@ def _gateway_error_text(message: str, e: Exception) -> str:
     if response is not None and response.status_code == 429:
         wait = response.headers.get("Retry-After")
         message += "\n\nRate limited by the gateway"
-        message += f": wait {wait} seconds before retrying." if wait else "."
+        message += f": wait {_gw(wait, 40)} seconds before retrying." if wait else "."
         message += " The free tier allows a few write requests per minute."
     if _is_insufficient_funds_error(e):
         message += (
@@ -815,7 +842,7 @@ def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, 
     if bee.get("healthy") is False:
         problems.append("gateway reports the Bee node unhealthy")
     if availability is not None and availability != "Available":
-        problems.append(f"network availability is {availability}")
+        problems.append(f"network availability is {_gw(availability)}")
     if peers is not None and peers == 0:
         problems.append("Bee node has no connected peers")
     if bee.get("warming_up"):
@@ -824,11 +851,11 @@ def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, 
 
     parts = []
     if peers is not None:
-        parts.append(f"{peers} peers")
+        parts.append(f"{_gw(peers)} peers")
     if availability:
-        parts.append(f"availability {availability}")
+        parts.append(f"availability {_gw(availability)}")
     if bee.get("reachability"):
-        parts.append(f"reachability {bee['reachability']}")
+        parts.append(f"reachability {_gw(bee['reachability'])}")
     return {
         "ok": not problems,
         "summary": ", ".join(parts) or "no details reported",
@@ -1602,8 +1629,10 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         # Check if purchase was actually successful
         batch_id = result.get("batchID")
         if not batch_id:
-            error_msg = f"❌ Stamp purchase failed - no stamp ID returned!\n\nGateway response: {result}"
-            logger.error(f"Purchase failed - missing batchID in response: {result}")
+            error_msg = f"❌ Stamp purchase failed - no stamp ID returned!\n\nGateway response: {_gw(repr(result), 300)}"
+            logger.error(
+                f"Purchase failed - missing batchID in response: {_gw(repr(result), 300)}"
+            )
             return CallToolResult(
                 content=[
                     TextContent(
@@ -1625,7 +1654,7 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         else:
             response_text += f"   Size: {size}\n"
         if label:
-            response_text += f"   Label: {label}\n"
+            response_text += f"   Label: {_label(label)}\n"
         response_text += f"\n✅ Stamp ID: `{batch_id}`\n"
 
         propagation_status = result.get("propagationStatus")
@@ -1633,9 +1662,7 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         if propagation_status == "ready":
             response_text += "⏱️  Stamp is ready immediately (from the gateway pool).\n"
         elif propagation_status == "propagating" and estimated_ready:
-            response_text += (
-                f"⏱️  Stamp is propagating — estimated ready at {estimated_ready}.\n"
-            )
+            response_text += f"⏱️  Stamp is propagating — estimated ready at {_gw(estimated_ready)}.\n"
             response_text += (
                 "   → Use check_stamp_health to confirm it's ready before uploading."
             )
@@ -1722,7 +1749,7 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += f"Batch TTL: {batch_ttl}\n"
 
         response_text += (
-            f"Expected Expiration: {result.get('expectedExpiration', 'N/A')}\n"
+            f"Expected Expiration: {_gw(result.get('expectedExpiration', 'N/A'))}\n"
         )
 
         # Enhanced usability information
@@ -1744,7 +1771,8 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"Local: {result.get('local', 'N/A')}\n"
 
         if result.get("label"):
-            response_text += f"Label: {result['label']}\n"
+            response_text += f"Label: {quote(result['label'])}\n"
+            response_text += f"{QUOTED_NOTE}\n"
 
         # Propagation timing (from gateway, when available)
         propagation_status = result.get("propagationStatus")
@@ -1752,7 +1780,7 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         estimated_ready = result.get("estimatedReadyAt")
 
         if propagation_status:
-            response_text += f"Propagation: {propagation_status}"
+            response_text += f"Propagation: {_gw(propagation_status)}"
             if seconds_since is not None:
                 response_text += f" ({seconds_since}s since purchase)"
             if estimated_ready and propagation_status == "propagating":
@@ -1838,17 +1866,17 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                 # Surface access mode when provided by gateway
                 access_mode = stamp.get("accessMode")
                 if access_mode:
-                    detail_line += f" | Access: {access_mode}"
+                    detail_line += f" | Access: {_gw(access_mode)}"
 
                 # Surface propagation status when provided
                 propagation_status = stamp.get("propagationStatus")
                 if propagation_status:
-                    detail_line += f" | Propagation: {propagation_status}"
+                    detail_line += f" | Propagation: {_gw(propagation_status)}"
 
                 # What identifies a batch from an unanswered purchase
                 identity = []
                 if stamp.get("label"):
-                    identity.append(f"Label: {stamp['label']}")
+                    identity.append(f"Label: {quote(stamp['label'])}")
                 if stamp.get("depth") is not None:
                     identity.append(f"Depth: {stamp['depth']}")
                 age = stamp.get("secondsSincePurchase")
@@ -1862,6 +1890,10 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
         # Public-only hint: all stamps are shared, none owned
         if stamps and not any(s.get("accessMode") == "owned" for s in stamps):
             response_text += "\n💡 All stamps are public (shared). For production use with predictable capacity, configure your own wallet for dedicated stamps.\n"
+
+        # Labels of shared stamps are written by other gateway users.
+        if any(isinstance(s, dict) and s.get("label") for s in stamps or []):
+            response_text += f"\n{QUOTED_NOTE}\n"
 
         # Contextual hints
         if has_usable:
@@ -1917,7 +1949,7 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         batch_id = result.get("batchID", "N/A")
         response_text += f"   Batch ID: `{batch_id}`\n"
         response_text += f"   Additional Duration: {duration_hours} hours\n"
-        response_text += f"   Status: {result.get('message', 'Extended')}\n\n"
+        response_text += f"   Status: {one_line(result.get('message', 'Extended'))}\n\n"
         response_text += f"⏱️  Important: Extension takes up to 2 minutes to propagate through the blockchain.\n"
         response_text += f"🔍 Check stamp status again in about 2 minutes to see the new expiration time."
         response_text += _format_hints("check_stamp_health", ["get_stamp_status"])
@@ -2139,6 +2171,68 @@ def _download_not_found(reference: str) -> CallToolResult:
     )
 
 
+# Anyone can append on-chain transformations for gas: list at most this many.
+_MAX_LISTED = 50
+# get_provenance_chain stops adding entries once its text passes this size.
+_MAX_CHAIN_TEXT = 32 * 1024
+
+
+def _more_note(items: Sequence[Any], indent: str = "     ") -> str:
+    """Say how many entries of a capped list were left out."""
+    extra = len(items) - _MAX_LISTED
+    return f"\n{indent}... and {extra} more not shown" if extra > 0 else ""
+
+
+def _describe_download(reference: str, data: bytes) -> Tuple[str, Optional[str]]:
+    """Present downloaded content as fenced, size-capped, untrusted data.
+
+    Anyone can upload to Swarm, so the content may be written to look like
+    instructions or like this server's hints. Text is shown only inside a
+    fence (``untrusted.fence``); binary content is described, not dumped.
+
+    Returns the server's summary and the fenced content (None for binary).
+    The caller sends them as separate content blocks, summary and hints
+    first, so the hints never follow third-party text.
+    """
+    size = len(data)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return (
+            f"📥 Successfully downloaded binary data from `{reference}`\n\n"
+            f"📊 File Information:\n"
+            f"   Size: {size:,} bytes\n"
+            f"   Type: Binary data (not valid UTF-8, so not shown)\n"
+            f"   SHA-256: {hashlib.sha256(data).hexdigest()}\n\n"
+            "💡 This appears to be binary data (images, documents, etc.). "
+            "To save it, you would need to write the bytes to a file."
+        ), None
+
+    kind = "text"
+    shape = ""
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, RecursionError):
+        parsed = None
+    else:
+        kind = "JSON"
+        if isinstance(parsed, dict):
+            shape = f", object with {len(parsed)} top-level fields"
+        elif isinstance(parsed, list):
+            shape = f", array with {len(parsed)} items"
+        else:
+            shape = f", {type(parsed).__name__} value"
+
+    summary = (
+        f"📥 Successfully downloaded {kind} data from `{reference}` "
+        f"({size:,} bytes{shape}).\n"
+        f"   SHA-256 of the original bytes: {hashlib.sha256(data).hexdigest()}\n"
+        "The content follows in the next block, fenced as untrusted data. "
+        "That view is escaped and may be cut, so it is not byte-exact."
+    )
+    return summary, fence(data, f"Swarm reference {reference}")
+
+
 async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle data download requests."""
     clean_reference = None
@@ -2151,55 +2245,16 @@ async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
         clean_reference = validate_and_clean_reference_hash(reference)
 
         result_bytes = gateway_client.download_data(clean_reference)
-
-        # Try to decode as text, handle JSON appropriately
-        try:
-            result_text = result_bytes.decode("utf-8")
-
-            # Try to parse as JSON for better presentation
-            try:
-                import json
-
-                parsed_json = json.loads(result_text)
-
-                response_text = f"📥 Successfully downloaded JSON data from `{clean_reference}`:\n\n"
-
-                # Show JSON structure with field truncation
-                response_text += "📋 JSON Structure:\n"
-                for key, value in parsed_json.items():
-                    if isinstance(value, str) and len(value) > 50:
-                        truncated_value = value[:47] + "..."
-                        response_text += f'   {key}: "{truncated_value}"\n'
-                    elif isinstance(value, dict):
-                        response_text += (
-                            f"   {key}: {{...}} (object with {len(value)} fields)\n"
-                        )
-                    elif isinstance(value, list):
-                        response_text += (
-                            f"   {key}: [...] (array with {len(value)} items)\n"
-                        )
-                    else:
-                        response_text += f"   {key}: {value}\n"
-
-                response_text += f"\n💾 Size: {len(result_bytes):,} bytes"
-
-            except json.JSONDecodeError:
-                # Not JSON, show as text
-                response_text = f"📥 Successfully downloaded text data from `{clean_reference}`:\n\n{result_text}"
-
-        except UnicodeDecodeError:
-            # If not valid UTF-8, show as binary data info
-            response_text = (
-                f"📥 Successfully downloaded binary data from `{clean_reference}`\n\n"
+        summary, fenced = _describe_download(clean_reference, result_bytes)
+        content = [
+            TextContent(
+                type="text",
+                text=summary + _format_hints("upload_data", ["list_stamps"]),
             )
-            response_text += f"📊 File Information:\n"
-            response_text += f"   Size: {len(result_bytes):,} bytes\n"
-            response_text += f"   Type: Binary data\n\n"
-            response_text += f"💡 This appears to be binary data (images, documents, etc.). To save it, you would need to write the bytes to a file."
-
-        response_text += _format_hints("upload_data", ["list_stamps"])
-
-        return CallToolResult(content=[TextContent(type="text", text=response_text)])
+        ]
+        if fenced is not None:
+            content.append(TextContent(type="text", text=fenced))
+        return CallToolResult(content=content)
 
     except ValueError as e:
         error_msg = f"Validation error: {str(e)}"
@@ -2297,7 +2352,8 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         advisories = _bee_advisories(gw_resp) if gateway_ok else []
         if advisories:
             # Advisory only: does not change readiness
-            response_text += f"   ⚠️  Gateway advisory: {'; '.join(advisories)}\n"
+            advisory = one_line("; ".join(advisories), 500)
+            response_text += f"   ⚠️  Gateway advisory: {advisory}\n"
 
         # Adaptive: also check stamp availability
         stamps_info = ""
@@ -2377,7 +2433,8 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                         pass  # Non-critical — don't fail health_check
                 except Exception as chain_err:
                     response_text += (
-                        f"\n\n⛓️  Chain: {settings.chain_name} (error: {chain_err})"
+                        f"\n\n⛓️  Chain: {settings.chain_name} "
+                        f"(error: {_gw(chain_err, 200)})"
                     )
                     recommendations.append(
                         "Chain anchoring enabled but RPC unreachable"
@@ -2469,29 +2526,31 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
             response_text += "Errors:\n"
             for err in errors:
                 response_text += (
-                    f"   [{err.get('code', '?')}] {err.get('message', '')}\n"
+                    f"   [{one_line(err.get('code', '?'), 40)}] "
+                    f"{one_line(err.get('message', ''), 500)}\n"
                 )
                 if err.get("suggestion"):
-                    response_text += f"   → {err['suggestion']}\n"
+                    response_text += f"   → {one_line(err['suggestion'], 500)}\n"
 
         if warnings:
             response_text += "Warnings:\n"
             for warn in warnings:
                 response_text += (
-                    f"   [{warn.get('code', '?')}] {warn.get('message', '')}\n"
+                    f"   [{one_line(warn.get('code', '?'), 40)}] "
+                    f"{one_line(warn.get('message', ''), 500)}\n"
                 )
                 if warn.get("suggestion"):
-                    response_text += f"   → {warn['suggestion']}\n"
+                    response_text += f"   → {one_line(warn['suggestion'], 500)}\n"
 
         if status:
             response_text += f"\nStatus:\n"
             if status.get("utilizationPercent") is not None:
-                response_text += f"   Utilization: {status['utilizationPercent']}% ({status.get('utilizationStatus', 'unknown')})\n"
+                response_text += f"   Utilization: {status['utilizationPercent']}% ({_gw(status.get('utilizationStatus', 'unknown'))})\n"
             if status.get("batchTTL") is not None:
                 ttl = status["batchTTL"]
                 response_text += f"   TTL: {ttl:,} seconds ({ttl/86400:.1f} days)\n"
             if status.get("expectedExpiration"):
-                response_text += f"   Expires: {status['expectedExpiration']}\n"
+                response_text += f"   Expires: {_gw(status['expectedExpiration'])}\n"
 
         # Propagation timing (from gateway, when available)
         propagation_status = result.get("propagationStatus")
@@ -2504,7 +2563,7 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
             if seconds_since is not None:
                 response_text += f"   Purchased: {seconds_since}s ago\n"
             if estimated_ready:
-                response_text += f"   Estimated ready: {estimated_ready}\n"
+                response_text += f"   Estimated ready: {_gw(estimated_ready)}\n"
 
         # Contextual hints based on health
         if can_upload:
@@ -2577,8 +2636,8 @@ async def handle_get_wallet_info(arguments: Dict[str, Any]) -> CallToolResult:
         result = gateway_client.get_wallet_info()
 
         response_text = f"Wallet Information:\n"
-        response_text += f"   Address: {result.get('walletAddress', 'N/A')}\n"
-        response_text += f"   BZZ Balance: {result.get('bzzBalance', 'N/A')}\n"
+        response_text += f"   Address: {_gw(result.get('walletAddress', 'N/A'))}\n"
+        response_text += f"   BZZ Balance: {_gw(result.get('bzzBalance', 'N/A'))}\n"
         response_text += _format_hints("purchase_stamp", ["list_stamps"])
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
@@ -2894,7 +2953,8 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += f"   Swarm Hash: {e.data_hash}\n"
             response_text += f"   Owner: {e.owner}\n"
             response_text += f"   Registered: {timestamp_str}\n"
-            response_text += f"   Data Type: {e.data_type}"
+            response_text += f"   Data Type: {quote(e.data_type)}"
+            response_text += f"\n\n{QUOTED_NOTE}"
             response_text += _format_hints(
                 "download_data", ["chain_balance", "health_check"]
             )
@@ -3029,10 +3089,11 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += f"   Swarm Hash: {clean_hash}\n"
             response_text += f"   Owner: {record.owner}\n"
             response_text += f"   Registered: {timestamp_str}\n"
-            response_text += f"   Data Type: {record.data_type}\n"
+            response_text += f"   Data Type: {quote(record.data_type)}\n"
             response_text += f"   Status: {record.status.name}"
             if record.storage_ref:
                 response_text += f"\n   Storage Ref: {record.storage_ref}"
+            response_text += f"\n\n{QUOTED_NOTE}"
             response_text += _format_hints(
                 "download_data", ["anchor_hash", "health_check"]
             )
@@ -3129,21 +3190,24 @@ async def handle_get_provenance(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"   Swarm Hash: {clean_hash}\n"
         response_text += f"   Owner: {record.owner}\n"
         response_text += f"   Registered: {timestamp_str}\n"
-        response_text += f"   Data Type: {record.data_type}\n"
+        response_text += f"   Data Type: {quote(record.data_type)}\n"
         response_text += f"   Status: {status_text}"
         if record.storage_ref:
             response_text += f"\n   Storage Ref: {record.storage_ref}"
 
         if record.transformations:
             response_text += f"\n\n   Transformations ({len(record.transformations)}):"
-            for t in record.transformations:
-                response_text += f"\n     - {t.description}"
+            for t in record.transformations[:_MAX_LISTED]:
+                response_text += f"\n     - {quote(t.description)}"
+            response_text += _more_note(record.transformations)
 
         if record.accessors:
             response_text += f"\n\n   Accessors ({len(record.accessors)}):"
-            for addr in record.accessors:
+            for addr in record.accessors[:_MAX_LISTED]:
                 response_text += f"\n     - {addr}"
+            response_text += _more_note(record.accessors)
 
+        response_text += f"\n\n{QUOTED_NOTE}"
         response_text += _format_hints("download_data", ["verify_hash", "anchor_hash"])
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
@@ -3344,10 +3408,12 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += f"   Original: {e.original_hash}\n"
             response_text += f"   Transformed: {e.new_hash}\n"
             if e.existing_description:
-                response_text += f"   Description: {e.existing_description}\n"
+                response_text += f"   Description: {quote(e.existing_description)}\n"
             response_text += (
                 f"\n   The (original → new) link is already on-chain. No gas spent."
             )
+            if e.existing_description:
+                response_text += f"\n\n{QUOTED_NOTE}"
             response_text += _format_hints("get_provenance", ["get_provenance_chain"])
             return CallToolResult(
                 content=[TextContent(type="text", text=response_text)]
@@ -3719,6 +3785,13 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
         response_text += f"{'entry' if len(chain_records) == 1 else 'entries'})\n"
 
         for i, record in enumerate(chain_records):
+            if len(response_text) > _MAX_CHAIN_TEXT:
+                response_text += (
+                    f"\n\n   ... output capped: showing {i} of "
+                    f"{len(chain_records)} entries. Use get_provenance on a "
+                    "hash for its full record."
+                )
+                break
             indent = "  " * i
             prefix = "└─ " if i > 0 else ""
 
@@ -3742,13 +3815,15 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
             response_text += f"\n{indent}{prefix}{record.data_hash}\n"
             response_text += f"{indent}   Owner: {record.owner}\n"
             response_text += f"{indent}   Registered: {timestamp_str}\n"
-            response_text += f"{indent}   Type: {record.data_type}\n"
+            response_text += f"{indent}   Type: {quote(record.data_type)}\n"
             response_text += f"{indent}   Status: {status_text}"
 
             if record.transformations:
-                for t in record.transformations:
-                    response_text += f"\n{indent}   Transform: {t.description}"
+                for t in record.transformations[:_MAX_LISTED]:
+                    response_text += f"\n{indent}   Transform: {quote(t.description)}"
+                response_text += _more_note(record.transformations, indent + "   ")
 
+        response_text += f"\n\n{QUOTED_NOTE}"
         response_text += _format_hints(
             "get_provenance", ["download_data", "record_transform"]
         )
@@ -4033,8 +4108,9 @@ async def handle_lookup_by_storage_ref(arguments: Dict[str, Any]) -> CallToolRes
             response_text += f"   Data Hash: {record.data_hash}\n"
             response_text += f"   Owner: {record.owner}\n"
             response_text += f"   Registered: {timestamp_str}\n"
-            response_text += f"   Data Type: {record.data_type}\n"
+            response_text += f"   Data Type: {quote(record.data_type)}\n"
             response_text += f"   Status: {record.status.name}"
+            response_text += f"\n\n{QUOTED_NOTE}"
             response_text += _format_hints(
                 "download_data", ["get_provenance", "verify_hash"]
             )
@@ -4090,7 +4166,7 @@ async def handle_get_notary_info(arguments: Dict[str, Any]) -> CallToolResult:
 
         if enabled and available:
             response_text = f"✅ Notary service is enabled and available.\n\n"
-            response_text += f"   Address: {result.get('address', 'N/A')}\n"
+            response_text += f"   Address: {_gw(result.get('address', 'N/A'))}\n"
         elif enabled and not available:
             response_text = (
                 f"⚠️  Notary service is enabled but not currently available.\n\n"
@@ -4098,7 +4174,7 @@ async def handle_get_notary_info(arguments: Dict[str, Any]) -> CallToolResult:
         else:
             response_text = f"Notary service is not enabled on this gateway.\n\n"
 
-        response_text += f"   Status: {result.get('message', 'N/A')}\n"
+        response_text += f"   Status: {one_line(result.get('message', 'N/A'))}\n"
         response_text += _format_hints("upload_data", ["health_check"])
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])

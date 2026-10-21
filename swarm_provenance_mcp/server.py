@@ -857,6 +857,18 @@ QUOTE_TTL_SECONDS = 600
 _QUOTE_KEY = secrets.token_bytes(32)
 # Issued, unused quotes: quote_id -> (tool, canonical action, expiry).
 _issued_quotes: Dict[str, tuple] = {}
+MAX_ISSUED_QUOTES = 1000  # oldest are evicted beyond this
+
+# Action fields holding hashes or addresses: compared case-insensitively.
+_HEX_FIELDS = (
+    "swarm_hash",
+    "storage_ref",
+    "owner",
+    "original_hash",
+    "new_hash",
+    "source_hashes",
+    "data_hash",
+)
 
 
 def _now() -> float:
@@ -864,7 +876,19 @@ def _now() -> float:
 
 
 def _canonical(action: Dict[str, Any]) -> str:
-    return json.dumps(action, sort_keys=True, separators=(",", ":"))
+    """Canonical JSON of an action: hex fields lower-cased, empty values
+    treated as absent."""
+    norm = {}
+    for key, value in action.items():
+        if value in ("", None, []):
+            value = None
+        elif key in _HEX_FIELDS:
+            if isinstance(value, list):
+                value = [v.lower() if isinstance(v, str) else v for v in value]
+            elif isinstance(value, str):
+                value = value.lower()
+        norm[key] = value
+    return json.dumps(norm, sort_keys=True, separators=(",", ":"))
 
 
 def _quote_digest(tool: str, canonical: str, expires: float) -> str:
@@ -880,6 +904,8 @@ def _issue_quote_id(tool: str, action: Dict[str, Any]) -> str:
     expires = now + QUOTE_TTL_SECONDS
     qid = _quote_digest(tool, canonical, expires)
     _issued_quotes[qid] = (tool, canonical, expires)
+    while len(_issued_quotes) > MAX_ISSUED_QUOTES:
+        del _issued_quotes[next(iter(_issued_quotes))]  # oldest first
     return qid
 
 
@@ -2851,10 +2877,18 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
         if len(data_type) > 64:
             raise ValueError("data_type must be 64 characters or fewer")
 
-        owner = arguments.get("owner")
-        storage_ref = arguments.get("storage_ref")
+        owner = arguments.get("owner") or None
+        storage_ref = arguments.get("storage_ref") or None
         if storage_ref:
             storage_ref = validate_and_clean_reference_hash(storage_ref)
+        if owner and storage_ref:
+            # anchor_for has no storage ref variant: it would be dropped.
+            raise ValueError(
+                "storage_ref cannot be combined with owner: registering on "
+                "behalf of another owner does not link a storage reference. "
+                "Anchor without storage_ref, then have the owner call "
+                "set_storage_ref."
+            )
 
         gate = await _spend_confirmation(
             "anchor_hash",

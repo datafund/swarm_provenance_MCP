@@ -98,19 +98,26 @@ def _rpc_failover(method):
     return wrapper
 
 
+# Node errors that mean the transaction was refused before it entered the
+# mempool. Anything else ("already known", "internal error", timeouts,
+# unparseable responses...) may mean it was accepted, so it keeps its slot.
+_PRE_MEMPOOL_REJECTIONS = (
+    "nonce too low",
+    "replacement transaction underpriced",
+    "insufficient funds",
+    "intrinsic gas too low",
+    "exceeds block gas limit",
+    "invalid sender",
+)
+
+
 def _rejected_by_node(e: Exception) -> bool:
-    """Whether send_raw_transaction failed with a JSON-RPC error response
-    (nonce too low, underpriced, insufficient funds...): the node answered
-    and did not accept the transaction. Transport failures and timeouts are
-    ambiguous (it may have been accepted), as is "already known"."""
+    """Whether send_raw_transaction failed with a definite pre-mempool
+    rejection (an allowlist), so the transaction never reached the network."""
     if is_transport_error(e):
         return False
-    if type(e).__name__ in ("TimeExhausted", "TimeoutError"):
-        return False
     text = str(e).lower()
-    if "already known" in text or "known transaction" in text:
-        return False
-    return type(e).__name__ == "Web3RPCError" or isinstance(e, ValueError)
+    return any(reason in text for reason in _PRE_MEMPOOL_REJECTIONS)
 
 
 class WalletRequiredError(ChainConfigurationError, AttributeError):

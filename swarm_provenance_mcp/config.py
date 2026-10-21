@@ -103,6 +103,7 @@ class Settings(BaseSettings):
     chain_max_fee_gwei: Optional[float] = Field(
         default=None,
         gt=0,
+        allow_inf_nan=False,
         env="CHAIN_MAX_FEE_GWEI",
         description="Fee cap per gas (maxFeePerGas) in gwei; writes above it are refused",
     )
@@ -110,6 +111,7 @@ class Settings(BaseSettings):
     chain_session_budget_eth: Optional[float] = Field(
         default=None,
         gt=0,
+        allow_inf_nan=False,
         env="CHAIN_SESSION_BUDGET_ETH",
         description="Worst-case ETH the server may spend on gas per session",
     )
@@ -124,6 +126,7 @@ class Settings(BaseSettings):
     chain_l1_fee_allowance_eth: Optional[float] = Field(
         default=None,
         ge=0,
+        allow_inf_nan=False,
         env="CHAIN_L1_FEE_ALLOWANCE_ETH",
         description="L1 data fee reserved per transaction on top of L2 gas",
     )

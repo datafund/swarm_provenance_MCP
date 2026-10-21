@@ -138,7 +138,9 @@ class SpendGuard:
             rewards = []
         if not rewards:
             return DEFAULT_PRIORITY_FEE_WEI
-        return rewards[len(rewards) // 2]
+        # A zero tip (empty blocks report zero rewards) may never be
+        # included, so never go below the default.
+        return max(rewards[len(rewards) // 2], DEFAULT_PRIORITY_FEE_WEI)
 
     def fee_fields(self, web3) -> Tuple[dict, int]:
         """
@@ -271,7 +273,9 @@ class SpendGuard:
             except (TypeError, ValueError):
                 return  # unreadable: keep the worst case
         with self._lock:
-            self.spent_wei += min(actual, reserved_wei) - reserved_wei
+            # The actual cost, even above the reservation (an L1 fee spike
+            # beyond the allowance must still be counted).
+            self.spent_wei += actual - reserved_wei
 
     def remaining_wei(self) -> int:
         return max(self.budget_wei - self.spent_wei, 0)

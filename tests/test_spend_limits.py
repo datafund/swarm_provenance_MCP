@@ -401,6 +401,42 @@ class TestConfirmation:
         )
         client.anchor.assert_not_called()
 
+    async def test_owner_with_storage_ref_rejected(self, mainnet_server):
+        server, client = mainnet_server
+        result = await server.handle_anchor_hash(
+            {"swarm_hash": H1, "owner": "0x" + "ab" * 20, "storage_ref": H2}
+        )
+        assert result.isError
+        assert "storage_ref cannot be combined with owner" in result.content[0].text
+        assert "quote_id" not in result.content[0].text
+        client.anchor_for.assert_not_called()
+
+    async def test_hash_case_and_empty_storage_ref_normalised(self, mainnet_server):
+        server, client = mainnet_server
+        quote = await server.handle_anchor_hash({"swarm_hash": H1.upper()})
+        await server.handle_anchor_hash(
+            {
+                "swarm_hash": H1,
+                "storage_ref": "",
+                "confirm": True,
+                "quote_id": _quote_id(quote),
+            }
+        )
+        client.anchor.assert_called_once()
+
+    async def test_quote_store_bounded(self, mainnet_server, monkeypatch):
+        server, client = mainnet_server
+        monkeypatch.setattr(server, "MAX_ISSUED_QUOTES", 3)
+        monkeypatch.setattr(server, "_issued_quotes", {})
+        first = await server.handle_anchor_hash({"swarm_hash": H1})
+        for h in (H2, H3, "d4" * 32):
+            await server.handle_anchor_hash({"swarm_hash": h})
+        assert len(server._issued_quotes) == 3
+        await server.handle_anchor_hash(
+            {"swarm_hash": H1, "confirm": True, "quote_id": _quote_id(first)}
+        )
+        client.anchor.assert_not_called()  # the oldest quote was evicted
+
     async def test_testnet_default_needs_no_confirm(self, mainnet_server):
         server, client = mainnet_server
         client.spend = SpendGuard(BASE_SEPOLIA)
@@ -556,6 +592,18 @@ class TestPriorityFee:
         fields, _ = SpendGuard(BASE_MAINNET).fee_fields(w3)
         assert fields["maxPriorityFeePerGas"] == DEFAULT_PRIORITY_FEE_WEI
 
+    def test_zero_rewards_use_default(self):
+        w3 = _web3()
+        w3.eth.fee_history.return_value = {"reward": [[0]] * 5}
+        assert SpendGuard.priority_fee(w3) == DEFAULT_PRIORITY_FEE_WEI
+
+    def test_zero_median_uses_default(self):
+        w3 = _web3()
+        w3.eth.fee_history.return_value = {
+            "reward": [[0], [0], [0], [5_000_000], [6_000_000]]
+        }
+        assert SpendGuard.priority_fee(w3) == DEFAULT_PRIORITY_FEE_WEI
+
     def test_median_of_history(self):
         w3 = _web3()
         w3.eth.fee_history.return_value = {
@@ -582,6 +630,16 @@ class TestL1Fee:
             {"gasUsed": 100_000, "effectiveGasPrice": 6_000_000, "l1Fee": 10**10},
         )
         assert guard.spent_wei == 100_000 * 6_000_000 + 10**10
+
+    def test_l1_fee_above_allowance_counted_in_full(self):
+        """A spike beyond the reservation is still charged at its real cost."""
+        guard = SpendGuard(BASE_MAINNET)
+        reserved = guard.reserve(2 * 10**12)
+        guard.settle(
+            reserved,
+            {"gasUsed": 100_000, "effectiveGasPrice": 6_000_000, "l1Fee": 5 * 10**15},
+        )
+        assert guard.spent_wei == 100_000 * 6_000_000 + 5 * 10**15
 
     def test_settle_reads_hex_l1_fee(self):
         guard = SpendGuard(BASE_MAINNET)
@@ -635,6 +693,55 @@ class TestRejectedBroadcast:
         with pytest.raises(Exception):
             client._send_transaction(_tx())
         assert client.spend.tx_count == 1  # may have reached the network
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "nonce too low",
+            "replacement transaction underpriced",
+            "insufficient funds for gas * price + value",
+            "intrinsic gas too low",
+            "exceeds block gas limit",
+            "invalid sender",
+        ],
+    )
+    def test_pre_mempool_rejections_release(self, message):
+        from web3.exceptions import Web3RPCError
+
+        w3 = _web3()
+        w3.eth.send_raw_transaction.side_effect = Web3RPCError(message)
+        client = _client(w3, max_txs=1)
+        with pytest.raises(Exception):
+            client._send_transaction(_tx())
+        assert client.spend.tx_count == 0
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            "internal error",
+            "request timed out",
+            "upstream request timeout",
+            "header not found",
+            "already known",
+            "JSONDECODE",
+        ],
+    )
+    def test_ambiguous_errors_keep_reservation(self, error):
+        import json
+
+        from web3.exceptions import Web3RPCError
+
+        exc = (
+            json.JSONDecodeError("Expecting value", "", 0)
+            if error == "JSONDECODE"
+            else Web3RPCError(error)
+        )
+        w3 = _web3()
+        w3.eth.send_raw_transaction.side_effect = exc
+        client = _client(w3, max_txs=1)
+        with pytest.raises(Exception):
+            client._send_transaction(_tx())
+        assert client.spend.tx_count == 1
 
     def test_already_known_keeps_reservation(self):
         from web3.exceptions import Web3RPCError
@@ -760,6 +867,18 @@ class TestConfigValidation:
         ],
     )
     def test_invalid_limits_refused_at_startup(self, field, value):
+        from pydantic import ValidationError
+
+        from swarm_provenance_mcp.config import Settings
+
+        with pytest.raises(ValidationError):
+            Settings(**{field: value})
+
+    @pytest.mark.parametrize(
+        "field", ["chain_max_fee_gwei", "chain_session_budget_eth"]
+    )
+    @pytest.mark.parametrize("value", [float("inf"), float("nan")])
+    def test_non_finite_limits_refused(self, field, value):
         from pydantic import ValidationError
 
         from swarm_provenance_mcp.config import Settings

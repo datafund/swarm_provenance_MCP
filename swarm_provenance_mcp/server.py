@@ -4324,7 +4324,9 @@ async def main():
                 if chain_client:
                     logger.info("Chain: %s (wallet connected)", chain_client.chain)
                 elif CHAIN_AVAILABLE and _chain_init_error:
-                    logger.info("Chain: writes disabled — %s", _chain_init_error)
+                    logger.info(
+                        "Chain: writes disabled — %s", redact_urls(_chain_init_error)
+                    )
                 elif CHAIN_AVAILABLE:
                     logger.info("Chain: %s (read-only, no wallet)", settings.chain_name)
             await server.run(

@@ -31,7 +31,15 @@ def _clean_strings(value: Any) -> Any:
 
 def _json(response) -> Any:
     """The response body as JSON, with its strings cleaned."""
-    return _clean_strings(response.json())
+    body = response.json()
+    try:
+        return _clean_strings(body)
+    except RecursionError:
+        # json.loads accepts nesting deeper than the cleaner can walk; such a
+        # body is not a real gateway response.
+        raise requests.exceptions.InvalidJSONError(
+            "Gateway response is nested too deeply to process", response=response
+        ) from None
 
 
 class SwarmGatewayClient:

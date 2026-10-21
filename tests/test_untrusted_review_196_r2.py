@@ -182,3 +182,14 @@ async def test_text_download_reports_sha256_and_not_byte_exact(server):
     assert hashlib.sha256(payload).hexdigest() in summary
     assert "not byte-exact" in summary
     assert "not byte-exact" in r.content[1].text
+
+
+def test_deeply_nested_gateway_body_is_a_request_error(requests_mock):
+    deep = "[" * 5000 + '"x"' + "]" * 5000
+    requests_mock.get(
+        f"{G}/api/v1/stamps/",
+        text=deep,
+        headers={"Content-Type": "application/json"},
+    )
+    with pytest.raises(requests.exceptions.RequestException):
+        client().list_stamps()

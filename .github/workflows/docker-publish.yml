@@ -40,6 +40,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # The smoke test runs on a local amd64 build. The push step below rebuilds
+      # for amd64 and arm64 from the same commit and layer cache; the pushed
+      # images are not the exact artifact tested, and arm64 is not started.
       - name: Build image for the smoke test (amd64, not pushed)
         uses: docker/build-push-action@v6
         with:

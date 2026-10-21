@@ -1,10 +1,11 @@
 name: Tests
 
-# Required check for main and development, and the gate in front of every
-# image publish (docker-publish.yml calls this workflow).
+# Required check for PRs to main and development, and the gate in front of
+# every image publish. Pushes to main are not listed here: docker-publish.yml
+# runs on them and calls this workflow, so it would otherwise run twice.
 on:
   push:
-    branches: [ main, development ]
+    branches: [ development ]
   pull_request:
     branches: [ main, development ]
   workflow_call:

@@ -837,6 +837,7 @@ ruff check swarm_provenance_mcp/
   - `python-dotenv>=1.0.0,<2`: Environment configuration
   - `web3>=7,<8`: Ethereum blockchain interaction for on-chain provenance
   - `eth-account>=0.13,<0.14`: Wallet and transaction signing for chain anchoring
+  - `eth-utils>=5,<6`: Hashing helpers (keccak) used directly by the chain module
 
   Upper bounds are deliberate. Raise one only together with a passing test run
   against the new version.

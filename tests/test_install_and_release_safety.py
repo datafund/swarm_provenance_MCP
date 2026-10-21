@@ -27,7 +27,13 @@ PRODUCTION_GATEWAY_URL = "https://provenance-gateway.datafund.io"
 
 # Dependencies whose next major (or, for 0.x, minor) release can break server
 # registration or change how transactions are signed.
-MUST_BE_UPPER_BOUNDED = {"mcp", "web3", "eth-account", "pydantic-settings"}
+MUST_BE_UPPER_BOUNDED = {
+    "mcp",
+    "web3",
+    "eth-account",
+    "eth-utils",
+    "pydantic-settings",
+}
 
 
 def _normalize(name):

@@ -135,8 +135,8 @@ Blockchain dependencies (web3, eth-account) are included in the default install.
 - **HTTP Client**: Uses `requests>=2.31.0,<3` for gateway communication
 - **Data Validation**: Uses `pydantic>=2,<3` and `pydantic-settings>=2,<3` for settings and request validation
 - **Configuration**: Uses `python-dotenv>=1,<2` for environment management
-- **Chain**: Uses `web3>=7,<8` and `eth-account>=0.13,<0.14` (bounded: a new release can change signing)
-- Every third-party import must be declared in `pyproject.toml`, and `mcp`, `web3`, `eth-account` and `pydantic-settings` must keep an upper bound; `tests/test_install_and_release_safety.py` enforces both
+- **Chain**: Uses `web3>=7,<8`, `eth-account>=0.13,<0.14` and `eth-utils>=5,<6` (bounded: a new release can change signing or hashing)
+- Every third-party import must be declared in `pyproject.toml`, and `mcp`, `web3`, `eth-account` `eth-utils` and `pydantic-settings` must keep an upper bound; `tests/test_install_and_release_safety.py` enforces both
 
 ### Testing Strategy
 - **Gateway Client Tests** (`test_gateway_client.py`): Mock-based testing of HTTP client

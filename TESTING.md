@@ -78,8 +78,8 @@ pytest tests/test_docker.py -v
 ### CI/CD Integration
 
 Tests run automatically on:
-- Every push to `main` or `develop`
-- Every pull request
+- Every pull request to `main` or `development` (`Tests` workflow: unit tests, fresh-install smoke, image smoke)
+- Every push to `development`; on `main` the same `Tests` workflow runs as the gate inside `docker-publish.yml`
 - Daily at 2 AM UTC (scheduled)
 - Manual trigger via GitHub Actions
 

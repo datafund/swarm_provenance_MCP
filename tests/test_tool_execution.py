@@ -5181,6 +5181,7 @@ class TestDeployBlock:
 
         with patch("swarm_provenance_mcp.chain.provider._import_web3") as mock_w3:
             mock_web3_cls = MagicMock()
+            mock_web3_cls.return_value.eth.chain_id = 84532
             mock_w3.return_value = mock_web3_cls
             provider = ChainProvider(
                 chain="base-sepolia",

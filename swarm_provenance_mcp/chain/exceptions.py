@@ -17,6 +17,18 @@ class ChainConfigurationError(ChainError):
     pass
 
 
+class ChainIdMismatchError(ChainConfigurationError):
+    """The RPC endpoint reports a different chain id than the configured network.
+
+    Not retryable: the configuration (CHAIN_NAME / CHAIN_RPC_URL) is wrong, or
+    the endpoint is misrouted. Nothing is signed while it persists.
+    """
+
+    def __init__(self, message: str, rpc_url: str = None):
+        super().__init__(message)
+        self.rpc_url = rpc_url
+
+
 class ChainConnectionError(ChainError):
     """Failed to connect to RPC endpoint."""
 

@@ -259,6 +259,11 @@ class ChainClient:
         web3 = self._provider.web3
         broadcast = False
 
+        # Never sign for a chain other than the configured one: ask the
+        # endpoint this transaction goes to, every time, before signing.
+        # A mismatch raises ChainIdMismatchError (not retried, not failed over).
+        self._provider.check_chain_id(web3)
+
         try:
             # Fill in nonce
             tx["nonce"] = web3.eth.get_transaction_count(self._wallet.address)

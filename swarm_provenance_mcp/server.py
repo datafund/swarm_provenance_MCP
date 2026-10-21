@@ -104,6 +104,13 @@ if settings.chain_enabled:
                 "Reinstall with: pip install -e ."
             )
     except Exception as e:
+        from .chain.exceptions import ChainIdMismatchError
+
+        if isinstance(e, ChainIdMismatchError):
+            # The RPC is on another chain than CHAIN_NAME: refuse to start
+            # rather than serve reads from, or sign for, the wrong network.
+            logger.error("Chain configuration refused: %s", e)
+            raise
         # chain_client stays None but CHAIN_AVAILABLE remains True —
         # read-only tools (verify_hash, get_provenance, etc.) work
         # without a wallet via _chain_reader().
@@ -730,6 +737,18 @@ def _format_insufficient_funds_error(tool_name: str, chain_client_ref) -> str:
         msg += f"\n   Bridge ETH to Base: {_BRIDGE_URL}"
     msg += "\n\n   Run chain_balance to check your current balance."
     return msg
+
+
+def _chain_id_lines(provider) -> str:
+    """
+    Chain id and a testnet/mainnet label, each line starting "\n   ".
+
+    The label comes from the effective chain id, not from CHAIN_NAME.
+    """
+    text = f"\n   Chain ID: {provider.chain_id}"
+    if provider.is_testnet:
+        return text + "\n   ⚠️  Testnet — tokens have no value, state may be reset"
+    return text + "\n   ⚠️  Mainnet — transactions spend real ETH"
 
 
 def _mask_rpc_url(url: str) -> str:
@@ -2214,11 +2233,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 try:
                     chain_client.health_check()
                     response_text += f"\n\n⛓️  Chain: {chain_client.chain} (connected)"
-                    if chain_client.chain in ("base-sepolia", "localhost"):
-                        response_text += (
-                            "\n   ⚠️  Testnet — tokens have no value, "
-                            "state may be reset"
-                        )
+                    response_text += _chain_id_lines(chain_client._provider)
                     response_text += f"\n   Contract: {chain_client.contract_address}"
                     response_text += f"\n   Wallet: {chain_client.address}"
                     # Proactive balance check — warn if wallet can't transact
@@ -2558,13 +2573,8 @@ async def handle_chain_health(arguments: Dict[str, Any]) -> CallToolResult:
 
         response_text = f"⛓️  Chain RPC Health\n\n"
         response_text += f"   Connected: true\n"
-        response_text += f"   Chain: {provider.chain}\n"
-        if provider.chain in ("base-sepolia", "localhost"):
-            response_text += (
-                "   ⚠️  Testnet — tokens have no value, state may be reset\n"
-            )
-
-        response_text += f"   Chain ID: {provider.chain_id}\n"
+        response_text += f"   Chain: {provider.chain}"
+        response_text += _chain_id_lines(provider) + "\n"
         response_text += f"   Latest Block: {block_number:,}\n"
         response_text += f"   RPC Response: {elapsed_ms:.0f}ms\n"
         response_text += f"   Probe: {', '.join(PROBE_METHODS)}\n"

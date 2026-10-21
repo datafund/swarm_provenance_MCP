@@ -90,7 +90,7 @@ AI Agents → MCP Server → Gateway Client → swarm_connect Gateway → Swarm 
 On-chain provenance module. Dependencies (web3, eth-account) included in default install. Enable with `CHAIN_ENABLED=true`.
 - `chain/__init__.py` — Import guard (`CHAIN_AVAILABLE` flag)
 - `chain/client.py` — High-level facade (anchor, verify, transform, merge_transform, access, set_storage_ref, lookup_by_storage_ref)
-- `chain/provider.py` — Web3 RPC connection management (includes `localhost` preset for local hardhat). Liveness probe runs state methods, not just `eth_chainId`; `is_transport_error()` classifies endpoint-unavailable errors (429/502/503/504, timeouts, `-32011`)
+- `chain/provider.py` — Web3 RPC connection management (includes `localhost` preset for local hardhat). Liveness probe runs state methods, not just `eth_chainId`; `is_transport_error()` classifies endpoint-unavailable errors (429/502/503/504, timeouts, `-32011`). For `base-sepolia` and `base` the chain id is pinned to the preset: an RPC reporting another id is refused at start-up (`ChainIdMismatchError`, the server will not start) and again right before every signature; only `localhost` with a custom RPC auto-detects. Testnet/mainnet labels come from the effective chain id (`provider.is_testnet`)
 - `chain/wallet.py` — Private key loading and transaction signing
 - `chain/contract.py` — DataProvenance contract wrapper (build_*_tx, read methods, event queries, v2 state reads, storageRef support, feature detection)
 - `chain/event_cache.py` — In-memory cache for DataTransformed and DataMerged events (singleton per chain+contract, incremental scans)

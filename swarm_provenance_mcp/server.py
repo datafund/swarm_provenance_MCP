@@ -135,6 +135,63 @@ def _load_skills_content() -> str:
 
 _SKILLS_CONTENT = _load_skills_content()
 
+_CHAIN_ID_NAMES = {
+    84532: "Base Sepolia",
+    8453: "Base mainnet",
+    11155111: "Ethereum Sepolia",
+    1: "Ethereum mainnet",
+    31337: "a local Hardhat/Anvil chain",
+    1337: "a local dev chain",
+}
+
+
+def _effective_chain_id(chain_name: str, client=None) -> Optional[int]:
+    """
+    Chain id for ``chain_name``: the client's (pinned or auto-detected) id
+    when a client on that chain is available, else the preset id. None when
+    the id is only known from the RPC (localhost with a custom RPC).
+    """
+    from .chain.provider import CHAIN_PRESETS, PINNED_CHAINS
+
+    client = client or chain_client
+    if client is not None and getattr(client, "chain", None) == chain_name:
+        chain_id = getattr(getattr(client, "_provider", None), "chain_id", None)
+        if isinstance(chain_id, int):
+            return chain_id
+    preset = CHAIN_PRESETS.get(chain_name)
+    if preset is None:
+        return None
+    if chain_name in PINNED_CHAINS or not settings.chain_rpc_url:
+        return preset["chain_id"]
+    return None
+
+
+def _is_testnet(chain_name: str, client=None) -> bool:
+    """Testnet decision from the effective chain id (unknown → not a testnet)."""
+    from .chain.provider import is_testnet_chain_id
+
+    chain_id = _effective_chain_id(chain_name, client)
+    return chain_id is not None and is_testnet_chain_id(chain_id)
+
+
+def _chain_network_text() -> str:
+    """The network the chain tools act on, worded from the effective chain id."""
+    chain_id = _effective_chain_id(settings.chain_name)
+    if chain_id is None:
+        return (
+            f"on the chain behind CHAIN_RPC_URL (CHAIN_NAME={settings.chain_name}; "
+            "its id is read from the RPC, run chain_health to see it, and treat "
+            "it as mainnet unless that reports a testnet)"
+        )
+    name = _CHAIN_ID_NAMES.get(chain_id, f"chain {chain_id}")
+    if _is_testnet(settings.chain_name):
+        return f"on {name} (chain id {chain_id}, a testnet: tokens have no value)"
+    return (
+        f"on {name} (chain id {chain_id}). This is MAINNET: every write spends "
+        "real ETH"
+    )
+
+
 # Agent-facing instructions sent during MCP initialization handshake
 MCP_INSTRUCTIONS = """
 Swarm Provenance MCP — decentralized storage with cryptographic provenance on the Swarm network.
@@ -183,7 +240,7 @@ ERRORS:
 
 CHAIN ANCHORING (optional):
 When chain_enabled=true, on-chain provenance tools become available (blockchain dependencies are included in the default install).
-These register Swarm hashes in the DataProvenance smart contract on Base Sepolia, creating an immutable on-chain record.
+These register Swarm hashes in the DataProvenance smart contract __CHAIN_NETWORK__, creating an immutable on-chain record.
 - chain_health — test RPC connectivity (no wallet needed)
 - chain_balance — check wallet ETH balance with funding guidance when low
 - anchor_hash — register a Swarm hash on-chain, optionally with a storage_ref for bidirectional lookup (costs gas, requires funded wallet)
@@ -218,7 +275,7 @@ COMPANION SERVERS:
 - swarm_connect gateway (required) — the FastAPI gateway this server talks to, handles Bee node communication
 - fds-id MCP (optional) — identity and signing server for cryptographic provenance chain anchoring
 The health_check tool reports gateway connectivity. For full provenance workflows with signed data, an fds-id server is needed but not required for basic storage.
-""".strip()
+""".strip().replace("__CHAIN_NETWORK__", _chain_network_text())
 
 # Validation patterns
 STAMP_ID_PATTERN = re.compile(r"^[a-fA-F0-9]{64}$")
@@ -730,13 +787,19 @@ def _format_insufficient_funds_error(tool_name: str, chain_client_ref) -> str:
         chain = chain_client_ref.chain
     else:
         chain = settings.chain_name
-    faucet = _FAUCET_URLS.get(chain)
-    if faucet:
-        msg += f"\n   Fund with testnet ETH: {faucet}"
-    else:
-        msg += f"\n   Bridge ETH to Base: {_BRIDGE_URL}"
+    msg += _funding_hint(chain, chain_client_ref)
     msg += "\n\n   Run chain_balance to check your current balance."
     return msg
+
+
+def _funding_hint(chain: str, client=None) -> str:
+    """Where to get ETH, decided by the effective chain id, not the name."""
+    if not _is_testnet(chain, client):
+        return f"\n   Bridge ETH to Base: {_BRIDGE_URL}"
+    faucet = _FAUCET_URLS.get(chain)
+    if faucet:
+        return f"\n   Fund with testnet ETH: {faucet}"
+    return "\n   Fund the account from your local test node (testnet ETH)"
 
 
 def _chain_id_lines(provider) -> str:
@@ -769,7 +832,6 @@ def _format_funding_guidance(address: str, balance_wei: int, chain: str) -> str:
     if balance_wei >= _LOW_BALANCE_WEI:
         return ""
 
-    is_testnet = chain in _FAUCET_URLS
     balance_eth = balance_wei / 10**18
 
     if balance_wei < _MIN_BALANCE_WEI:
@@ -781,11 +843,7 @@ def _format_funding_guidance(address: str, balance_wei: int, chain: str) -> str:
         msg += f"\n   Balance: {balance_eth:.6f} ETH (may run out soon)"
         msg += f"\n   Wallet: {address}"
 
-    if is_testnet:
-        faucet_url = _FAUCET_URLS[chain]
-        msg += f"\n   Fund with testnet ETH: {faucet_url}"
-    else:
-        msg += f"\n   Bridge ETH to Base: {_BRIDGE_URL}"
+    msg += _funding_hint(chain)
 
     return msg
 
@@ -2253,11 +2311,17 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     except Exception:
                         pass  # Non-critical — don't fail health_check
                 except Exception as chain_err:
+                    from .chain.exceptions import ChainIdMismatchError
+
                     response_text += (
                         f"\n\n⛓️  Chain: {settings.chain_name} (error: {chain_err})"
                     )
+                    response_text += _chain_id_lines(chain_client._provider)
                     recommendations.append(
-                        "Chain anchoring enabled but RPC unreachable"
+                        "RPC is on another chain than CHAIN_NAME — fix "
+                        "CHAIN_RPC_URL / CHAIN_RPC_URLS or CHAIN_NAME"
+                        if isinstance(chain_err, ChainIdMismatchError)
+                        else "Chain anchoring enabled but RPC unreachable"
                     )
             elif CHAIN_AVAILABLE:
                 # Dependencies present but no wallet → read-only mode
@@ -2265,6 +2329,11 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     f"\n\n⛓️  Chain: {settings.chain_name} "
                     f"(read-only, no wallet — set PROVENANCE_WALLET_KEY for write tools)"
                 )
+                try:
+                    reader = await asyncio.to_thread(_chain_reader)
+                    response_text += _chain_id_lines(reader._provider)
+                except Exception as chain_err:
+                    response_text += f"\n   Chain error: {chain_err}"
             else:
                 response_text += "\n\n⛓️  Chain: enabled but dependencies not available"
                 recommendations.append(

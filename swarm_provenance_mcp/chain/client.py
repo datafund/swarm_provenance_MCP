@@ -71,6 +71,8 @@ def _rpc_failover(method):
             attempt_web3 = self._sync_contract()
             attempt_url = self._provider.rpc_url  # for messages only
             try:
+                # Once per endpoint: no read or write on an unchecked chain.
+                self._provider.ensure_chain_id(attempt_web3)
                 return method(self, *args, **kwargs)
             except Exception as e:
                 if not _should_fail_over(e):

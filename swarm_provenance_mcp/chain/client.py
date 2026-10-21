@@ -122,6 +122,7 @@ class ChainClient:
     """
 
     _contract_web3 = None  # the Web3 instance _contract was built on
+    _contract_verified = False  # check_deployed() passed for this address
 
     def __init__(
         self,
@@ -243,19 +244,42 @@ class ChainClient:
         self._sync_contract()
         return True
 
-    def _send_transaction(self, tx: dict) -> dict:
+    def verify_contract(self) -> None:
+        """
+        Require DataProvenance code at the configured address (cached).
+
+        Raises:
+            ChainConfigurationError: If the address has no code or the code
+                is not a DataProvenance contract.
+        """
+        if self._contract_verified:
+            return
+        self._contract.check_deployed()
+        self._contract_verified = True
+
+    def _send_transaction(self, tx: dict, expected_events=()) -> dict:
         """
         Estimate gas, sign, broadcast, and wait for receipt.
 
         Args:
             tx: Unsigned transaction dict from a build_*_tx method.
+            expected_events: ``(event_name, indexed_filters)`` pairs that the
+                receipt must contain. A status-1 receipt without them means
+                nothing was recorded (for example the address has no
+                contract code), so it is reported as a failure.
 
         Returns:
             Transaction receipt dict.
 
         Raises:
-            ChainTransactionError: If transaction fails.
+            ChainConfigurationError: If the contract is not deployed at the
+                configured address (checked before signing).
+            ChainTransactionError: If transaction fails or an expected event
+                is missing.
         """
+        # Before any gas is spent: refuse an address without the contract.
+        self.verify_contract()
+
         web3 = self._provider.web3
         broadcast = False
 
@@ -289,6 +313,16 @@ class ChainClient:
                     tx_hash=tx_hash.hex(),
                     broadcast=True,
                 )
+
+            for event_name, filters in expected_events:
+                if not self._contract.receipt_has_event(receipt, event_name, **filters):
+                    raise ChainTransactionError(
+                        f"Transaction was mined but the contract emitted no "
+                        f"{event_name} event, so nothing was recorded. Check "
+                        "CHAIN_CONTRACT and CHAIN_NAME.",
+                        tx_hash=tx_hash.hex(),
+                        broadcast=True,
+                    )
 
             logger.debug(
                 "Transaction confirmed in block %d, gas used: %d",
@@ -368,8 +402,18 @@ class ChainClient:
                 data_type=data_type,
                 sender=self._wallet.address,
             )
+        expected = [
+            ("DataRegistered", {"dataHash": swarm_hash, "owner": self._wallet.address})
+        ]
+        if storage_ref:
+            expected.append(
+                (
+                    "StorageRefLinked",
+                    {"dataHash": swarm_hash, "storageRef": storage_ref},
+                )
+            )
         try:
-            receipt = self._send_transaction(tx)
+            receipt = self._send_transaction(tx, expected)
         except ChainTransactionError as e:
             # Detect "already registered" revert that the pre-check missed
             # (can happen when public RPC serves stale reads)
@@ -439,7 +483,9 @@ class ChainClient:
             actual_owner=owner,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx, [("DataRegistered", {"dataHash": swarm_hash, "owner": owner})]
+        )
 
         return AnchorResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -474,7 +520,9 @@ class ChainClient:
             data_types=data_types,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx, [("DataRegistered", {"dataHash": h}) for h in swarm_hashes]
+        )
 
         return AnchorResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -569,7 +617,15 @@ class ChainClient:
             description=description,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx,
+            [
+                (
+                    "DataTransformed",
+                    {"originalDataHash": original_hash, "newDataHash": new_hash},
+                )
+            ],
+        )
 
         return TransformResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -601,7 +657,15 @@ class ChainClient:
             data_hash=swarm_hash,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx,
+            [
+                (
+                    "DataAccessed",
+                    {"dataHash": swarm_hash, "accessor": self._wallet.address},
+                )
+            ],
+        )
 
         return AccessResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -632,7 +696,9 @@ class ChainClient:
             data_hashes=swarm_hashes,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx, [("DataAccessed", {"dataHash": h}) for h in swarm_hashes]
+        )
 
         return AccessResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -668,7 +734,9 @@ class ChainClient:
             status=status,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx, [("DataStatusChanged", {"dataHash": swarm_hash})]
+        )
 
         return AnchorResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -703,7 +771,9 @@ class ChainClient:
             statuses=statuses,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx, [("DataStatusChanged", {"dataHash": h}) for h in swarm_hashes]
+        )
 
         return AnchorResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -738,7 +808,15 @@ class ChainClient:
             new_owner=new_owner,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx,
+            [
+                (
+                    "DataOwnershipTransferred",
+                    {"dataHash": swarm_hash, "newOwner": new_owner},
+                )
+            ],
+        )
 
         return AnchorResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -774,7 +852,15 @@ class ChainClient:
             authorized=authorized,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx,
+            [
+                (
+                    "DelegateAuthorized",
+                    {"owner": self._wallet.address, "delegate": delegate},
+                )
+            ],
+        )
 
         return AnchorResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -826,7 +912,15 @@ class ChainClient:
             sender=self._wallet.address,
         )
         try:
-            receipt = self._send_transaction(tx)
+            receipt = self._send_transaction(
+                tx,
+                [
+                    (
+                        "StorageRefLinked",
+                        {"dataHash": data_hash, "storageRef": storage_ref},
+                    )
+                ],
+            )
         except ChainTransactionError as e:
             if "already set" in str(e).lower() or "storage ref" in str(e).lower():
                 raise StorageRefAlreadySetError(
@@ -910,7 +1004,9 @@ class ChainClient:
             new_data_type=new_data_type,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx, [("DataMerged", {"newDataHash": new_hash})]
+        )
 
         return MergeTransformResult(
             tx_hash=receipt["transactionHash"].hex(),

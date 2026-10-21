@@ -40,6 +40,9 @@ gateway_client = SwarmGatewayClient()
 # Chain client (initialized when chain_enabled=true and dependencies available)
 chain_client = None
 CHAIN_AVAILABLE = False
+# Why writes are disabled although a wallet is configured (e.g. no contract
+# code at the configured address). Reported by the write tools.
+_chain_init_error: Optional[str] = None
 
 
 def _parse_rpc_fallbacks():
@@ -78,6 +81,33 @@ def _chain_reader():
     return _read_only_client
 
 
+def _verify_write_contract(client):
+    """
+    Start-up check that the configured address holds the DataProvenance
+    contract.
+
+    Returns:
+        ``(client, None)`` when the check passes or cannot run yet (RPC
+        unreachable: it runs again before the first transaction), or
+        ``(None, reason)`` when the address has no DataProvenance code — a
+        transaction there would spend gas and record nothing.
+    """
+    from .chain.exceptions import ChainConfigurationError
+
+    try:
+        client.verify_contract()
+    except ChainConfigurationError as e:
+        logger.error("Chain writes disabled: %s", e)
+        return None, str(e)
+    except Exception as e:
+        logger.warning(
+            "Could not verify the contract at start-up (%s); it is checked "
+            "again before the first transaction",
+            e,
+        )
+    return client, None
+
+
 if settings.chain_enabled:
     try:
         from .chain import CHAIN_AVAILABLE as _chain_avail, ChainClient
@@ -98,6 +128,7 @@ if settings.chain_enabled:
                 chain_client.chain,
                 chain_client.contract_address,
             )
+            chain_client, _chain_init_error = _verify_write_contract(chain_client)
         else:
             logger.warning(
                 "Chain enabled but blockchain dependencies not available. "
@@ -405,6 +436,13 @@ def _format_hints(next_tool: str, related: List[str]) -> str:
     if related:
         lines += f"\n_related: {', '.join(related)}"
     return lines
+
+
+def _chain_init_error_prefix() -> str:
+    """Start-up reason that write tools are disabled, if any."""
+    if _chain_init_error:
+        return f"Chain writes are disabled: {_chain_init_error}\n\n"
+    return ""
 
 
 def _format_error(
@@ -2472,7 +2510,8 @@ async def handle_chain_balance(arguments: Dict[str, Any]) -> CallToolResult:
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "chain_balance requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                        _chain_init_error_prefix()
+                        + "chain_balance requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
                         "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
                         "work without a wallet.",
                         retryable=False,
@@ -2622,7 +2661,8 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "anchor_hash requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                        _chain_init_error_prefix()
+                        + "anchor_hash requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
                         "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
                         "work without a wallet.",
                         retryable=False,
@@ -3066,7 +3106,8 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "record_transform requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                        _chain_init_error_prefix()
+                        + "record_transform requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
                         "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
                         "work without a wallet.",
                         retryable=False,
@@ -3303,7 +3344,8 @@ async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolRe
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "record_merge_transform requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                        _chain_init_error_prefix()
+                        + "record_merge_transform requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
                         "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
                         "work without a wallet.",
                         retryable=False,
@@ -3645,7 +3687,8 @@ async def handle_set_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "set_storage_ref requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                        _chain_init_error_prefix()
+                        + "set_storage_ref requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
                         "Read-only chain tools (verify_hash, get_provenance, lookup_by_storage_ref, chain_health) "
                         "work without a wallet.",
                         retryable=False,

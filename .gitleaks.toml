@@ -6,13 +6,23 @@ useDefault = true
 # The default generic rule misses an Ethereum private key assigned to a short
 # name such as `pk = "0x..."` or `SIGNER=0x...`. Flag a 0x-prefixed 64-hex
 # value only when it is assigned to a key-like name: bare 64-hex values are
-# also transaction hashes, batch IDs and Swarm references.
+# also transaction hashes, batch IDs and Swarm references. Names that merely
+# contain a key-like word (secretHash, signerAddress) are flagged too; that
+# fails safe.
 [[rules]]
 id = "hex-private-key-assignment"
 description = "0x-prefixed 64-hex value assigned to a key-like name"
-regex = '''(?i)(?:\b[a-z0-9_.-]*?(?:private[_-]?key|priv[_-]?key|signer|wallet[_-]?key|secret|mnemonic)[a-z0-9_.-]*|(?:\b|[a-z0-9]*[_.-])pk(?:[_.-][a-z0-9_.-]*)?)["'`]?\s*(?:=>|:=|[:=])\s*["'`]?(0x[0-9a-f]{64})\b'''
+regex = '''(?i)(?:\b[a-z0-9_.-]*?(?:private[_-]?key|priv[_-]?key|signer|wallet[_-]?key|secret|mnemonic)[a-z0-9_.-]*|(?:\b|[a-z0-9]*[_.-])(?:pk|sk)(?:[_.-][a-z0-9_.-]*)?)["'`]?\s*(?:=>|:=|[:=])\s*["'`]?(0x[0-9a-f]{64})\b'''
 secretGroup = 1
-keywords = ["private", "priv", "pk", "signer", "wallet", "secret", "mnemonic"]
+keywords = ["private", "priv", "pk", "sk", "signer", "wallet", "secret", "mnemonic"]
+
+# The same kind of value passed straight to a key-to-account function.
+[[rules]]
+id = "hex-private-key-call"
+description = "0x-prefixed 64-hex literal passed to a private-key function"
+regex = '''(?i)\b(?:privateKeyToAccount|fromPrivateKey|from_key)\s*\(\s*["'`](0x[0-9a-f]{64})\b'''
+secretGroup = 1
+keywords = ["privatekeytoaccount", "fromprivatekey", "from_key"]
 
 # Hardhat/Anvil accounts #0 and #1. These private keys are published in the
 # Hardhat and Foundry docs and are used as test fixtures. The allowlist applies

@@ -163,6 +163,11 @@ Blockchain dependencies (web3, eth-account) are included in the default install.
 - `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set)
 - `CHAIN_EXPLORER_URL`: Custom block explorer URL (uses chain preset if not set)
 - `CHAIN_GAS_LIMIT`: Explicit gas limit for chain transactions (skips estimation if set)
+- `CHAIN_MAX_FEE_GWEI`: Fee cap per gas (`maxFeePerGas`). Fee fields are set explicitly and a write is refused when the current fee is above the cap (default: `0.5` on mainnet, `10` on testnets)
+- `CHAIN_SESSION_BUDGET_ETH`: Worst-case gas spend allowed per server session; each transaction reserves `gas limit x max fee` and is charged its actual cost once mined (default: `0.002` on mainnet, `0.05` on testnets)
+- `CHAIN_MAX_TX_PER_SESSION`: Chain transactions allowed per server session (default: `20` on mainnet, `500` on testnets)
+- `CHAIN_REQUIRE_CONFIRM`: Require `confirm: true` on gas-spending tools; without it they send nothing and return the fee cap and remaining budget (default: mainnet only — any chain id other than Base Sepolia, Sepolia, Hardhat/Anvil or Ganache counts as mainnet)
+- `MAX_STAMP_DURATION_HOURS`: Maximum `duration_hours` for `purchase_stamp` / `extend_stamp` (default: `8760`)
 
 ### Settings Management
 The `config.py` module uses Pydantic Settings for type-safe configuration with automatic environment variable loading and validation.
@@ -174,6 +179,7 @@ The `config.py` module uses Pydantic Settings for type-safe configuration with a
 - Proper MCP error responses with structured error information
 - Request timeout handling and retry logic in gateway client
 - RPC failover: public `ChainClient` methods are wrapped in `@_rpc_failover` — on a transport error they switch to the next healthy RPC, rebind the contract, and re-run. Never re-runs once `send_raw_transaction` was attempted (`ChainTransactionError.broadcast`). With no usable fallback they raise `ChainConnectionError` (reported `retryable: true`)
+- Spending limits (`chain/spend.py`, `SpendGuard`): `ChainClient._send_transaction` sets explicit fee fields within `CHAIN_MAX_FEE_GWEI` and reserves the worst-case cost against the session budget and transaction count before signing; a refusal raises `ChainSpendLimitError` (never failed over, reported `retryable: false`). Gas-spending tools take `confirm`; when confirmation is required (mainnet by default) a call without `confirm: true` returns a quote and sends nothing. All tools carry MCP `ToolAnnotations` (`TOOL_ANNOTATIONS` in `server.py`); tools that spend funds are marked destructive and non-idempotent
 - Chain-specific error handling: insufficient funds detection with faucet/bridge guidance, "already registered" revert catch, duplicate transformation detection via state read (v2) or event cache (v1), proactive balance warnings in health_check
 
 ### Agent Guidance (MCP Design Guidelines)

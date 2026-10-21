@@ -19,6 +19,7 @@ from .exceptions import (
     ChainConfigurationError,
     ChainConnectionError,
     ChainError,
+    ChainSpendLimitError,
     ChainTransactionError,
     DataAlreadyRegisteredError,
     DataNotRegisteredError,
@@ -122,6 +123,7 @@ class ChainClient:
     """
 
     _contract_web3 = None  # the Web3 instance _contract was built on
+    _spend = None  # SpendGuard; built from the chain id when first needed
 
     def __init__(
         self,
@@ -135,6 +137,9 @@ class ChainClient:
         gas_limit: Optional[int] = None,
         rpc_fallbacks: Optional[List[str]] = None,
         read_only: bool = False,
+        max_fee_gwei: Optional[float] = None,
+        session_budget_eth: Optional[float] = None,
+        max_tx_per_session: Optional[int] = None,
     ):
         """
         Initialize the chain client.
@@ -151,6 +156,11 @@ class ChainClient:
             rpc_fallbacks: Fallback RPC URLs tried in order on failure.
             read_only: Skip wallet loading. Read methods work as usual; write
                 methods raise ChainConfigurationError.
+            max_fee_gwei: Fee cap (maxFeePerGas). None uses the chain default.
+            session_budget_eth: Worst-case spend allowed per session. None
+                uses the chain default.
+            max_tx_per_session: Transactions allowed per session. None uses
+                the chain default.
 
         Raises:
             ChainConfigurationError: If dependencies missing or config invalid.
@@ -180,6 +190,14 @@ class ChainClient:
         self._contract_web3 = self._provider.web3
         self._gas_limit_multiplier = gas_limit_multiplier
         self._gas_limit = gas_limit
+        from .spend import SpendGuard
+
+        self._spend = SpendGuard(
+            self._provider.chain_id,
+            max_fee_gwei=max_fee_gwei,
+            budget_eth=session_budget_eth,
+            max_txs=max_tx_per_session,
+        )
 
     @property
     def address(self) -> str:
@@ -195,6 +213,32 @@ class ChainClient:
     def contract_address(self) -> str:
         """DataProvenance contract address."""
         return self._provider.contract_address
+
+    @property
+    def spend(self):
+        """The SpendGuard enforcing the fee cap, budget and tx count."""
+        if self._spend is None:
+            from .spend import SpendGuard
+
+            self._spend = SpendGuard(self._provider.chain_id)
+        return self._spend
+
+    def fee_quote(self) -> dict:
+        """
+        Current fee figures and spend limits, for a confirmation prompt.
+
+        Read-only. ``fee_error`` is set instead of the fee figure when the
+        current fee is above the cap or could not be read.
+        """
+        quote = dict(self.spend.summary())
+        try:
+            _, max_fee = self.spend.fee_fields(self._provider.web3)
+            quote["max_fee_per_gas_gwei"] = max_fee / 10**9
+            if self._gas_limit is not None:
+                quote["max_cost_per_tx_eth"] = self._gas_limit * max_fee / 10**18
+        except Exception as e:
+            quote["fee_error"] = str(e)
+        return quote
 
     # --- Internal helpers ---
 
@@ -273,8 +317,20 @@ class ChainClient:
                 tx["gas"] = int(estimated_gas * self._gas_limit_multiplier)
                 logger.debug("Estimated gas: %d, limit: %d", estimated_gas, tx["gas"])
 
+            # Explicit fee fields within the cap (replacing whatever the RPC
+            # suggested when the tx was built), then reserve the worst case.
+            fee_fields, max_fee = self.spend.fee_fields(web3)
+            for key in ("gasPrice", "maxFeePerGas", "maxPriorityFeePerGas"):
+                tx.pop(key, None)
+            tx.update(fee_fields)
+            reserved = self.spend.reserve(int(tx["gas"]) * max_fee)
+
             # Sign and send
-            raw_tx = self._wallet.sign_transaction(tx)
+            try:
+                raw_tx = self._wallet.sign_transaction(tx)
+            except Exception:
+                self.spend.release(reserved)
+                raise
             broadcast = True
             tx_hash = web3.eth.send_raw_transaction(raw_tx)
 
@@ -282,6 +338,7 @@ class ChainClient:
 
             # Wait for receipt
             receipt = web3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+            self.spend.settle(reserved, receipt)
 
             if receipt["status"] != 1:
                 raise ChainTransactionError(
@@ -298,7 +355,7 @@ class ChainClient:
 
             return receipt
 
-        except ChainTransactionError:
+        except (ChainTransactionError, ChainSpendLimitError):
             raise
         except Exception as e:
             tx_hash_str = None

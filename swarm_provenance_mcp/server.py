@@ -24,6 +24,7 @@ from mcp.types import (
     PromptArgument,
     PromptMessage,
     GetPromptResult,
+    ToolAnnotations,
 )
 from requests.exceptions import RequestException
 
@@ -92,6 +93,9 @@ if settings.chain_enabled:
                 explorer_url=settings.chain_explorer_url,
                 gas_limit=settings.chain_gas_limit,
                 rpc_fallbacks=_parse_rpc_fallbacks(),
+                max_fee_gwei=settings.chain_max_fee_gwei,
+                session_budget_eth=settings.chain_session_budget_eth,
+                max_tx_per_session=settings.chain_max_tx_per_session,
             )
             logger.info(
                 "Chain client initialized: chain=%s contract=%s",
@@ -286,6 +290,11 @@ def validate_stamp_duration_hours(duration_hours: int) -> None:
     if duration_hours < 24:
         raise ValueError(
             f"Stamp duration must be at least 24 hours, got: {duration_hours}"
+        )
+    if duration_hours > settings.max_stamp_duration_hours:
+        raise ValueError(
+            f"Stamp duration must be at most {settings.max_stamp_duration_hours} "
+            f"hours (MAX_STAMP_DURATION_HOURS), got: {duration_hours}"
         )
 
 
@@ -771,6 +780,110 @@ def _format_funding_guidance(address: str, balance_wei: int, chain: str) -> str:
     return msg
 
 
+# MCP tool annotations (hints for clients deciding whether to ask the user).
+# Tools that spend funds (gas from the chain wallet, or the gateway operator's
+# BZZ) are marked destructive and non-idempotent: the spend is irreversible
+# and a repeated call can spend again, so clients should not auto-approve or
+# auto-retry them.
+_READ = ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+)
+_SPEND = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True
+)
+TOOL_ANNOTATIONS: Dict[str, ToolAnnotations] = {
+    # Gateway
+    "purchase_stamp": _SPEND,
+    "extend_stamp": _SPEND,
+    "upload_data": ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+    "get_stamp_status": _READ,
+    "list_stamps": _READ,
+    "download_data": _READ,
+    "check_stamp_health": _READ,
+    "get_wallet_info": _READ,
+    "get_notary_info": _READ,
+    "health_check": _READ,
+    # Chain
+    "chain_balance": _READ,
+    "chain_health": _READ,
+    "verify_hash": _READ,
+    "get_provenance": _READ,
+    "get_provenance_chain": _READ,
+    "lookup_by_storage_ref": _READ,
+    "anchor_hash": _SPEND,
+    "record_transform": _SPEND,
+    "record_merge_transform": _SPEND,
+    "set_storage_ref": _SPEND,
+}
+
+# Chain tools that send transactions; they take a `confirm` argument.
+SPENDING_CHAIN_TOOLS = (
+    "anchor_hash",
+    "record_transform",
+    "record_merge_transform",
+    "set_storage_ref",
+)
+
+CONFIRM_PROPERTY = {
+    "type": "boolean",
+    "description": (
+        "Set to true to send the transaction. When confirmation is required "
+        "(mainnet by default) a call without it sends nothing and returns the "
+        "fee cap and remaining spend budget instead. Get the user's approval "
+        "before confirming."
+    ),
+    "default": False,
+}
+
+
+def _confirm_required() -> bool:
+    """Whether gas-spending tools need confirm=true: CHAIN_REQUIRE_CONFIRM,
+    or by default only on mainnet (any chain id not a known testnet)."""
+    if settings.chain_require_confirm is not None:
+        return settings.chain_require_confirm
+    return bool(chain_client and chain_client.spend.mainnet)
+
+
+async def _spend_confirmation(
+    tool: str, arguments: Dict[str, Any], tx_count: int = 1
+) -> Optional[CallToolResult]:
+    """
+    Two-step confirmation for gas-spending tools.
+
+    Returns None when the call may proceed, otherwise a result that sent
+    nothing and quotes the fee cap and remaining budget.
+    """
+    if arguments.get("confirm") is True or not _confirm_required():
+        return None
+    quote = await asyncio.to_thread(chain_client.fee_quote)
+    text = (
+        f"Confirmation required: nothing was sent.\n\n"
+        f"   {tool} sends {tx_count} transaction(s) paying gas from wallet "
+        f"{chain_client.address} on {chain_client.chain}.\n"
+        f"   Fee cap: {quote['max_fee_gwei']:g} gwei per gas\n"
+    )
+    if "fee_error" in quote:
+        text += f"   Current fee: {quote['fee_error']}\n"
+    else:
+        text += f"   Max fee per gas now: {quote['max_fee_per_gas_gwei']:.6g} gwei\n"
+    if "max_cost_per_tx_eth" in quote:
+        text += f"   Max cost per transaction: {quote['max_cost_per_tx_eth']:.6g} ETH\n"
+    text += (
+        f"   Session budget left: {quote['remaining_eth']:.6g} of "
+        f"{quote['budget_eth']:g} ETH\n"
+        f"   Transactions left this session: "
+        f"{quote['max_txs'] - quote['txs_sent']} of {quote['max_txs']}\n\n"
+        f"To proceed, get the user's approval, then call {tool} again with the "
+        f"same arguments and confirm: true."
+    )
+    return CallToolResult(content=[TextContent(type="text", text=text)])
+
+
 def create_server() -> Server:
     """Create and configure the MCP server."""
     server = Server(
@@ -794,6 +907,7 @@ def create_server() -> Server:
                             "description": f"Duration in hours — controls TTL (time-to-live). Minimum 24 hours (default: {settings.default_stamp_duration_hours})",
                             "default": settings.default_stamp_duration_hours,
                             "minimum": 24,
+                            "maximum": settings.max_stamp_duration_hours,
                         },
                         "size": {
                             "type": "string",
@@ -851,6 +965,7 @@ def create_server() -> Server:
                             "type": "integer",
                             "description": "Additional duration in hours to add to the stamp's TTL. Minimum 24 hours.",
                             "minimum": 24,
+                            "maximum": settings.max_stamp_duration_hours,
                         },
                     },
                     "required": ["stamp_id", "duration_hours"],
@@ -1137,6 +1252,10 @@ def create_server() -> Server:
                 ]
             )
 
+        for tool in tools:
+            tool.annotations = TOOL_ANNOTATIONS[tool.name]
+            if tool.name in SPENDING_CHAIN_TOOLS:
+                tool.inputSchema["properties"]["confirm"] = CONFIRM_PROPERTY
         return tools
 
     @server.call_tool()
@@ -2648,6 +2767,10 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
         if storage_ref:
             storage_ref = validate_and_clean_reference_hash(storage_ref)
 
+        gate = await _spend_confirmation("anchor_hash", arguments)
+        if gate:
+            return gate
+
         if owner:
             result = await asyncio.to_thread(
                 chain_client.anchor_for, clean_hash, owner, data_type
@@ -3097,6 +3220,12 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
 
         restrict_original = arguments.get("restrict_original", False)
 
+        gate = await _spend_confirmation(
+            "record_transform", arguments, tx_count=2 if restrict_original else 1
+        )
+        if gate:
+            return gate
+
         result = await asyncio.to_thread(
             chain_client.transform, clean_original, clean_new, description
         )
@@ -3339,6 +3468,10 @@ async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolRe
         new_data_type = arguments.get("new_data_type", "merged")
         if len(new_data_type) > 64:
             raise ValueError("new_data_type must be 64 characters or fewer")
+
+        gate = await _spend_confirmation("record_merge_transform", arguments)
+        if gate:
+            return gate
 
         result = await asyncio.to_thread(
             chain_client.merge_transform,
@@ -3666,6 +3799,10 @@ async def handle_set_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
         if not storage_ref:
             raise ValueError("storage_ref is required")
         clean_ref = validate_and_clean_reference_hash(storage_ref)
+
+        gate = await _spend_confirmation("set_storage_ref", arguments)
+        if gate:
+            return gate
 
         result = await asyncio.to_thread(
             chain_client.set_storage_ref, clean_hash, clean_ref

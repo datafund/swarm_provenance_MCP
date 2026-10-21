@@ -134,6 +134,11 @@ Environment variables (set in `.env` file):
 - `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set)
 - `CHAIN_EXPLORER_URL`: Custom block explorer URL (uses chain preset if not set)
 - `CHAIN_GAS_LIMIT`: Explicit gas limit for chain transactions (skips estimation if set)
+- `CHAIN_MAX_FEE_GWEI`: Fee cap per gas (`maxFeePerGas`). Fee fields are set explicitly and a write is refused when the current fee is above the cap (default: `0.5` on mainnet, `10` on testnets)
+- `CHAIN_SESSION_BUDGET_ETH`: Worst-case gas spend allowed per server session; each transaction reserves `gas limit x max fee` and is charged its actual cost once mined (default: `0.002` on mainnet, `0.05` on testnets)
+- `CHAIN_MAX_TX_PER_SESSION`: Chain transactions allowed per server session (default: `20` on mainnet, `500` on testnets)
+- `CHAIN_REQUIRE_CONFIRM`: Require `confirm: true` on gas-spending tools; without it they send nothing and return the fee cap and remaining budget (default: mainnet only — any chain id other than Base Sepolia, Sepolia, Hardhat/Anvil or Ganache counts as mainnet)
+- `MAX_STAMP_DURATION_HOURS`: Maximum `duration_hours` for `purchase_stamp` / `extend_stamp` (default: `8760`)
 
 When chain is enabled, additional tools become available: `chain_balance`, `chain_health`, `anchor_hash`, `verify_hash`, `get_provenance`, `record_transform`, `record_merge_transform`, `get_provenance_chain`, `set_storage_ref`, `lookup_by_storage_ref`. Blockchain dependencies (web3, eth-account) are included in the default install. Read-only tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `lookup_by_storage_ref`, `chain_health`) work without a wallet key; write tools (`anchor_hash`, `record_transform`, `record_merge_transform`, `set_storage_ref`) and `chain_balance` require `PROVENANCE_WALLET_KEY` with a funded wallet.
 

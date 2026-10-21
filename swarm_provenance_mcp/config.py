@@ -98,6 +98,38 @@ class Settings(BaseSettings):
         description="Explicit gas limit for chain transactions (skips estimation if set)",
     )
 
+    # Spending limits for chain writes. Unset means the chain's default: low
+    # on mainnet, looser on testnets (see chain/spend.py).
+    chain_max_fee_gwei: Optional[float] = Field(
+        default=None,
+        env="CHAIN_MAX_FEE_GWEI",
+        description="Fee cap per gas (maxFeePerGas) in gwei; writes above it are refused",
+    )
+
+    chain_session_budget_eth: Optional[float] = Field(
+        default=None,
+        env="CHAIN_SESSION_BUDGET_ETH",
+        description="Worst-case ETH the server may spend on gas per session",
+    )
+
+    chain_max_tx_per_session: Optional[int] = Field(
+        default=None,
+        env="CHAIN_MAX_TX_PER_SESSION",
+        description="Maximum chain transactions per session",
+    )
+
+    chain_require_confirm: Optional[bool] = Field(
+        default=None,
+        env="CHAIN_REQUIRE_CONFIRM",
+        description="Require confirm=true on gas-spending tools (unset: mainnet only)",
+    )
+
+    max_stamp_duration_hours: int = Field(
+        default=8760,
+        env="MAX_STAMP_DURATION_HOURS",
+        description="Maximum duration_hours accepted by purchase_stamp and extend_stamp",
+    )
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

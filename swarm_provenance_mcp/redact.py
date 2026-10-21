@@ -10,12 +10,20 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
-# scheme://authority, then an optional path, query or fragment. The authority
-# stops at "/", "?", "#", whitespace, quotes and brackets; so does the rest,
-# which also leaves out trailing sentence punctuation.
+# scheme://authority, then an optional path, query or fragment.
+# - The scheme is capped at 32 characters, so a long run of word characters
+#   without "://" is not rescanned from every word boundary.
+# - The authority is an optional "user:pass@", then a bracketed IPv6 host with
+#   an optional port, or a name or IPv4 host (with any port) that stops at
+#   "/", "?", "#", whitespace, quotes and brackets.
+# - The rest (path, query, fragment) stops at whitespace, quotes and angle
+#   brackets, and leaves out trailing punctuation and closing parentheses.
+# Every repetition is a single character class, so matching stays linear.
 _URL = re.compile(
-    r"(?P<base>\b[a-zA-Z][a-zA-Z0-9+.-]*://[^/?#\s'\"<>()\[\]]+)"
-    r"(?P<rest>[/?#](?:[^\s'\"<>()\[\]]*[^\s'\"<>()\[\].,;:])?)?"
+    r"(?P<base>\b[a-zA-Z][a-zA-Z0-9+.-]{0,31}://"
+    r"(?:[^/?#\s'\"<>()\[\]@]*@)?"
+    r"(?:\[[0-9A-Za-z:.%_~-]+\](?::[0-9]*)?|[^/?#\s'\"<>()\[\]]+))"
+    r"(?P<rest>[/?#](?:[^\s'\"<>]*[^\s'\"<>.,;:()\[\]])?)?"
 )
 
 # urllib3 errors name the path on its own: "... with url: /v2/<key> (Caused by ...".
@@ -23,7 +31,10 @@ _URL_PATH = re.compile(r"(\bwith url: )\S+")
 
 
 def url_host(url: Any, default: str = "<rpc>") -> str:
-    """The hostname of a URL, or ``default`` if it has none."""
+    """The hostname of a URL, or ``default`` if it has none.
+
+    A bracketed IPv6 host comes back without the brackets (``::1``).
+    """
     try:
         return urlparse(str(url)).hostname or default
     except Exception:

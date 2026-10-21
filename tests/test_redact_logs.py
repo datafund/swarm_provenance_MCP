@@ -34,6 +34,13 @@ FALLBACK_2 = "https://fb2.rpc.test/?apikey=SECRETQ2"
         ("(see 'https://h.io/v2/SECRET')", "(see 'https://h.io')"),
         ("https://h.io", "https://h.io"),
         ("no url: a/b?c", "no url: a/b?c"),
+        # Bracketed IPv6 hosts, with and without a port.
+        ("http://[::1]:8545/v2/SECRETKEY?apikey=Q", "http://[::1]:8545"),
+        ("http://[::1]/v2/SECRETKEY", "http://[::1]"),
+        ("https://u:SECRET@[fe80::1%25eth0]:8545/x", "https://[fe80::1%25eth0]:8545"),
+        # Parentheses inside a path do not end it early.
+        ("https://h.io/v2/KE(SECRET)", "https://h.io)"),
+        ("(see https://h.io/v2/SECRET)", "(see https://h.io)"),
     ],
 )
 def test_redact_urls(text, expected):
@@ -55,8 +62,44 @@ def test_redact_urls_on_requests_connection_error():
     assert "127.0.0.1" in redacted
 
 
+def test_redact_urls_on_http_error_with_ipv6_host():
+    """requests' HTTPError text quotes the full URL after 'for url:'."""
+    response = requests.Response()
+    response.status_code = 503
+    response.reason = "Service Unavailable"
+    response.url = "http://[::1]:8545/v2/SECRETKEY?apikey=SECRETQ"
+    with pytest.raises(requests.exceptions.HTTPError) as info:
+        response.raise_for_status()
+    assert "SECRET" in str(info.value)
+    assert redact_urls(info.value) == (
+        "503 Server Error: Service Unavailable for url: http://[::1]:8545"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "a." * 500_000,
+        "ab+" * 333_333,
+        "a://" * 250_000,
+        "http://" + "@" * 1_000_000,
+        "http://[" + ":" * 1_000_000,
+        "http://h/" + ".(" * 500_000,
+        "http://h/" + "a://" * 250_000,
+    ],
+)
+def test_redact_urls_is_linear_on_long_input(text):
+    import time
+
+    start = time.monotonic()
+    redact_urls(text)
+    assert time.monotonic() - start < 2.0
+
+
 def test_url_host():
     assert url_host(PRIMARY) == "primary.rpc.test"
+    assert url_host("http://[::1]:8545/v2/SECRET") == "::1"
+    assert url_host("http://[::1") == "<rpc>"
     assert url_host("not a url") == "<rpc>"
     assert url_host("not a url", "?") == "?"
 
@@ -127,3 +170,4 @@ def test_client_failover_warning_logs_hosts_only(endpoints, caplog):
     ours = _ours(caplog)
     assert "unavailable" in ours and "retrying on fb1.rpc.test" in ours
     assert "SECRET" not in ours
+

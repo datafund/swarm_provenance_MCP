@@ -25,7 +25,8 @@ Live tests that exercise the full provenance workflow against the real gateway a
 # From repo root
 pip install -e .
 
-# Ensure .env exists with at minimum:
+# Settings come from the environment or the env file at
+# ~/.config/swarm-provenance-mcp/.env (a .env in the repo is not read). At minimum:
 #   SWARM_GATEWAY_URL=https://provenance-gateway.datafund.io
 
 # For chain tests (read-only tests work without wallet):

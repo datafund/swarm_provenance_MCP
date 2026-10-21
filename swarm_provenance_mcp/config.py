@@ -14,6 +14,13 @@ logger = logging.getLogger(__name__)
 ENV_FILE_VAR = "SWARM_PROVENANCE_ENV_FILE"
 CONFIG_DIR_NAME = "swarm-provenance-mcp"
 
+# Where to put a wallet key, for the error that write tools return without one.
+WALLET_KEY_HINT = (
+    "Set PROVENANCE_WALLET_KEY in the MCP client's \"env\" block, or in "
+    f"~/.config/{CONFIG_DIR_NAME}/.env (or the file named by {ENV_FILE_VAR}). "
+    "A .env in the working directory is not read."
+)
+
 
 class Settings(BaseSettings):
     """Configuration settings for the MCP server."""
@@ -162,12 +169,18 @@ def resolve_env_file() -> Optional[Path]:
 
     The file is never taken from the working directory, which belongs to
     whichever program launched the server. It comes from SWARM_PROVENANCE_ENV_FILE
-    when that is set (and must then exist), otherwise from default_env_file()
+    when that is set (and must then be an absolute path to an existing file), otherwise from default_env_file()
     if that file exists.
     """
     explicit = os.environ.get(ENV_FILE_VAR)
     if explicit:
         path = Path(explicit).expanduser()
+        if not path.is_absolute():
+            # A relative path would resolve against the working directory,
+            # which is exactly the location this setting exists to avoid.
+            raise ValueError(
+                f"{ENV_FILE_VAR} must be an absolute path, got {explicit!r}."
+            )
         if not path.is_file():
             raise FileNotFoundError(
                 f"{ENV_FILE_VAR} points to {path}, which is not a file. "

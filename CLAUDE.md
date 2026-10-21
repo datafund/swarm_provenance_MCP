@@ -150,7 +150,7 @@ Blockchain dependencies (web3, eth-account) are included in the default install.
 ## Configuration Management
 
 ### Environment Variables
-Read from the process environment, then an env file. The env file is never taken from the working directory: it is `SWARM_PROVENANCE_ENV_FILE` if set (must exist), else `~/.config/swarm-provenance-mcp/.env` (or under `$XDG_CONFIG_HOME`). Unknown keys are ignored (`extra="ignore"`). pydantic-settings v2 ignores `Field(env=...)`: a variable name that differs from the field name needs `validation_alias`. `tests/test_config_loading.py` checks every documented name.
+Read from the process environment, then an env file. The env file is never taken from the working directory: it is `SWARM_PROVENANCE_ENV_FILE` if set (must be an absolute path to an existing file), else `~/.config/swarm-provenance-mcp/.env` (or under `$XDG_CONFIG_HOME`). Unknown keys are ignored (`extra="ignore"`). pydantic-settings v2 ignores `Field(env=...)`: a variable name that differs from the field name needs `validation_alias`. `tests/test_config_loading.py` checks every documented name.
 - `SWARM_PROVENANCE_ENV_FILE`: Explicit env file path
 - `SWARM_GATEWAY_URL`: Gateway endpoint (default: `https://provenance-gateway.datafund.io`)
 - `DEFAULT_STAMP_DURATION_HOURS`: Default stamp duration in hours, minimum 24 (default: `25`)

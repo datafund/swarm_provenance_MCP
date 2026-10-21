@@ -1,7 +1,10 @@
 """Where settings come from: env file location (#152) and variable names (#153)."""
 
 import logging
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -9,6 +12,7 @@ import pytest
 from swarm_provenance_mcp import config
 from swarm_provenance_mcp.config import (
     ENV_FILE_VAR,
+    WALLET_KEY_HINT,
     Settings,
     default_env_file,
     load_settings,
@@ -115,6 +119,21 @@ class TestEnvFileLocation:
         with pytest.raises(FileNotFoundError, match=ENV_FILE_VAR):
             load_settings()
 
+    @pytest.mark.parametrize("value", [".env", "conf/my.env", "./.env"])
+    def test_relative_explicit_env_file_is_rejected(
+        self, clean_env, monkeypatch, value
+    ):
+        # A relative path would resolve against the working directory.
+        _write(clean_env["workdir"] / value, "PAYMENT_MODE=paid\n")
+        monkeypatch.setenv(ENV_FILE_VAR, value)
+        with pytest.raises(ValueError, match="absolute path"):
+            load_settings()
+
+    def test_home_relative_explicit_env_file_is_accepted(self, clean_env, monkeypatch):
+        _write(clean_env["home"] / "my.env", "PAYMENT_MODE=paid\n")
+        monkeypatch.setenv(ENV_FILE_VAR, "~/my.env")
+        assert load_settings().payment_mode == "paid"
+
     def test_process_environment_beats_env_file(self, clean_env, monkeypatch):
         _write(default_env_file(), "PAYMENT_MODE=from-file\n")
         monkeypatch.setenv("PAYMENT_MODE", "from-env")
@@ -201,3 +220,72 @@ class TestVariableNames:
         assert names, f"no variables found in {doc}"
         unknown = names - set(DOCUMENTED_VARS) - NON_FIELD_VARS
         assert not unknown, f"{doc} documents variables with no test: {unknown}"
+
+
+class TestModuleLevelSettings:
+    """The global `settings` that server.py imports, built in a fresh process."""
+
+    def test_import_ignores_env_file_in_working_directory(self, tmp_path):
+        home = tmp_path / "home"
+        home.mkdir()
+        workdir = tmp_path / "work"
+        workdir.mkdir()
+        _write(
+            workdir / ".env",
+            "SWARM_GATEWAY_URL=https://evil.example\n"
+            "CHAIN_ENABLED=true\n"
+            "PROVENANCE_WALLET_KEY=0x" + "cd" * 32 + "\n"
+            "CHAIN_CONTRACT=0x" + "11" * 20 + "\n"
+            "UNKNOWN_KEY=1\n",
+        )
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in DOCUMENTED_VARS
+            and k not in (ENV_FILE_VAR, "XDG_CONFIG_HOME")
+            and k.upper() not in DOCUMENTED_VARS
+        }
+        env["HOME"] = str(home)
+        env["PYTHONPATH"] = str(REPO_ROOT)
+        code = (
+            "from swarm_provenance_mcp.config import settings as s; "
+            "print(s.swarm_gateway_url, s.chain_enabled, "
+            "s.provenance_wallet_key, s.chain_contract_address)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=workdir,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == [
+            "https://provenance-gateway.datafund.io",
+            "False",
+            "None",
+            "None",
+        ]
+        assert "Ignoring" in result.stderr
+        assert str(workdir / ".env") in result.stderr
+
+
+class TestWalletKeyHint:
+    def test_hint_names_the_places_that_are_read(self):
+        assert "PROVENANCE_WALLET_KEY" in WALLET_KEY_HINT
+        assert '"env" block' in WALLET_KEY_HINT
+        assert "~/.config/swarm-provenance-mcp/.env" in WALLET_KEY_HINT
+        assert ENV_FILE_VAR in WALLET_KEY_HINT
+
+    def test_hint_does_not_send_users_to_a_working_directory_env(self):
+        text = WALLET_KEY_HINT.lower()
+        assert "your .env" not in text
+        assert "in .env" not in text
+        # The only bare ".env" mentions are the config path and the warning.
+        assert "not read" in text
+
+    def test_server_uses_the_shared_hint(self):
+        source = (REPO_ROOT / "swarm_provenance_mcp" / "server.py").read_text()
+        assert "your .env" not in source
+        assert source.count("requires a funded wallet. {WALLET_KEY_HINT}") == 5

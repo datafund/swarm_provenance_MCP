@@ -188,6 +188,7 @@ The `config.py` module uses Pydantic Settings for type-safe configuration with a
 - **Provenance lineage**: `get_provenance_chain` uses state reads on v2 contracts (`getTransformationLinks`/`getTransformationParents`) or `DataTransformed` event logs on v1 contracts for bidirectional traversal from any node. Events are cached in-memory (`chain/event_cache.py`): full scan on first call, incremental scans on subsequent calls (<1s vs ~20s). Also scans `DataMerged` events for merge traversal.
 - **Storage references**: v3+ contracts support bidirectional linking between data hashes and storage references (e.g. Swarm hashes). `anchor_hash` accepts optional `storage_ref`, `set_storage_ref` attaches a ref post-hoc (set-once), `lookup_by_storage_ref` does reverse lookup. Feature detected via `supports_storage_ref()`.
 - Helper functions: `_format_hints()`, `_format_error()`, `_is_retryable_error()`, `_suggest_tool_name()`
+- **Untrusted content** (`untrusted.py`): text anyone can write (Swarm downloads, stamp labels, on-chain `dataType` and transformation descriptions) must never sit bare next to the hints. Multi-line content goes through `fence()` (nonce markers, warning line, 16 KB cap, control/bidi characters escaped); short third-party fields through `quote()` (single line, 200-char cap) plus `QUOTED_NOTE`; gateway free text through `one_line()`. `_format_error()` marks hint-like lines in the message as quoted. Binary downloads are described (size, SHA-256), never dumped.
 
 ### Code Quality
 - Black formatting with 88-character line length

@@ -6,6 +6,7 @@ import requests
 from requests.exceptions import RequestException
 
 from .config import settings
+from .untrusted import MAX_ERROR_DETAIL_CHARS, one_line
 
 
 class SwarmGatewayClient:
@@ -48,7 +49,11 @@ class SwarmGatewayClient:
             elif isinstance(d, str):
                 detail = d
         except Exception:
-            detail = response.text[:200] if response.text else ""
+            detail = response.text or ""
+        # The detail can echo request content or come from a misbehaving
+        # proxy: keep it to one short line so it cannot flood the result or
+        # pass for a hint line.
+        detail = one_line(detail, MAX_ERROR_DETAIL_CHARS)
         try:
             response.raise_for_status()
         except requests.HTTPError as e:

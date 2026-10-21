@@ -30,6 +30,7 @@ from requests.exceptions import RequestException
 
 from .config import settings
 from .gateway_client import SwarmGatewayClient
+from .redact import redact_urls
 from .untrusted import (
     QUOTED_NOTE,
     defang_hint_lines,
@@ -138,14 +139,14 @@ def _verify_write_contract(client):
         client.probe_contract(timeout=STARTUP_CONTRACT_CHECK_TIMEOUT)
     except ChainConfigurationError as e:
         reason = _contract_error_reason(client, e)
-        logger.error("Chain writes disabled: %s", reason)
+        logger.error("Chain writes disabled: %s", redact_urls(reason))
         _unverified_write_client = client
         return None, reason
     except Exception as e:
         logger.warning(
             "Could not verify the contract at start-up (%s); it is checked "
             "again before the first transaction",
-            e,
+            redact_urls(e),
         )
     return client, None
 
@@ -170,7 +171,9 @@ async def _recheck_write_contract() -> None:
         _chain_init_error = _contract_error_reason(client, e)
         return
     except Exception as e:
-        logger.warning("Contract re-check failed (%s); writes stay disabled", e)
+        logger.warning(
+            "Contract re-check failed (%s); writes stay disabled", redact_urls(e)
+        )
         return
     logger.info("Contract found at %s; chain writes enabled", client.contract_address)
     chain_client = client
@@ -210,7 +213,7 @@ if settings.chain_enabled:
         if isinstance(e, ChainIdMismatchError):
             # The RPC is on another chain than CHAIN_NAME: refuse to start
             # rather than serve reads from, or sign for, the wrong network.
-            logger.error("Chain configuration refused: %s", e)
+            logger.error("Chain configuration refused: %s", redact_urls(e))
             raise
         # chain_client stays None but CHAIN_AVAILABLE remains True —
         # read-only tools (verify_hash, get_provenance, etc.) work
@@ -222,7 +225,7 @@ if settings.chain_enabled:
                 settings.chain_name,
             )
         else:
-            logger.warning("Chain client init failed: %s", e)
+            logger.warning("Chain client init failed: %s", redact_urls(e))
 
 
 def _load_skills_content() -> str:
@@ -1442,7 +1445,9 @@ def create_server() -> Server:
                     isError=True,
                 )
         except Exception as e:
-            logger.error(f"Error in tool {name}: {e}", exc_info=True)
+            logger.error(
+                "Error in tool %s: %s", name, redact_urls(e), exc_info=True
+            )
             retryable = _is_retryable_error(e)
             return CallToolResult(
                 content=[

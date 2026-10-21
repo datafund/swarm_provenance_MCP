@@ -16,7 +16,7 @@ CONFIG_DIR_NAME = "swarm-provenance-mcp"
 
 # Where to put a wallet key, for the error that write tools return without one.
 WALLET_KEY_HINT = (
-    "Set PROVENANCE_WALLET_KEY in the MCP client's \"env\" block, or in "
+    'Set PROVENANCE_WALLET_KEY in the MCP client\'s "env" block, or in '
     f"~/.config/{CONFIG_DIR_NAME}/.env (or the file named by {ENV_FILE_VAR}). "
     "A .env in the working directory is not read."
 )

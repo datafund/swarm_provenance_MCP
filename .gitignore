@@ -17,6 +17,13 @@ env/
 
 # Environment variables
 .env
+.env.*
+!.env.example
+
+# Local per-developer settings (may contain credentials)
+.claude/settings.local.json
+.claude/*.local.json
+CLAUDE.local.md
 
 # IDE
 .vscode/

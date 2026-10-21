@@ -1,0 +1,12 @@
+# gitleaks rules for this repository: the default rule set plus a narrow allowlist.
+[extend]
+useDefault = true
+
+# Hardhat/Anvil accounts #0 and #1. These private keys are published in the
+# Hardhat and Foundry docs and are used only as fixtures in tests.
+[[allowlists]]
+description = "Publicly known Hardhat test account keys"
+regexes = [
+  '''ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80''',
+  '''59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d''',
+]

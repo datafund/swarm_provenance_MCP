@@ -185,7 +185,11 @@ class SwarmGatewayClient:
         return _json(response)
 
     def upload_data(
-        self, data: str, stamp_id: str, content_type: str = "application/json", sign: Optional[str] = None
+        self,
+        data: str,
+        stamp_id: str,
+        content_type: str = "application/json",
+        sign: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Upload data to Swarm network.
 

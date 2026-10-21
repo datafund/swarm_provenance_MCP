@@ -380,6 +380,9 @@ COMPANION SERVERS:
 The health_check tool reports gateway connectivity and connection status.
 """.strip().replace("__CHAIN_NETWORK__", _chain_network_text())
 
+# Values accepted for upload_data's sign argument (the schema's enum).
+UPLOAD_SIGN_METHODS = frozenset({"notary"})
+
 # Validation patterns
 STAMP_ID_PATTERN = re.compile(r"^[a-fA-F0-9]{64}$")
 REFERENCE_HASH_PATTERN = re.compile(r"^[a-fA-F0-9]{64}$")
@@ -1123,7 +1126,7 @@ def create_server() -> Server:
                         "sign": {
                             "type": "string",
                             "description": "Signing method for provenance. Use 'notary' to have the gateway cryptographically sign the data at upload time, creating a verifiable proof of upload. Check notary_info first to confirm signing is available. Leave empty for unsigned upload.",
-                            "enum": ["notary"],
+                            "enum": sorted(UPLOAD_SIGN_METHODS),
                         },
                     },
                     "required": ["data", "stamp_id"],
@@ -2102,7 +2105,11 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
         if not stamp_id:
             raise ValueError("Stamp ID cannot be empty")
         content_type = arguments.get("content_type", "application/json")
-        sign = arguments.get("sign")
+        sign = arguments.get("sign") or None
+        if sign is not None and sign not in UPLOAD_SIGN_METHODS:
+            raise ValueError(
+                "sign must be one of: " + ", ".join(sorted(UPLOAD_SIGN_METHODS))
+            )
 
         # Validate inputs
         validate_data_size(data)
@@ -2169,7 +2176,8 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
         if notary_info and isinstance(notary_info, dict):
             signer = notary_info.get("signer") or notary_info.get("signerAddress")
             if signer:
-                response_text += f"\n\n🔐 Notary Signature:\n   Signer: {signer}"
+                # A gateway field: printed on one line and capped.
+                response_text += f"\n\n🔐 Notary Signature:\n   Signer: {_gw(signer)}"
 
         # Add validation warning if applicable
         if stamp_validation_failed:

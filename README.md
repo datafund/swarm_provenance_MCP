@@ -71,8 +71,9 @@ pip install -e .
 
 4. Configure environment variables:
 ```bash
-cp .env.example .env
-# Edit .env to configure your gateway URL and defaults
+mkdir -p ~/.config/swarm-provenance-mcp
+cp .env.example ~/.config/swarm-provenance-mcp/.env
+# Edit that file to configure your gateway URL and defaults
 ```
 
 ### Docker
@@ -117,7 +118,18 @@ docker compose run --rm swarm-provenance-mcp
 
 ## Configuration
 
-Environment variables (set in `.env` file):
+Settings come from environment variables, or from an env file. The env file is
+**never** read from the working directory (whichever program launches the server
+controls that). It is read from, in order:
+
+1. the path in `SWARM_PROVENANCE_ENV_FILE`, if set (start-up fails if that file does not exist);
+2. otherwise `~/.config/swarm-provenance-mcp/.env` (or `$XDG_CONFIG_HOME/swarm-provenance-mcp/.env`), if it exists.
+
+Real environment variables (for example an MCP client's `"env"` block) override the env file.
+Unknown keys in the env file are ignored. If a `.env` in the working directory is found and
+ignored, the server logs a warning at start-up.
+
+- `SWARM_PROVENANCE_ENV_FILE`: Explicit path of the env file to load (see above)
 
 - `SWARM_GATEWAY_URL`: URL of the swarm_connect FastAPI gateway (default: `https://provenance-gateway.datafund.io`)
 - `DEFAULT_STAMP_DURATION_HOURS`: Default stamp duration in hours, minimum 24 (default: `25`)
@@ -131,7 +143,7 @@ Environment variables (set in `.env` file):
 - `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x prefix)
 - `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set)
 - `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs, tried in order after `CHAIN_RPC_URL`
-- `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set)
+- `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set). `CHAIN_CONTRACT_ADDRESS` is accepted too; `CHAIN_CONTRACT` wins if both are set
 - `CHAIN_EXPLORER_URL`: Custom block explorer URL (uses chain preset if not set)
 - `CHAIN_GAS_LIMIT`: Explicit gas limit for chain transactions (skips estimation if set)
 
@@ -155,7 +167,7 @@ You can also run your own gateway instance for:
 To use a self-hosted gateway:
 1. Clone the gateway repository: `git clone https://github.com/datafund/swarm_connect`
 2. Follow the setup instructions in that repository
-3. Update your `.env` file: `SWARM_GATEWAY_URL=http://localhost:8000`
+3. Set `SWARM_GATEWAY_URL=http://localhost:8000` in your env file (`~/.config/swarm-provenance-mcp/.env`) or environment
 
 ## Usage
 
@@ -657,8 +669,9 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -e .
 
 # Configure environment variables
-cp .env.example .env
-# Edit .env file if you need to customize gateway URL or defaults
+mkdir -p ~/.config/swarm-provenance-mcp
+cp .env.example ~/.config/swarm-provenance-mcp/.env
+# Edit that file if you need to customize gateway URL or defaults
 ```
 
 3. **Configure MCP Server**: Add to Claude Desktop's configuration file:
@@ -695,7 +708,7 @@ cp .env.example .env
 
 #### With on-chain provenance
 
-To enable blockchain anchoring, add an `"env"` block to the config. You can use this instead of (or alongside) a `.env` file:
+To enable blockchain anchoring, add an `"env"` block to the config. You can use this instead of (or alongside) the env file at `~/.config/swarm-provenance-mcp/.env`:
 
 ```json
 {

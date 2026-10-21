@@ -24,8 +24,9 @@ pip install -e .
 pip install -e .[dev]
 
 # Configure environment
-cp .env.example .env
-# Edit .env to set SWARM_GATEWAY_URL and stamp defaults
+mkdir -p ~/.config/swarm-provenance-mcp
+cp .env.example ~/.config/swarm-provenance-mcp/.env
+# Edit it to set SWARM_GATEWAY_URL and stamp defaults
 ```
 
 ### Development Workflow
@@ -149,6 +150,8 @@ Blockchain dependencies (web3, eth-account) are included in the default install.
 ## Configuration Management
 
 ### Environment Variables
+Read from the process environment, then an env file. The env file is never taken from the working directory: it is `SWARM_PROVENANCE_ENV_FILE` if set (must exist), else `~/.config/swarm-provenance-mcp/.env` (or under `$XDG_CONFIG_HOME`). Unknown keys are ignored (`extra="ignore"`). pydantic-settings v2 ignores `Field(env=...)`: a variable name that differs from the field name needs `validation_alias`. `tests/test_config_loading.py` checks every documented name.
+- `SWARM_PROVENANCE_ENV_FILE`: Explicit env file path
 - `SWARM_GATEWAY_URL`: Gateway endpoint (default: `https://provenance-gateway.datafund.io`)
 - `DEFAULT_STAMP_DURATION_HOURS`: Default stamp duration in hours, minimum 24 (default: `25`)
 - `DEFAULT_STAMP_SIZE`: Default stamp size — `small`, `medium`, or `large` (default: `small`)
@@ -160,7 +163,7 @@ Blockchain dependencies (web3, eth-account) are included in the default install.
 - `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x)
 - `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set)
 - `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs, tried in order after `CHAIN_RPC_URL`
-- `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set)
+- `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set); `CHAIN_CONTRACT_ADDRESS` also accepted, `CHAIN_CONTRACT` wins
 - `CHAIN_EXPLORER_URL`: Custom block explorer URL (uses chain preset if not set)
 - `CHAIN_GAS_LIMIT`: Explicit gas limit for chain transactions (skips estimation if set)
 

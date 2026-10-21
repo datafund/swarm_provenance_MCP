@@ -81,6 +81,8 @@ def _rpc_failover(method):
             attempt_web3 = self._sync_contract()
             attempt_url = self._provider.rpc_url  # for messages only
             try:
+                # Once per endpoint: no read or write on an unchecked chain.
+                self._provider.ensure_chain_id(attempt_web3)
                 return method(self, *args, **kwargs)
             except Exception as e:
                 if not _should_fail_over(e):
@@ -366,6 +368,11 @@ class ChainClient:
 
         web3 = self._provider.web3
         broadcast = False
+
+        # Never sign for a chain other than the configured one: ask the
+        # endpoint this transaction goes to, every time, before signing.
+        # A mismatch raises ChainIdMismatchError (not retried, not failed over).
+        self._provider.check_chain_id(web3)
 
         try:
             # Fill in nonce

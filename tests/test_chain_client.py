@@ -488,13 +488,14 @@ class TestChainProvider:
         assert "503" in str(exc_info.value)
 
     def test_health_check_chain_id_mismatch(self, mock_chain_deps):
-        """Tests health check with wrong chain ID."""
+        """An RPC that moves to another chain after start-up fails the check."""
+        from swarm_provenance_mcp.chain.exceptions import ChainIdMismatchError
         from swarm_provenance_mcp.chain.provider import ChainProvider
 
-        mock_chain_deps["web3_instance"].eth.chain_id = 9999
         provider = ChainProvider(chain="base-sepolia")
+        mock_chain_deps["web3_instance"].eth.chain_id = 9999
 
-        with pytest.raises(ChainConnectionError) as exc_info:
+        with pytest.raises(ChainIdMismatchError) as exc_info:
             provider.health_check()
         assert "Chain ID mismatch" in str(exc_info.value)
 
@@ -573,9 +574,10 @@ class TestChainProvider:
         # The Web3 class is mocked, so verify HTTPProvider was called with timeout
         web3_cls = mock_chain_deps["web3_class"]
         http_provider_calls = web3_cls.HTTPProvider.call_args_list
-        # Last call should have our timeout
-        last_call = http_provider_calls[-1]
-        assert last_call.kwargs.get("request_kwargs") == {"timeout": 15}
+        # The provider's own endpoint gets our timeout (the start-up chain id
+        # check uses a shorter one of its own)
+        timeouts = [c.kwargs.get("request_kwargs") for c in http_provider_calls]
+        assert {"timeout": 15} in timeouts
 
     def test_health_check_tries_fallback(self, mock_chain_deps):
         """Primary fails, fallback succeeds — provider should switch."""

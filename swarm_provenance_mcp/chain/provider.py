@@ -302,6 +302,9 @@ class ChainProvider:
         url = url or self.rpc_url
         actual = web3.eth.chain_id
         if actual != self.chain_id:
+            # A once-verified endpoint that changed chain (caught by a write's
+            # pre-sign check) must be re-checked by the next read too.
+            self._verified.discard(web3)
             raise ChainIdMismatchError(
                 f"Chain ID mismatch: CHAIN_NAME={self.chain} expects chain id "
                 f"{self.chain_id}, but the RPC at {_host(url)} reports {actual}. "

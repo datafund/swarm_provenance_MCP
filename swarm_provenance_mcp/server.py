@@ -2334,6 +2334,12 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     response_text += _chain_id_lines(reader._provider)
                 except Exception as chain_err:
                     response_text += f"\n   Chain error: {chain_err}"
+                    configured = _effective_chain_id(settings.chain_name)
+                    if configured is not None:
+                        response_text += (
+                            f"\n   Chain ID: {configured} "
+                            "(configured, not verified against the RPC)"
+                        )
             else:
                 response_text += "\n\n⛓️  Chain: enabled but dependencies not available"
                 recommendations.append(

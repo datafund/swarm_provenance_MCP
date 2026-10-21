@@ -561,3 +561,49 @@ class TestServerWording:
         assert "Chain ID mismatch" in text
         assert "Chain ID: 84532" in text
         assert "Testnet" in text
+
+
+class TestReviewFollowUps:
+    def test_write_mismatch_evicts_endpoint_so_next_read_rechecks(
+        self, mock_chain_deps
+    ):
+        from swarm_provenance_mcp.chain.client import ChainClient
+
+        client = ChainClient(chain="base-sepolia", rpc_url="https://rpc.example")
+        client.verify(DUMMY_HASH)  # endpoint verified and cached
+        mock_chain_deps["web3_instance"].eth.chain_id = BASE_MAINNET  # switches
+
+        with pytest.raises(ChainIdMismatchError):
+            client.transform(DUMMY_HASH, "b" * 64, "x")
+        call = mock_chain_deps["contract"].functions.getDataRecord.return_value.call
+        call.reset_mock()
+        with pytest.raises(ChainIdMismatchError):
+            client.verify(DUMMY_HASH)
+        call.assert_not_called()
+
+    async def test_read_only_health_check_shows_configured_id_when_reader_fails(
+        self, mock_chain_deps
+    ):
+        from swarm_provenance_mcp import server as srv
+
+        server = srv.create_server()
+        with (
+            patch.object(srv.settings, "chain_enabled", True),
+            patch.object(srv.settings, "chain_name", "base"),
+            patch.object(srv, "gateway_client") as gw,
+            patch.object(srv, "CHAIN_AVAILABLE", True),
+            patch.object(srv, "chain_client", None),
+            patch.object(
+                srv, "_chain_reader", side_effect=ChainIdMismatchError("mismatch")
+            ),
+        ):
+            gw.health_check.return_value = {
+                "status": "healthy",
+                "gateway_url": "http://localhost",
+                "response_time_ms": 1,
+            }
+            gw.list_stamps.return_value = {"stamps": [], "total_count": 0}
+            result = await call_tool_directly(server, "health_check", {})
+        text = result.content[0].text
+        assert "Chain error: mismatch" in text
+        assert "Chain ID: 8453 (configured, not verified against the RPC)" in text

@@ -1125,7 +1125,7 @@ def create_server() -> Server:
                         },
                         "sign": {
                             "type": "string",
-                            "description": "Signing method for provenance. Use 'notary' to have the gateway cryptographically sign the data at upload time, creating a verifiable proof of upload. Check notary_info first to confirm signing is available. Leave empty for unsigned upload.",
+                            "description": "Signing method for provenance. Use 'notary' to have the gateway cryptographically sign the data at upload time, creating a verifiable proof of upload. Check notary_info first to confirm signing is available. Omit it for an unsigned upload.",
                             "enum": sorted(UPLOAD_SIGN_METHODS),
                         },
                     },

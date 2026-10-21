@@ -1,0 +1,7 @@
+# Findings in old history from credentials that were rotated and retired in 2026-10
+# (see issue #150). History was deliberately not rewritten. One fingerprint per line:
+# commit:file:rule:line. A line is listed under each rule that can match it,
+# since gitleaks reports only one of them.
+3ce43d971ce660bca973ad55d2f8a43a03f9561d:.claude/settings.local.json:generic-api-key:84
+3ce43d971ce660bca973ad55d2f8a43a03f9561d:.claude/settings.local.json:generic-api-key:87
+3ce43d971ce660bca973ad55d2f8a43a03f9561d:.claude/settings.local.json:hex-private-key-assignment:87

@@ -30,7 +30,14 @@ from requests.exceptions import RequestException
 
 from .config import settings
 from .gateway_client import SwarmGatewayClient
-from .untrusted import QUOTED_NOTE, defang_hint_lines, fence, one_line, quote
+from .untrusted import (
+    QUOTED_NOTE,
+    defang_hint_lines,
+    fence,
+    flatten,
+    one_line,
+    quote,
+)
 
 
 def _gw(value: Any, max_chars: int = 100) -> str:
@@ -617,6 +624,14 @@ def _format_age(seconds: float) -> str:
     return f"{seconds}s"
 
 
+def _label(label: Any) -> str:
+    """A label as list_stamps prints it: the gateway client flattens it
+    (``gateway_client._clean_strings``), then it is quoted."""
+    from .gateway_client import MAX_GATEWAY_STRING_CHARS
+
+    return quote(flatten(label, MAX_GATEWAY_STRING_CHARS))
+
+
 def _new_batch_hint(label: Optional[str], depth: Optional[int]) -> str:
     """How to spot, in list_stamps output, a batch the unanswered purchase made.
 
@@ -626,7 +641,7 @@ def _new_batch_hint(label: Optional[str], depth: Optional[int]) -> str:
     """
     traits = []
     if label:
-        traits.append(f"'Label: {quote(label)}'")
+        traits.append(f"'Label: {_label(label)}'")
     if depth is not None:
         traits.append(f"'Depth: {depth}'")
     traits.append("a batch ID that was not listed before this call")
@@ -1502,7 +1517,7 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         else:
             response_text += f"   Size: {size}\n"
         if label:
-            response_text += f"   Label: {quote(label)}\n"
+            response_text += f"   Label: {_label(label)}\n"
         response_text += f"\n✅ Stamp ID: `{batch_id}`\n"
 
         propagation_status = result.get("propagationStatus")
@@ -2021,6 +2036,8 @@ def _download_not_found(reference: str) -> CallToolResult:
 
 # Anyone can append on-chain transformations for gas: list at most this many.
 _MAX_LISTED = 50
+# get_provenance_chain stops adding entries once its text passes this size.
+_MAX_CHAIN_TEXT = 32 * 1024
 
 
 def _more_note(items: Sequence[Any], indent: str = "     ") -> str:
@@ -2071,8 +2088,10 @@ def _describe_download(reference: str, data: bytes) -> Tuple[str, Optional[str]]
 
     summary = (
         f"📥 Successfully downloaded {kind} data from `{reference}` "
-        f"({size:,} bytes{shape}). The content follows in the next block, "
-        "fenced as untrusted data."
+        f"({size:,} bytes{shape}).\n"
+        f"   SHA-256 of the original bytes: {hashlib.sha256(data).hexdigest()}\n"
+        "The content follows in the next block, fenced as untrusted data. "
+        "That view is escaped and may be cut, so it is not byte-exact."
     )
     return summary, fence(data, f"Swarm reference {reference}")
 
@@ -3599,6 +3618,13 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
         response_text += f"{'entry' if len(chain_records) == 1 else 'entries'})\n"
 
         for i, record in enumerate(chain_records):
+            if len(response_text) > _MAX_CHAIN_TEXT:
+                response_text += (
+                    f"\n\n   ... output capped: showing {i} of "
+                    f"{len(chain_records)} entries. Use get_provenance on a "
+                    "hash for its full record."
+                )
+                break
             indent = "  " * i
             prefix = "└─ " if i > 0 else ""
 

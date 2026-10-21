@@ -6,7 +6,7 @@ import requests
 from requests.exceptions import RequestException
 
 from .config import settings
-from .untrusted import MAX_ERROR_DETAIL_CHARS, one_line
+from .untrusted import MAX_ERROR_DETAIL_CHARS, flatten, one_line
 
 # Longest gateway string value passed on to the server, in characters.
 MAX_GATEWAY_STRING_CHARS = 1000
@@ -16,11 +16,12 @@ def _clean_strings(value: Any) -> Any:
     """Flatten and cap every string in a decoded gateway JSON body.
 
     The server prints many gateway fields into tool results. Cleaning them
-    here means no field, including ones added later, can carry a newline
-    (and so forge a hint line), hidden characters or a huge value.
+    here means no field, including ones added later, can carry a line break
+    (and so forge a hint line) or a huge value. Hidden characters are left
+    for the printing site (``quote``/``one_line``) to escape, once.
     """
     if isinstance(value, str):
-        return one_line(value, MAX_GATEWAY_STRING_CHARS)
+        return flatten(value, MAX_GATEWAY_STRING_CHARS)
     if isinstance(value, dict):
         return {_clean_strings(k): _clean_strings(v) for k, v in value.items()}
     if isinstance(value, list):

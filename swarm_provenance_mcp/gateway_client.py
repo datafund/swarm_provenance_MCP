@@ -31,12 +31,12 @@ def _clean_strings(value: Any) -> Any:
 
 def _json(response) -> Any:
     """The response body as JSON, with its strings cleaned."""
-    body = response.json()
     try:
-        return _clean_strings(body)
+        return _clean_strings(response.json())
     except RecursionError:
-        # json.loads accepts nesting deeper than the cleaner can walk; such a
-        # body is not a real gateway response.
+        # A body nested too deeply is not a real gateway response. Depending
+        # on the Python version the RecursionError comes from json decoding
+        # (3.10's scanner) or from the cleaner walking the decoded value.
         raise requests.exceptions.InvalidJSONError(
             "Gateway response is nested too deeply to process", response=response
         ) from None

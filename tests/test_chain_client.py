@@ -33,6 +33,18 @@ ZERO_ADDRESS = "0x" + "0" * 40
 UNREGISTERED_RECORD = (DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0)
 
 
+def _deployed_code() -> bytes:
+    from web3 import Web3
+    from swarm_provenance_mcp.chain.contract import REQUIRED_SELECTORS
+
+    return b"\x60\x80" + b"".join(
+        bytes(Web3.keccak(text=s)[:4]) for s in REQUIRED_SELECTORS
+    )
+
+
+DEPLOYED_CODE = _deployed_code()
+
+
 def _http_error(status: int):
     """Build the HTTPError web3's HTTPProvider raises for a non-2xx response."""
     from requests import Response
@@ -78,6 +90,8 @@ def mock_chain_deps():
             "gasUsed": 95_000,
         }
         mock_web3_instance.is_connected.return_value = True
+        # Deployed DataProvenance code: holds the required function selectors.
+        mock_web3_instance.eth.get_code.return_value = DEPLOYED_CODE
 
         # Mock contract
         mock_contract = MagicMock()
@@ -178,13 +192,20 @@ def mock_chain_deps():
             provider_module._Web3 = None
             wallet_module._Account = None
 
-            yield {
-                "account": mock_account,
-                "account_class": mock_account_class,
-                "web3_instance": mock_web3_instance,
-                "web3_class": mock_web3_class,
-                "contract": mock_contract,
-            }
+            # These receipts carry no logs; event checks run against real
+            # receipts in TestWriteRequiresEvent.
+            from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+            with patch.object(
+                DataProvenanceContract, "receipt_has_event", return_value=True
+            ):
+                yield {
+                    "account": mock_account,
+                    "account_class": mock_account_class,
+                    "web3_instance": mock_web3_instance,
+                    "web3_class": mock_web3_class,
+                    "contract": mock_contract,
+                }
 
             # Reset lazy import globals so real modules are re-imported next time
             provider_module._Web3 = None
@@ -689,6 +710,7 @@ def endpoints(mock_chain_deps):
         w3.eth.get_transaction_count.return_value = 0
         w3.eth.estimate_gas.return_value = 100_000
         w3.eth.send_raw_transaction.return_value = DUMMY_TX_HASH_BYTES
+        w3.eth.get_code.return_value = DEPLOYED_CODE
         w3.eth.wait_for_transaction_receipt.return_value = (
             healthy.eth.wait_for_transaction_receipt.return_value
         )
@@ -699,6 +721,7 @@ def endpoints(mock_chain_deps):
         w3 = by_url[url]
         type(w3.eth).gas_price = PropertyMock(side_effect=_http_error(503))
         w3.eth.get_transaction_count.side_effect = _http_error(503)
+        w3.eth.get_code.side_effect = _http_error(503)
         broken = MagicMock()
         for fn in (
             "getDataRecord",

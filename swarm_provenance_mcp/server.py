@@ -40,6 +40,9 @@ gateway_client = SwarmGatewayClient()
 # Chain client (initialized when chain_enabled=true and dependencies available)
 chain_client = None
 CHAIN_AVAILABLE = False
+# Why writes are disabled although a wallet is configured (e.g. no contract
+# code at the configured address). Reported by the write tools.
+_chain_init_error: Optional[str] = None
 
 
 def _parse_rpc_fallbacks():
@@ -78,6 +81,88 @@ def _chain_reader():
     return _read_only_client
 
 
+# Budget per RPC endpoint for the start-up contract check and its re-check
+# while writes are held back, in seconds.
+STARTUP_CONTRACT_CHECK_TIMEOUT = 5.0
+
+# Wallet client held back because the start-up check found no DataProvenance
+# code. Re-checked before each write (see _recheck_write_contract), so a node
+# that briefly answered "no code" does not disable writes until restart.
+_unverified_write_client = None
+
+
+def _contract_error_reason(client, error) -> str:
+    """Reason that writes are disabled, naming the address and chain."""
+    try:
+        chain = f"{client.chain}, chain id {client._provider.chain_id}"
+    except Exception:
+        chain = settings.chain_name
+    return f"{error} Chain: {chain}."
+
+
+def _verify_write_contract(client):
+    """
+    Start-up check that the configured address holds the DataProvenance
+    contract.
+
+    Uses a short per-endpoint timeout and tries the fallback RPCs, so a hung
+    primary cannot stall start-up.
+
+    Returns:
+        ``(client, None)`` when the check passes or cannot run yet (no RPC
+        answered: it runs again before the first transaction), or
+        ``(None, reason)`` when the address has no DataProvenance code — a
+        transaction there would spend gas and record nothing. The client is
+        then kept in ``_unverified_write_client`` and re-checked before the
+        next write.
+    """
+    global _unverified_write_client
+    from .chain.exceptions import ChainConfigurationError
+
+    try:
+        client.probe_contract(timeout=STARTUP_CONTRACT_CHECK_TIMEOUT)
+    except ChainConfigurationError as e:
+        reason = _contract_error_reason(client, e)
+        logger.error("Chain writes disabled: %s", reason)
+        _unverified_write_client = client
+        return None, reason
+    except Exception as e:
+        logger.warning(
+            "Could not verify the contract at start-up (%s); it is checked "
+            "again before the first transaction",
+            e,
+        )
+    return client, None
+
+
+async def _recheck_write_contract() -> None:
+    """
+    Re-run the contract check for a wallet client that the start-up check
+    held back. On success writes are enabled again; otherwise the reason is
+    refreshed and writes stay disabled.
+    """
+    global chain_client, _chain_init_error, _unverified_write_client
+    client = _unverified_write_client
+    if chain_client is not None or client is None:
+        return
+    from .chain.exceptions import ChainConfigurationError
+
+    try:
+        await asyncio.to_thread(
+            client.probe_contract, timeout=STARTUP_CONTRACT_CHECK_TIMEOUT
+        )
+    except ChainConfigurationError as e:
+        _chain_init_error = _contract_error_reason(client, e)
+        return
+    except Exception as e:
+        logger.warning("Contract re-check failed (%s); writes stay disabled", e)
+        return
+    logger.info("Contract found at %s; chain writes enabled", client.contract_address)
+    chain_client = client
+    _chain_init_error = None
+    _unverified_write_client = None
+
+
 if settings.chain_enabled:
     try:
         from .chain import CHAIN_AVAILABLE as _chain_avail, ChainClient
@@ -98,6 +183,7 @@ if settings.chain_enabled:
                 chain_client.chain,
                 chain_client.contract_address,
             )
+            chain_client, _chain_init_error = _verify_write_contract(chain_client)
         else:
             logger.warning(
                 "Chain enabled but blockchain dependencies not available. "
@@ -407,6 +493,22 @@ def _format_hints(next_tool: str, related: List[str]) -> str:
     return lines
 
 
+def _writes_disabled_text() -> str:
+    """Why write tools are disabled although a wallet is configured."""
+    return (
+        f"Chain writes are disabled: {_chain_init_error}\n"
+        "Fix CHAIN_CONTRACT or CHAIN_NAME, then restart the server. The "
+        "address is checked again before each write."
+    )
+
+
+def _no_write_client_text(no_wallet_text: str) -> str:
+    """Error text for a write tool without a usable wallet client."""
+    if _chain_init_error:
+        return _writes_disabled_text()
+    return no_wallet_text
+
+
 def _format_error(
     message: str, retryable: bool, next_tool: Optional[str] = None
 ) -> str:
@@ -455,6 +557,41 @@ def _pending_tx_result(e: Exception, check_tool: str) -> CallToolResult:
             )
         ],
         isError=True,
+    )
+
+
+def _restrict_failure_text(e: Exception, transform_tx: str, original: str) -> str:
+    """
+    record_transform succeeded but restricting the original did not: say what
+    is recorded and what the agent should do next, so it does not re-run the
+    transform.
+    """
+    restrict_call = (
+        f"   To restrict the original, the owner wallet calls "
+        f"setDataStatus(0x{original}, 1) on the DataProvenance contract "
+        f'(Python: ChainClient.set_status("{original}", 1)). This server has '
+        "no tool for it.\n"
+    )
+    recorded = (
+        f"   The transformation IS recorded on-chain (tx {transform_tx}). "
+        "Do not re-run record_transform: only the status change "
+    )
+    if _may_be_pending(e):
+        tx = getattr(e, "tx_hash", None) or "unknown"
+        return (
+            "\n\n   ⚠️  Restricting the original was sent, outcome unknown: it "
+            f"may still be pending (tx {tx}).\n" + recorded + "is unconfirmed.\n"
+            "   Do not send the status change again: check the original's Status "
+            "with get_provenance first, and only if it is not RESTRICTED:\n"
+            + restrict_call
+            + "\nretryable: false"
+        )
+    return (
+        f"\n\n   ⚠️  Transform succeeded but failed to restrict original: {e}\n"
+        + recorded
+        + "failed.\n"
+        + restrict_call
+        + "\nretryable: false"
     )
 
 
@@ -2210,6 +2347,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
 
         # Chain anchoring status
         if settings.chain_enabled:
+            await _recheck_write_contract()
             if CHAIN_AVAILABLE and chain_client:
                 try:
                     chain_client.health_check()
@@ -2244,6 +2382,16 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     recommendations.append(
                         "Chain anchoring enabled but RPC unreachable"
                     )
+            elif CHAIN_AVAILABLE and _chain_init_error:
+                # Wallet configured, but the contract check failed
+                response_text += (
+                    f"\n\n⛓️  Chain: {settings.chain_name} (writes disabled)\n   "
+                    + _writes_disabled_text().replace("\n", "\n   ")
+                )
+                recommendations.append(
+                    "Chain writes disabled: no DataProvenance contract at the "
+                    "configured address — fix CHAIN_CONTRACT or CHAIN_NAME"
+                )
             elif CHAIN_AVAILABLE:
                 # Dependencies present but no wallet → read-only mode
                 response_text += (
@@ -2466,15 +2614,18 @@ async def handle_chain_balance(arguments: Dict[str, Any]) -> CallToolResult:
             ],
             isError=True,
         )
+    await _recheck_write_contract()
     if not chain_client:
         return CallToolResult(
             content=[
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "chain_balance requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
-                        "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
-                        "work without a wallet.",
+                        _no_write_client_text(
+                            "chain_balance requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                            "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
+                            "work without a wallet."
+                        ),
                         retryable=False,
                         next_tool="chain_health",
                     ),
@@ -2533,6 +2684,7 @@ async def handle_chain_health(arguments: Dict[str, Any]) -> CallToolResult:
             isError=True,
         )
 
+    await _recheck_write_contract()
     try:
         from .chain.provider import PROBE_METHODS
 
@@ -2570,6 +2722,8 @@ async def handle_chain_health(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"   Probe: {', '.join(PROBE_METHODS)}\n"
         response_text += f"   Contract: {provider.contract_address}\n"
         response_text += f"   RPC: {_mask_rpc_url(provider.rpc_url)}"
+        if _chain_init_error:
+            response_text += "\n   " + _writes_disabled_text().replace("\n", "\n   ")
         response_text += _format_hints("chain_balance", ["health_check"])
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
@@ -2616,15 +2770,18 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
             ],
             isError=True,
         )
+    await _recheck_write_contract()
     if not chain_client:
         return CallToolResult(
             content=[
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "anchor_hash requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
-                        "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
-                        "work without a wallet.",
+                        _no_write_client_text(
+                            "anchor_hash requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                            "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
+                            "work without a wallet."
+                        ),
                         retryable=False,
                         next_tool="chain_health",
                     ),
@@ -3060,15 +3217,18 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
             ],
             isError=True,
         )
+    await _recheck_write_contract()
     if not chain_client:
         return CallToolResult(
             content=[
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "record_transform requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
-                        "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
-                        "work without a wallet.",
+                        _no_write_client_text(
+                            "record_transform requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                            "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
+                            "work without a wallet."
+                        ),
                         retryable=False,
                         next_tool="chain_health",
                     ),
@@ -3113,6 +3273,7 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += f"\n   Explorer: {result.explorer_url}"
 
         # Optionally restrict the original data after transformation
+        restrict_failed = False
         if restrict_original:
             try:
                 await asyncio.to_thread(
@@ -3120,9 +3281,9 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
                 )  # 1 = RESTRICTED
                 response_text += f"\n\n   ⚠️  Original data status set to RESTRICTED"
             except Exception as restrict_err:
-                response_text += (
-                    f"\n\n   ⚠️  Transform succeeded but failed to restrict original: "
-                    f"{str(restrict_err)}"
+                restrict_failed = True
+                response_text += _restrict_failure_text(
+                    restrict_err, result.tx_hash, clean_original
                 )
 
         # Post-tx balance check
@@ -3139,7 +3300,10 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
             "get_provenance", ["download_data", "chain_balance"]
         )
 
-        return CallToolResult(content=[TextContent(type="text", text=response_text)])
+        return CallToolResult(
+            content=[TextContent(type="text", text=response_text)],
+            isError=restrict_failed,
+        )
 
     except ValueError as e:
         return CallToolResult(
@@ -3297,15 +3461,18 @@ async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolRe
             ],
             isError=True,
         )
+    await _recheck_write_contract()
     if not chain_client:
         return CallToolResult(
             content=[
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "record_merge_transform requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
-                        "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
-                        "work without a wallet.",
+                        _no_write_client_text(
+                            "record_merge_transform requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                            "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
+                            "work without a wallet."
+                        ),
                         retryable=False,
                         next_tool="chain_health",
                     ),
@@ -3639,15 +3806,18 @@ async def handle_set_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
             ],
             isError=True,
         )
+    await _recheck_write_contract()
     if not chain_client:
         return CallToolResult(
             content=[
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "set_storage_ref requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
-                        "Read-only chain tools (verify_hash, get_provenance, lookup_by_storage_ref, chain_health) "
-                        "work without a wallet.",
+                        _no_write_client_text(
+                            "set_storage_ref requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                            "Read-only chain tools (verify_hash, get_provenance, lookup_by_storage_ref, chain_health) "
+                            "work without a wallet."
+                        ),
                         retryable=False,
                         next_tool="chain_health",
                     ),
@@ -3967,6 +4137,8 @@ async def main():
             if settings.chain_enabled:
                 if chain_client:
                     logger.info("Chain: %s (wallet connected)", chain_client.chain)
+                elif CHAIN_AVAILABLE and _chain_init_error:
+                    logger.info("Chain: writes disabled — %s", _chain_init_error)
                 elif CHAIN_AVAILABLE:
                     logger.info("Chain: %s (read-only, no wallet)", settings.chain_name)
             await server.run(

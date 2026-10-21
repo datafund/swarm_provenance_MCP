@@ -146,6 +146,38 @@ def _load_abi() -> list:
         ) from e
 
 
+# Functions whose selectors must appear in the deployed bytecode before any
+# transaction is sent. A Solidity dispatcher embeds each external function's
+# 4-byte selector, so an address without the DataProvenance contract (an EOA,
+# an empty address, or an unrelated contract) fails this check.
+REQUIRED_SELECTORS = (
+    "getDataRecord(bytes32)",
+    "registerData(bytes32,string)",
+    "recordTransformation(bytes32,bytes32,string)",
+)
+
+
+try:
+    # Bound at import: some tests replace the web3 module after import.
+    from web3 import Web3 as _Web3
+except ImportError:  # chain dependencies missing; CHAIN_AVAILABLE is False
+    _Web3 = None
+
+
+def _keccak(text: str) -> bytes:
+    return bytes(_Web3.keccak(text=text))
+
+
+def _as_bytes(value) -> bytes:
+    """Bytes from a HexBytes/bytes value or a 0x-prefixed hex string."""
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    if isinstance(value, str):
+        h = value[2:] if value.startswith("0x") else value
+        return bytes.fromhex(h)
+    raise TypeError(f"Unsupported topic value: {type(value).__name__}")
+
+
 class DataProvenanceContract:
     """Wrapper around the DataProvenance smart contract.
 
@@ -1030,6 +1062,87 @@ class DataProvenanceContract:
                 raise
             # Contract may not have DataMerged event (v1)
             return []
+
+    # --- Deployment and receipt checks ---
+
+    def check_deployed(self) -> None:
+        """
+        Require DataProvenance code at the configured address.
+
+        Raises:
+            ChainConfigurationError: If the address has no code, or its code
+                lacks the DataProvenance function selectors.
+            Exception: Whatever the RPC call raised (transport errors are left
+                to the caller's failover handling).
+        """
+        code = bytes(self._web3.eth.get_code(self._address))
+        if not code:
+            raise ChainConfigurationError(
+                f"No contract code at {self._address}: the configured "
+                "DataProvenance contract is not deployed on this chain. "
+                "Check CHAIN_CONTRACT and CHAIN_NAME."
+            )
+        missing = [s for s in REQUIRED_SELECTORS if _keccak(s)[:4] not in code]
+        if missing:
+            raise ChainConfigurationError(
+                f"The contract at {self._address} is not a DataProvenance "
+                f"contract (missing functions: {', '.join(missing)}). "
+                "Check CHAIN_CONTRACT and CHAIN_NAME."
+            )
+
+    def _event_abi(self, event_name: str) -> dict:
+        for entry in self._abi:
+            if entry.get("type") == "event" and entry.get("name") == event_name:
+                return entry
+        raise ChainConfigurationError(f"Event {event_name} not in contract ABI")
+
+    def receipt_has_event(self, receipt, event_name: str, **indexed) -> bool:
+        """
+        Whether a receipt holds ``event_name`` emitted by this contract.
+
+        Args:
+            receipt: Transaction receipt (web3 AttributeDict or dict).
+            event_name: Event name from the ABI, e.g. ``DataRegistered``.
+            **indexed: Values the event's indexed arguments must match, by
+                ABI argument name (bytes32 as hex, address as hex string).
+
+        Returns:
+            True if at least one matching log is present.
+        """
+        entry = self._event_abi(event_name)
+        signature = "{}({})".format(
+            event_name, ",".join(i["type"] for i in entry["inputs"])
+        )
+        topic0 = _keccak(signature)
+
+        wanted = {}
+        indexed_inputs = [i for i in entry["inputs"] if i.get("indexed")]
+        for position, inp in enumerate(indexed_inputs, start=1):
+            if inp["name"] not in indexed:
+                continue
+            value = indexed[inp["name"]]
+            if inp["type"] == "address":
+                wanted[position] = b"\x00" * 12 + _as_bytes(value)
+            elif inp["type"] == "bytes32":
+                wanted[position] = _normalize_hash(value)
+            else:
+                raise ValueError(f"Unsupported indexed type {inp['type']}")
+        unknown = set(indexed) - {i["name"] for i in indexed_inputs}
+        if unknown:
+            raise ValueError(f"{event_name} has no indexed argument {unknown}")
+
+        for log in receipt.get("logs") or []:
+            if str(log.get("address", "")).lower() != self._address.lower():
+                continue
+            topics = [_as_bytes(t) for t in (log.get("topics") or [])]
+            if not topics or topics[0] != topic0:
+                continue
+            if all(
+                position < len(topics) and topics[position] == value
+                for position, value in wanted.items()
+            ):
+                return True
+        return False
 
     # --- Gas estimation ---
 

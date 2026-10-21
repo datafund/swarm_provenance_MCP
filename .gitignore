@@ -42,6 +42,3 @@ docker-compose.override.yml
 # OS
 .DS_Store
 Thumbs.db
-
-# Local per-developer editor settings (may contain credentials)
-.claude/settings.local.json

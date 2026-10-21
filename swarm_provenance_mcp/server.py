@@ -81,7 +81,8 @@ def _chain_reader():
     return _read_only_client
 
 
-# Startup budget per RPC endpoint for the contract check, in seconds.
+# Budget per RPC endpoint for the start-up contract check and its re-check
+# while writes are held back, in seconds.
 STARTUP_CONTRACT_CHECK_TIMEOUT = 5.0
 
 # Wallet client held back because the start-up check found no DataProvenance
@@ -147,7 +148,9 @@ async def _recheck_write_contract() -> None:
     from .chain.exceptions import ChainConfigurationError
 
     try:
-        await asyncio.to_thread(client.check_contract)
+        await asyncio.to_thread(
+            client.probe_contract, timeout=STARTUP_CONTRACT_CHECK_TIMEOUT
+        )
     except ChainConfigurationError as e:
         _chain_init_error = _contract_error_reason(client, e)
         return
@@ -554,6 +557,41 @@ def _pending_tx_result(e: Exception, check_tool: str) -> CallToolResult:
             )
         ],
         isError=True,
+    )
+
+
+def _restrict_failure_text(e: Exception, transform_tx: str, original: str) -> str:
+    """
+    record_transform succeeded but restricting the original did not: say what
+    is recorded and what the agent should do next, so it does not re-run the
+    transform.
+    """
+    restrict_call = (
+        f"   To restrict the original, the owner wallet calls "
+        f"setDataStatus(0x{original}, 1) on the DataProvenance contract "
+        f'(Python: ChainClient.set_status("{original}", 1)). This server has '
+        "no tool for it.\n"
+    )
+    recorded = (
+        f"   The transformation IS recorded on-chain (tx {transform_tx}). "
+        "Do not re-run record_transform: only the status change "
+    )
+    if _may_be_pending(e):
+        tx = getattr(e, "tx_hash", None) or "unknown"
+        return (
+            "\n\n   ⚠️  Restricting the original was sent, outcome unknown: it "
+            f"may still be pending (tx {tx}).\n" + recorded + "is unconfirmed.\n"
+            "   Do not send the status change again: check the original's Status "
+            "with get_provenance first, and only if it is not RESTRICTED:\n"
+            + restrict_call
+            + "\nretryable: false"
+        )
+    return (
+        f"\n\n   ⚠️  Transform succeeded but failed to restrict original: {e}\n"
+        + recorded
+        + "failed.\n"
+        + restrict_call
+        + "\nretryable: false"
     )
 
 
@@ -3244,9 +3282,8 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
                 response_text += f"\n\n   ⚠️  Original data status set to RESTRICTED"
             except Exception as restrict_err:
                 restrict_failed = True
-                response_text += (
-                    f"\n\n   ⚠️  Transform succeeded but failed to restrict original: "
-                    f"{str(restrict_err)}"
+                response_text += _restrict_failure_text(
+                    restrict_err, result.tx_hash, clean_original
                 )
 
         # Post-tx balance check

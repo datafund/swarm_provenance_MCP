@@ -257,23 +257,20 @@ class ChainClient:
         self._contract.check_deployed()
         self._contract_verified = True
 
-    @_rpc_failover
-    def check_contract(self) -> None:
-        """``verify_contract()`` with RPC failover, for use outside a write."""
-        self.verify_contract()
-
     def probe_contract(self, timeout: float = 5.0) -> None:
         """
-        Start-up variant of ``verify_contract()`` that cannot stall start-up.
+        ``verify_contract()`` across all configured RPCs, bounded in time.
 
-        Asks each configured RPC in turn, allowing about ``timeout`` seconds
-        per endpoint (two attempts of ``timeout / 2``), instead of the
-        client's 30 s request timeout. The client stays on its current
-        endpoint; failover for later calls is unchanged.
+        Asks each endpoint in turn (current one first), allowing about
+        ``timeout`` seconds per endpoint (two attempts of ``timeout / 2``)
+        instead of the client's 30 s request timeout. Fallbacks on another
+        chain id are skipped. An endpoint that answers "no code" does not
+        decide alone: the others are asked too, and the client switches to
+        the first endpoint that has the contract code.
 
         Raises:
-            ChainConfigurationError: An endpoint answered and the address
-                holds no DataProvenance code.
+            ChainConfigurationError: Every endpoint that answered reports no
+                DataProvenance code at the address.
             ChainConnectionError: No endpoint answered in time.
         """
         from .contract import DataProvenanceContract
@@ -286,6 +283,7 @@ class ChainClient:
         urls = [provider.rpc_url] + [
             u for u in provider._rpc_urls if u != provider.rpc_url
         ]
+        no_code = None
         last_error = None
         for url in urls:
             try:
@@ -296,17 +294,41 @@ class ChainClient:
                 DataProvenanceContract(
                     web3=web3, contract_address=provider.contract_address
                 ).check_deployed()
-            except ChainConfigurationError:
-                raise
+            except ChainConfigurationError as e:
+                no_code = no_code or e
+                continue
             except Exception as e:
                 last_error = e
                 continue
+            if url != provider.rpc_url:
+                self._use_endpoint(url)
             self._contract_verified = True
             return
+        if no_code is not None:
+            raise no_code
         raise ChainConnectionError(
             f"No RPC endpoint answered the contract check: {last_error}",
             rpc_url=provider.rpc_url,
         )
+
+    def _use_endpoint(self, url: str) -> None:
+        """Switch the provider to ``url`` (normal timeout) and rebind."""
+        from .provider import SWITCH_LOCK, _http_provider, _import_web3
+
+        Web3 = _import_web3()
+        provider = self._provider
+        with SWITCH_LOCK:
+            if provider.rpc_url != url:
+                logger.info(
+                    "RPC %s has the contract code; switching from %s",
+                    url,
+                    provider.rpc_url,
+                )
+                provider._web3 = Web3(
+                    _http_provider(Web3, url, provider._request_timeout)
+                )
+                provider.rpc_url = url
+        self._sync_contract()
 
     def _send_transaction(self, tx: dict, expected_events=()) -> dict:
         """

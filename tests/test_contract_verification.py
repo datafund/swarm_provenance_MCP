@@ -439,6 +439,7 @@ class TestStartupCheck:
         assert (result, reason) == (client, None)
         assert client._contract_verified
         assert "eth_getCode" in fake_rpc.calls  # the fallback answered
+        assert client._provider.rpc_url == fake_rpc.url  # off the hung primary
         # Default budget is 5 s for the hung primary; 30 s timeouts took 60 s.
         assert elapsed < server.STARTUP_CONTRACT_CHECK_TIMEOUT + 3
 
@@ -452,6 +453,42 @@ class TestStartupCheck:
             client = _real_client(monkeypatch, hanging_rpc, [other.url])
             assert server._verify_write_contract(client) == (client, None)
             assert "eth_getCode" not in other.calls
+        finally:
+            other.close()
+
+    def test_fallback_with_code_outvotes_primary_without(
+        self, monkeypatch, fake_rpc, startup_state
+    ):
+        """A primary that keeps answering "no code" must not disable writes
+        when a fallback on the same chain has the contract."""
+        server = startup_state
+        fake_rpc.code = b""
+        good = _FakeRpc()
+        try:
+            client = _real_client(monkeypatch, fake_rpc.url, [good.url])
+            assert server._verify_write_contract(client) == (client, None)
+            assert client._contract_verified
+            assert client._provider.rpc_url == good.url  # switched to it
+        finally:
+            good.close()
+
+    async def test_recheck_uses_fallback_with_code(
+        self, monkeypatch, fake_rpc, startup_state
+    ):
+        server = startup_state
+        fake_rpc.code = b""
+        other = _FakeRpc(code=b"")
+        try:
+            client = _real_client(monkeypatch, fake_rpc.url, [other.url])
+            server.chain_client, server._chain_init_error = (
+                server._verify_write_contract(client)
+            )
+            assert server.chain_client is None  # nobody has the code
+
+            other.code = DEPLOYED_CODE  # primary still answers "no code"
+            await server._recheck_write_contract()
+            assert server.chain_client is client
+            assert client._provider.rpc_url == other.url
         finally:
             other.close()
 
@@ -482,7 +519,7 @@ def _held_back_client(server, check_side_effect=None):
     client = MagicMock()
     client.chain = "base-sepolia"
     client._provider.chain_id = 84532
-    client.check_contract.side_effect = check_side_effect
+    client.probe_contract.side_effect = check_side_effect
     server._unverified_write_client = client
     server._chain_init_error = (
         f"No contract code at {CONTRACT}. Chain: base-sepolia, chain id 84532."
@@ -518,7 +555,7 @@ class TestWritesDisabledReason:
 
     async def test_write_proceeds_once_contract_found(self, startup_state):
         server = startup_state
-        client = _held_back_client(server)  # check_contract now passes
+        client = _held_back_client(server)  # the re-check now passes
         client.transform.side_effect = RuntimeError("reached transform")
         result = await server.handle_record_transform(
             {"original_hash": H1, "new_hash": H2}
@@ -607,6 +644,38 @@ class TestHandlerMissingEvent:
         assert "failed to restrict original" in text
         assert second_tx.hex() in text
         assert result.isError
+        # What to do next: the transform stands, restrict separately.
+        assert f"IS recorded on-chain (tx {TX_HASH.hex()})" in text
+        assert "Do not re-run record_transform" in text
+        assert f"setDataStatus(0x{H1}, 1)" in text
+        assert f'ChainClient.set_status("{H1}", 1)' in text
+        assert "retryable: false" in text
+
+    async def test_restrict_original_timeout_reported_as_pending(
+        self, monkeypatch, startup_state
+    ):
+        from web3.exceptions import TimeExhausted
+
+        server = startup_state
+        second_tx = bytes.fromhex("cc" * 32)
+        w3 = _web3()
+        w3.eth.send_raw_transaction.side_effect = [TX_HASH, second_tx]
+        w3.eth.wait_for_transaction_receipt.side_effect = [
+            _receipt(_log("DataTransformed", H1, H2)),
+            TimeExhausted("receipt not found within 120 s"),
+        ]
+        monkeypatch.setattr(server, "chain_client", _client(w3))
+        result = await server.handle_record_transform(
+            {"original_hash": H1, "new_hash": H2, "restrict_original": True}
+        )
+        text = result.content[0].text
+        assert result.isError
+        assert "outcome unknown" in text
+        assert f"may still be pending (tx {second_tx.hex()})" in text
+        assert "failed to restrict" not in text
+        assert "Do not send the status change again" in text
+        assert "Do not re-run record_transform" in text
+        assert "retryable: false" in text
 
 
 def test_tx_hash_not_repeated_when_already_in_message():

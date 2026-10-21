@@ -3214,8 +3214,9 @@ class TestRecordTransform:
         assert "RESTRICTED" in text
         mock_client.set_status.assert_called_once_with(TEST_REFERENCE, 1)
 
-    async def test_transform_restrict_failure_non_fatal(self, server):
-        """If restrict fails, transform should still succeed with a warning."""
+    async def test_transform_restrict_failure_reported_as_error(self, server):
+        """If restrict fails after the transform was mined, the result is an
+        error naming the transform tx and saying the restriction is missing."""
         mock_client = MagicMock()
         mock_client.transform.return_value = self._mock_transform_result()
         mock_client.set_status.side_effect = Exception("set_status reverted")
@@ -3237,10 +3238,10 @@ class TestRecordTransform:
                 },
             )
 
-        assert not result.isError
+        assert result.isError
         text = result.content[0].text
-        assert "Transformation recorded" in text
-        assert "failed to restrict" in text
+        assert "Transform recorded, restriction NOT applied" in text
+        assert "Transform Tx Hash: 0xabc123" in text
         assert "set_status reverted" in text
 
     async def test_transform_same_hash_rejected(self, server):

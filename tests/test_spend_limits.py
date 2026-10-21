@@ -8,6 +8,9 @@ from mcp.types import ListToolsRequest
 
 from swarm_provenance_mcp.chain.exceptions import ChainSpendLimitError
 from swarm_provenance_mcp.chain.spend import (
+    ACTIVE_HOLD,
+    DEFAULT_L1_FEE_ALLOWANCE_ETH,
+    DEFAULT_PRIORITY_FEE_WEI,
     ETH,
     GWEI,
     MAINNET_DEFAULTS,
@@ -21,6 +24,7 @@ BASE_SEPOLIA = 84532
 WALLET = "0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00"
 H1 = "a1" * 32
 H2 = "b2" * 32
+H3 = "c3" * 32
 TX_HASH = bytes.fromhex("bb" * 32)
 
 
@@ -32,7 +36,8 @@ def _web3(base_fee_wei=5_000_000, tip_wei=1_000_000, legacy_gas_price=None):
     else:
         w3.eth.get_block.return_value = {}
         w3.eth.gas_price = legacy_gas_price
-    w3.eth.max_priority_fee = tip_wei
+    # Five blocks of 50th-percentile priority fees.
+    w3.eth.fee_history.return_value = {"reward": [[tip_wei]] * 5}
     w3.eth.get_transaction_count.return_value = 0
     w3.eth.estimate_gas.return_value = 100_000
     w3.eth.send_raw_transaction.return_value = TX_HASH
@@ -61,8 +66,22 @@ def _client(w3, chain_id=BASE_MAINNET, **limits):
     client._contract_web3 = w3
     client._gas_limit = None
     client._gas_limit_multiplier = 1.2
+    limits.setdefault("l1_fee_allowance_eth", 0)  # L2-only budget arithmetic
     client._spend = SpendGuard(chain_id, **limits)
     return client
+
+
+def _quote_id(result) -> str:
+    text = result.content[0].text
+    return text.split("quote_id: ")[1].split()[0].rstrip(".")
+
+
+async def _quote_and_confirm(server, handler, args):
+    """Get a quote, then confirm it with the same arguments."""
+    quote = await getattr(server, handler)(args)
+    return await getattr(server, handler)(
+        {**args, "confirm": True, "quote_id": _quote_id(quote)}
+    )
 
 
 def _tx():
@@ -259,6 +278,8 @@ class TestConfirmation:
         assert "Confirmation required: nothing was sent" in text
         assert "confirm: true" in text
         assert "0.5 gwei" in text  # the fee cap
+        assert f'swarm_hash: "{H1}"' in text  # the quote echoes the action
+        assert "quote_id: " in text
         client.anchor.assert_not_called()
         client.anchor_for.assert_not_called()
 
@@ -289,7 +310,10 @@ class TestConfirmation:
         server, client = mainnet_server
         await getattr(server, handler)(args)
         getattr(client, method).assert_not_called()
+        # confirm alone, without a quote_id, is not enough
         await getattr(server, handler)({**args, "confirm": True})
+        getattr(client, method).assert_not_called()
+        await _quote_and_confirm(server, handler, args)
         getattr(client, method).assert_called_once()
 
     async def test_string_true_is_not_confirmation(self, mainnet_server):
@@ -309,6 +333,73 @@ class TestConfirmation:
         )
         assert "2 transaction(s)" in result.content[0].text
         client.set_status.assert_not_called()
+
+    async def test_quote_for_other_arguments_refused(self, mainnet_server):
+        """The reviewer's replay: quote H1->H2, confirm H2->H3 + restrict."""
+        server, client = mainnet_server
+        quote = await server.handle_record_transform(
+            {"original_hash": H1, "new_hash": H2, "description": "approved"}
+        )
+        result = await server.handle_record_transform(
+            {
+                "original_hash": H2,
+                "new_hash": H3,
+                "description": "different",
+                "restrict_original": True,
+                "confirm": True,
+                "quote_id": _quote_id(quote),
+            }
+        )
+        client.transform.assert_not_called()
+        client.set_status.assert_not_called()
+        text = result.content[0].text
+        assert "issued for different arguments" in text
+        assert f'original_hash: "{H2}"' in text  # fresh quote for what was asked
+
+    async def test_quote_for_other_tool_refused(self, mainnet_server):
+        server, client = mainnet_server
+        quote = await server.handle_set_storage_ref(
+            {"data_hash": H1, "storage_ref": H2}
+        )
+        await server.handle_anchor_hash(
+            {"swarm_hash": H1, "confirm": True, "quote_id": _quote_id(quote)}
+        )
+        client.anchor.assert_not_called()
+
+    async def test_quote_is_single_use(self, mainnet_server):
+        server, client = mainnet_server
+        args = {"swarm_hash": H1}
+        quote = await server.handle_anchor_hash(args)
+        confirmed = {**args, "confirm": True, "quote_id": _quote_id(quote)}
+        await server.handle_anchor_hash(confirmed)
+        await server.handle_anchor_hash(confirmed)
+        client.anchor.assert_called_once()
+
+    async def test_expired_quote_refused(self, mainnet_server, monkeypatch):
+        server, client = mainnet_server
+        args = {"swarm_hash": H1}
+        quote = await server.handle_anchor_hash(args)
+        later = server._now() + server.QUOTE_TTL_SECONDS + 1
+        monkeypatch.setattr(server, "_now", lambda: later)
+        await server.handle_anchor_hash(
+            {**args, "confirm": True, "quote_id": _quote_id(quote)}
+        )
+        client.anchor.assert_not_called()
+
+    async def test_unknown_quote_id_refused(self, mainnet_server):
+        server, client = mainnet_server
+        await server.handle_anchor_hash(
+            {"swarm_hash": H1, "confirm": True, "quote_id": "0" * 32}
+        )
+        client.anchor.assert_not_called()
+
+    async def test_quote_id_without_confirm_refused(self, mainnet_server):
+        server, client = mainnet_server
+        quote = await server.handle_anchor_hash({"swarm_hash": H1})
+        await server.handle_anchor_hash(
+            {"swarm_hash": H1, "quote_id": _quote_id(quote)}
+        )
+        client.anchor.assert_not_called()
 
     async def test_testnet_default_needs_no_confirm(self, mainnet_server):
         server, client = mainnet_server
@@ -334,7 +425,9 @@ class TestConfirmation:
     async def test_spend_limit_reported_as_not_retryable(self, mainnet_server):
         server, client = mainnet_server
         client.anchor.side_effect = ChainSpendLimitError("over the fee cap")
-        result = await server.handle_anchor_hash({"swarm_hash": H1, "confirm": True})
+        result = await _quote_and_confirm(
+            server, "handle_anchor_hash", {"swarm_hash": H1}
+        )
         assert result.isError
         assert "over the fee cap" in result.content[0].text
         assert "retryable: false" in result.content[0].text
@@ -411,6 +504,7 @@ class TestAnnotations:
         ):
             prop = tools[name].inputSchema["properties"]["confirm"]
             assert prop["type"] == "boolean"
+            assert tools[name].inputSchema["properties"]["quote_id"]["type"] == "string"
         assert "confirm" not in tools["verify_hash"].inputSchema["properties"]
 
 
@@ -445,3 +539,242 @@ class TestStampDurationCap:
         from swarm_provenance_mcp.server import validate_stamp_duration_hours
 
         validate_stamp_duration_hours(8760)  # does not raise
+
+
+class TestPriorityFee:
+    def test_missing_fee_history_uses_small_default(self):
+        """web3's own fallback clamps the tip to >= 1 gwei; ours must not."""
+        w3 = _web3()
+        w3.eth.fee_history.side_effect = ValueError("method not found")
+        fields, _ = SpendGuard(BASE_MAINNET).fee_fields(w3)
+        assert fields["maxPriorityFeePerGas"] == DEFAULT_PRIORITY_FEE_WEI
+        assert DEFAULT_PRIORITY_FEE_WEI < GWEI
+
+    def test_empty_fee_history_uses_default(self):
+        w3 = _web3()
+        w3.eth.fee_history.return_value = {"reward": []}
+        fields, _ = SpendGuard(BASE_MAINNET).fee_fields(w3)
+        assert fields["maxPriorityFeePerGas"] == DEFAULT_PRIORITY_FEE_WEI
+
+    def test_median_of_history(self):
+        w3 = _web3()
+        w3.eth.fee_history.return_value = {
+            "reward": [[1], [5_000_000], [2_000_000], [3_000_000], [4_000_000]]
+        }
+        assert SpendGuard.priority_fee(w3) == 3_000_000
+
+    def test_message_points_at_rpc_only_for_outsized_tip(self):
+        with pytest.raises(ChainSpendLimitError) as e:
+            SpendGuard(BASE_MAINNET).fee_fields(_web3(tip_wei=5000 * GWEI))
+        assert "check the endpoint" in str(e.value)
+        with pytest.raises(ChainSpendLimitError) as e:
+            SpendGuard(BASE_MAINNET).fee_fields(_web3(base_fee_wei=GWEI))
+        assert "check the endpoint" not in str(e.value)
+        assert "retry later" not in str(e.value)
+
+
+class TestL1Fee:
+    def test_settle_adds_l1_fee(self):
+        guard = SpendGuard(BASE_MAINNET)
+        reserved = guard.reserve(10**14)
+        guard.settle(
+            reserved,
+            {"gasUsed": 100_000, "effectiveGasPrice": 6_000_000, "l1Fee": 10**10},
+        )
+        assert guard.spent_wei == 100_000 * 6_000_000 + 10**10
+
+    def test_settle_reads_hex_l1_fee(self):
+        guard = SpendGuard(BASE_MAINNET)
+        reserved = guard.reserve(10**14)
+        guard.settle(
+            reserved,
+            {"gasUsed": 1, "effectiveGasPrice": 1, "l1Fee": hex(10**10)},
+        )
+        assert guard.spent_wei == 1 + 10**10
+
+    def test_reservation_includes_l1_allowance(self):
+        # L2 worst case: 120_000 gas x 0.011 gwei = 1.32e12 wei
+        budget_eth = 120_000 * 11_000_000 / ETH
+        fits = _client(_web3(), budget_eth=budget_eth, l1_fee_allowance_eth=0)
+        fits._send_transaction(_tx())
+        too_small = _client(
+            _web3(), budget_eth=budget_eth, l1_fee_allowance_eth=0.000001
+        )
+        with pytest.raises(ChainSpendLimitError, match="budget"):
+            too_small._send_transaction(_tx())
+
+    def test_default_allowance(self):
+        assert SpendGuard(BASE_MAINNET).l1_allowance_wei == int(
+            DEFAULT_L1_FEE_ALLOWANCE_ETH * ETH
+        )
+
+
+class TestRejectedBroadcast:
+    def test_node_rejection_releases_slot(self):
+        from web3.exceptions import Web3RPCError
+
+        w3 = _web3()
+        w3.eth.send_raw_transaction.side_effect = Web3RPCError("nonce too low")
+        client = _client(w3, max_txs=1)
+        with pytest.raises(Exception):
+            client._send_transaction(_tx())
+        assert client.spend.tx_count == 0
+        assert client.spend.spent_wei == 0
+
+    def test_transport_failure_keeps_reservation(self):
+        from requests import Response
+        from requests.exceptions import HTTPError
+
+        response = Response()
+        response.status_code = 503
+        w3 = _web3()
+        w3.eth.send_raw_transaction.side_effect = HTTPError(
+            "503 Server Error", response=response
+        )
+        client = _client(w3, max_txs=1)
+        with pytest.raises(Exception):
+            client._send_transaction(_tx())
+        assert client.spend.tx_count == 1  # may have reached the network
+
+    def test_already_known_keeps_reservation(self):
+        from web3.exceptions import Web3RPCError
+
+        w3 = _web3()
+        w3.eth.send_raw_transaction.side_effect = Web3RPCError("already known")
+        client = _client(w3, max_txs=1)
+        with pytest.raises(Exception):
+            client._send_transaction(_tx())
+        assert client.spend.tx_count == 1
+
+
+def _restrict_client(max_txs):
+    """ChainClient with a real SpendGuard whose writes succeed."""
+    w3 = _web3()
+    client = _client(w3, max_txs=max_txs)
+    client._contract.supports_transformation_links.return_value = False
+    client._provider.deploy_block = None
+    client._provider.get_explorer_tx_url.return_value = None
+    client._contract.build_record_transformation_tx.return_value = _tx()
+    client._contract.build_set_data_status_tx.side_effect = lambda **kw: _tx()
+    client.balance = MagicMock(side_effect=Exception("skip"))
+    return client, w3
+
+
+class TestRestrictOriginal:
+    ARGS = {
+        "original_hash": H1,
+        "new_hash": H2,
+        "description": "d",
+        "restrict_original": True,
+    }
+
+    async def test_both_slots_checked_before_first_send(self, monkeypatch):
+        from swarm_provenance_mcp import server
+
+        client, w3 = _restrict_client(max_txs=1)
+        monkeypatch.setattr(server, "CHAIN_AVAILABLE", True)
+        monkeypatch.setattr(server, "chain_client", client)
+        result = await server.handle_record_transform(dict(self.ARGS))
+        assert result.isError
+        assert "transaction limit" in result.content[0].text
+        w3.eth.send_raw_transaction.assert_not_called()
+        assert client.spend.tx_count == 0
+
+    async def test_both_sent_from_the_hold(self, monkeypatch):
+        from swarm_provenance_mcp import server
+
+        client, w3 = _restrict_client(max_txs=2)
+        monkeypatch.setattr(server, "CHAIN_AVAILABLE", True)
+        monkeypatch.setattr(server, "chain_client", client)
+        result = await server.handle_record_transform(dict(self.ARGS))
+        assert not result.isError, result.content[0].text
+        assert "RESTRICTED" in result.content[0].text
+        assert w3.eth.send_raw_transaction.call_count == 2
+        assert client.spend.tx_count == 2
+
+    async def test_unused_hold_returned(self, monkeypatch):
+        from swarm_provenance_mcp import server
+        from swarm_provenance_mcp.chain.exceptions import (
+            TransformationAlreadyExistsError,
+        )
+
+        client, w3 = _restrict_client(max_txs=2)
+        client.transform = MagicMock(
+            side_effect=TransformationAlreadyExistsError("exists", H1, H2)
+        )
+        monkeypatch.setattr(server, "CHAIN_AVAILABLE", True)
+        monkeypatch.setattr(server, "chain_client", client)
+        await server.handle_record_transform(dict(self.ARGS))
+        assert client.spend.tx_count == 0
+        assert client.spend.spent_wei == 0
+
+    async def test_second_tx_failure_is_an_error(self, monkeypatch):
+        from swarm_provenance_mcp import server
+
+        client, w3 = _restrict_client(max_txs=2)
+        client._contract.build_set_data_status_tx.side_effect = ChainSpendLimitError(
+            "fee above the cap"
+        )
+        monkeypatch.setattr(server, "CHAIN_AVAILABLE", True)
+        monkeypatch.setattr(server, "chain_client", client)
+        result = await server.handle_record_transform(dict(self.ARGS))
+        assert result.isError
+        text = result.content[0].text
+        assert "Transform recorded, restriction NOT applied" in text
+        assert TX_HASH.hex() in text
+
+
+class TestHold:
+    def test_hold_reserves_all_slots(self):
+        guard = SpendGuard(BASE_MAINNET, max_txs=3)
+        hold = guard.hold(2, 100)
+        assert guard.tx_count == 2 and guard.spent_wei == 200
+        with pytest.raises(ChainSpendLimitError):
+            guard.hold(2, 100)
+        guard.end_hold(hold)
+        assert guard.tx_count == 0 and guard.spent_wei == 0
+
+    def test_reserve_draws_from_active_hold(self):
+        guard = SpendGuard(BASE_MAINNET, max_txs=2)
+        hold = guard.hold(2, 100)
+        token = ACTIVE_HOLD.set(hold)
+        try:
+            assert guard.reserve(80) == 100
+            assert guard.reserve(150) == 150  # tops up the difference
+        finally:
+            ACTIVE_HOLD.reset(token)
+        assert guard.tx_count == 2 and guard.spent_wei == 250
+        assert hold.slots_left == 0
+
+
+class TestConfigValidation:
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("chain_max_fee_gwei", 0),
+            ("chain_max_fee_gwei", -1),
+            ("chain_session_budget_eth", 0),
+            ("chain_max_tx_per_session", 0),
+            ("chain_l1_fee_allowance_eth", -0.1),
+            ("max_stamp_duration_hours", 23),
+        ],
+    )
+    def test_invalid_limits_refused_at_startup(self, field, value):
+        from pydantic import ValidationError
+
+        from swarm_provenance_mcp.config import Settings
+
+        with pytest.raises(ValidationError):
+            Settings(**{field: value})
+
+    def test_valid_limits_accepted(self):
+        from swarm_provenance_mcp.config import Settings
+
+        cfg = Settings(
+            chain_max_fee_gwei=0.1,
+            chain_session_budget_eth=0.01,
+            chain_max_tx_per_session=5,
+            chain_l1_fee_allowance_eth=0,
+            max_stamp_duration_hours=24,
+        )
+        assert cfg.chain_max_tx_per_session == 5

@@ -472,6 +472,46 @@ class TestStartupCheck:
         finally:
             good.close()
 
+    def test_rpc_keys_not_logged(self, monkeypatch, hanging_rpc, startup_state, caplog):
+        """RPC URLs can carry API keys in the path or query: log hosts only."""
+        import logging
+
+        server = startup_state
+        monkeypatch.setattr(server, "STARTUP_CONTRACT_CHECK_TIMEOUT", 0.4)
+        fake_rpc_bad = _FakeRpc(code=b"")
+        good = _FakeRpc()
+        try:
+            dead = hanging_rpc + "/v2/SECRETPATHKEY?apikey=SECRETQUERYKEY"
+            bad = fake_rpc_bad.url + "/v2/SECRETPATHKEY2"
+            ok = good.url + "/?apikey=SECRETQUERYKEY2"
+            caplog.set_level(logging.DEBUG)
+            client = _real_client(monkeypatch, dead, [bad, ok])
+            assert server._verify_write_contract(client) == (client, None)
+            assert client._provider.rpc_url == ok
+
+            # No endpoint answers: the deferred-check warning quotes errors,
+            # and a refused connection's error text includes the URL path.
+            import socket
+
+            closed = socket.socket()
+            closed.bind(("127.0.0.1", 0))
+            refused = f"http://127.0.0.1:{closed.getsockname()[1]}/v2/SECRETREFUSED"
+            closed.close()
+            client2 = _real_client(monkeypatch, refused, [])
+            assert server._verify_write_contract(client2) == (client2, None)
+        finally:
+            fake_rpc_bad.close()
+            good.close()
+        # Our own log lines (web3/urllib3 DEBUG output is theirs, off by default).
+        ours = "\n".join(
+            r.getMessage()
+            for r in caplog.records
+            if r.name.startswith("swarm_provenance_mcp")
+        )
+        assert "switching" in ours
+        assert "Could not verify the contract" in ours
+        assert "SECRET" not in ours
+
     async def test_recheck_uses_fallback_with_code(
         self, monkeypatch, fake_rpc, startup_state
     ):

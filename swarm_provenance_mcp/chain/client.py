@@ -43,6 +43,16 @@ logger = logging.getLogger(__name__)
 _BINDING_LOCK = threading.Lock()
 
 
+def _rpc_host(url: str) -> str:
+    """Hostname of an RPC URL for logs: paths and queries can carry API keys."""
+    try:
+        from urllib.parse import urlparse
+
+        return urlparse(url).hostname or "<rpc>"
+    except Exception:
+        return "<rpc>"
+
+
 def _should_fail_over(e: Exception) -> bool:
     """Whether an error is an unavailable endpoint that another RPC may serve."""
     if isinstance(e, ChainTransactionError):
@@ -298,7 +308,8 @@ class ChainClient:
                 no_code = no_code or e
                 continue
             except Exception as e:
-                last_error = e
+                # Not str(e): requests errors quote the URL path.
+                last_error = f"{type(e).__name__} from {_rpc_host(url)}"
                 continue
             if url != provider.rpc_url:
                 self._use_endpoint(url)
@@ -321,8 +332,8 @@ class ChainClient:
             if provider.rpc_url != url:
                 logger.info(
                     "RPC %s has the contract code; switching from %s",
-                    url,
-                    provider.rpc_url,
+                    _rpc_host(url),
+                    _rpc_host(provider.rpc_url),
                 )
                 provider._web3 = Web3(
                     _http_provider(Web3, url, provider._request_timeout)

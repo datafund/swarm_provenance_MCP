@@ -11,23 +11,26 @@ from typing import Any
 from urllib.parse import urlparse
 
 # scheme://authority, then an optional path, query or fragment.
-# - The scheme is capped at 32 characters, so a long run of word characters
-#   without "://" is not rescanned from every word boundary.
+# - The scheme is the up to 32 letters, digits, "+", "." or "-" right before
+#   "://", with no word boundary required, so "foo_https://" and
+#   "500https://" match too. A longer word gives its last 32 characters as
+#   the scheme. The cap keeps the scan from each start position short.
+# - The separator is "://" or its JSON-escaped form ":\/\/".
 # - The authority is an optional "user:pass@", then a bracketed IPv6 host with
 #   an optional port, or a name or IPv4 host (with any port) that stops at
-#   "/", "?", "#", whitespace, quotes and brackets.
+#   "/", "\", "?", "#", whitespace, quotes and brackets.
 # - The rest (path, query, fragment) stops at whitespace, quotes and angle
 #   brackets, and leaves out trailing punctuation and closing parentheses.
 # Every repetition is a single character class, so matching stays linear.
 _URL = re.compile(
-    r"(?P<base>\b[a-zA-Z][a-zA-Z0-9+.-]{0,31}://"
-    r"(?:[^/?#\s'\"<>()\[\]@]*@)?"
-    r"(?:\[[0-9A-Za-z:.%_~-]+\](?::[0-9]*)?|[^/?#\s'\"<>()\[\]]+))"
-    r"(?P<rest>[/?#](?:[^\s'\"<>]*[^\s'\"<>.,;:()\[\]])?)?"
+    r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]{0,31})(?P<sep>://|:\\/\\/)"
+    r"(?:[^/\\?#\s'\"<>()\[\]@]*@)?"
+    r"(?P<host>\[[0-9A-Za-z:.%_~-]+\](?::[0-9]*)?|[^/\\?#\s'\"<>()\[\]]+)"
+    r"(?P<rest>[/\\?#](?:[^\s'\"<>]*[^\s'\"<>.,;:()\[\]])?)?"
 )
 
 # urllib3 errors name the path on its own: "... with url: /v2/<key> (Caused by ...".
-_URL_PATH = re.compile(r"(\bwith url: )\S+")
+_URL_PATH = re.compile(r"(\bwith url: ?)\S+")
 
 
 def url_host(url: Any, default: str = "<rpc>") -> str:
@@ -47,11 +50,5 @@ def redact_urls(value: Any) -> str:
     Credentials in the authority (``user:pass@``) are removed as well.
     """
     text = str(value)
-
-    def _base(match: "re.Match[str]") -> str:
-        base = match.group("base")
-        scheme, _, authority = base.partition("://")
-        return f"{scheme}://{authority.rpartition('@')[2]}"
-
-    text = _URL.sub(_base, text)
+    text = _URL.sub(r"\g<scheme>\g<sep>\g<host>", text)
     return _URL_PATH.sub(r"\1<path>", text)

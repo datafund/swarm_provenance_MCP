@@ -41,6 +41,18 @@ FALLBACK_2 = "https://fb2.rpc.test/?apikey=SECRETQ2"
         # Parentheses inside a path do not end it early.
         ("https://h.io/v2/KE(SECRET)", "https://h.io)"),
         ("(see https://h.io/v2/SECRET)", "(see https://h.io)"),
+        # No word boundary before the scheme.
+        ("foo_https://h.io/v2/SECRET", "foo_https://h.io"),
+        ("500https://h.io/v2/SECRET", "500https://h.io"),
+        ("x" * 40 + "https://h.io/v2/SECRET", "x" * 40 + "https://h.io"),
+        # JSON-escaped slashes.
+        ("https:\\/\\/h.io\\/v2\\/SECRET", "https:\\/\\/h.io"),
+        ('{"url": "https:\\/\\/h.io\\/v2\\/SECRET"}', '{"url": "https:\\/\\/h.io"}'),
+        # urllib3's path, with or without a space after the colon.
+        (
+            "Max retries exceeded with url:/v2/SECRET",
+            "Max retries exceeded with url:<path>",
+        ),
     ],
 )
 def test_redact_urls(text, expected):

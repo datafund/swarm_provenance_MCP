@@ -157,10 +157,15 @@ REQUIRED_SELECTORS = (
 )
 
 
-def _keccak(text: str) -> bytes:
-    from eth_utils import keccak
+try:
+    # Bound at import: some tests replace the web3 module after import.
+    from web3 import Web3 as _Web3
+except ImportError:  # chain dependencies missing; CHAIN_AVAILABLE is False
+    _Web3 = None
 
-    return keccak(text=text)
+
+def _keccak(text: str) -> bytes:
+    return bytes(_Web3.keccak(text=text))
 
 
 def _as_bytes(value) -> bytes:

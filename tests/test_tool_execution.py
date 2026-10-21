@@ -3214,8 +3214,9 @@ class TestRecordTransform:
         assert "RESTRICTED" in text
         mock_client.set_status.assert_called_once_with(TEST_REFERENCE, 1)
 
-    async def test_transform_restrict_failure_non_fatal(self, server):
-        """If restrict fails, transform should still succeed with a warning."""
+    async def test_transform_restrict_failure_reported_as_error(self, server):
+        """If restrict fails, the transform is still reported, and the result
+        is an error so the failed second step is not mistaken for success."""
         mock_client = MagicMock()
         mock_client.transform.return_value = self._mock_transform_result()
         mock_client.set_status.side_effect = Exception("set_status reverted")
@@ -3237,7 +3238,7 @@ class TestRecordTransform:
                 },
             )
 
-        assert not result.isError
+        assert result.isError
         text = result.content[0].text
         assert "Transformation recorded" in text
         assert "failed to restrict" in text

@@ -38,6 +38,14 @@ class ChainTransactionError(ChainError):
         self.tx_hash = tx_hash
         self.broadcast = broadcast
 
+    def __str__(self) -> str:
+        # Keep the hash in every message, so a caller that only formats
+        # str(e) still tells the user which transaction to look up.
+        message = super().__str__()
+        if self.tx_hash and self.tx_hash not in message:
+            return f"{message} (tx {self.tx_hash})"
+        return message
+
 
 class ChainValidationError(ChainError):
     """Input validation failed (hash format, string lengths, batch limits)."""

@@ -257,6 +257,57 @@ class ChainClient:
         self._contract.check_deployed()
         self._contract_verified = True
 
+    @_rpc_failover
+    def check_contract(self) -> None:
+        """``verify_contract()`` with RPC failover, for use outside a write."""
+        self.verify_contract()
+
+    def probe_contract(self, timeout: float = 5.0) -> None:
+        """
+        Start-up variant of ``verify_contract()`` that cannot stall start-up.
+
+        Asks each configured RPC in turn, allowing about ``timeout`` seconds
+        per endpoint (two attempts of ``timeout / 2``), instead of the
+        client's 30 s request timeout. The client stays on its current
+        endpoint; failover for later calls is unchanged.
+
+        Raises:
+            ChainConfigurationError: An endpoint answered and the address
+                holds no DataProvenance code.
+            ChainConnectionError: No endpoint answered in time.
+        """
+        from .contract import DataProvenanceContract
+        from .provider import _http_provider, _import_web3
+
+        if self._contract_verified:
+            return
+        Web3 = _import_web3()
+        provider = self._provider
+        urls = [provider.rpc_url] + [
+            u for u in provider._rpc_urls if u != provider.rpc_url
+        ]
+        last_error = None
+        for url in urls:
+            try:
+                web3 = Web3(_http_provider(Web3, url, timeout / 2))
+                if url != provider.rpc_url and web3.eth.chain_id != provider.chain_id:
+                    last_error = "fallback endpoint is on another chain"
+                    continue
+                DataProvenanceContract(
+                    web3=web3, contract_address=provider.contract_address
+                ).check_deployed()
+            except ChainConfigurationError:
+                raise
+            except Exception as e:
+                last_error = e
+                continue
+            self._contract_verified = True
+            return
+        raise ChainConnectionError(
+            f"No RPC endpoint answered the contract check: {last_error}",
+            rpc_url=provider.rpc_url,
+        )
+
     def _send_transaction(self, tx: dict, expected_events=()) -> dict:
         """
         Estimate gas, sign, broadcast, and wait for receipt.

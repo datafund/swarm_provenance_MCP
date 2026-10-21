@@ -8,7 +8,7 @@ pre-send code check, and the post-receipt event check.
 from unittest.mock import MagicMock
 
 import pytest
-from eth_utils import keccak
+from web3 import Web3
 
 from swarm_provenance_mcp.chain.contract import (
     REQUIRED_SELECTORS,
@@ -28,7 +28,9 @@ H1 = "a1" * 32
 H2 = "b2" * 32
 H3 = "c3" * 32
 TX_HASH = bytes.fromhex("bb" * 32)
-DEPLOYED_CODE = b"\x60\x80" + b"".join(keccak(text=s)[:4] for s in REQUIRED_SELECTORS)
+DEPLOYED_CODE = b"\x60\x80" + b"".join(
+    Web3.keccak(text=s)[:4] for s in REQUIRED_SELECTORS
+)
 
 EVENT_SIGNATURES = {
     "DataRegistered": "DataRegistered(bytes32,address,string)",
@@ -48,7 +50,7 @@ def _topic(value: str) -> bytes:
 
 
 def _log(event: str, *indexed: str, address: str = CONTRACT) -> dict:
-    topics = [keccak(text=EVENT_SIGNATURES[event])] + [_topic(v) for v in indexed]
+    topics = [Web3.keccak(text=EVENT_SIGNATURES[event])] + [_topic(v) for v in indexed]
     return {"address": address, "topics": topics, "data": b""}
 
 
@@ -161,6 +163,11 @@ WRITES = [
         lambda c: c.set_delegate(NEW_OWNER, True),
         [_log("DelegateAuthorized", WALLET, NEW_OWNER)],
     ),
+    (
+        "set_storage_ref",
+        lambda c: c.set_storage_ref(H1, H2),
+        [_log("StorageRefLinked", H1, H2)],
+    ),
 ]
 WRITE_IDS = [w[0] for w in WRITES]
 
@@ -257,6 +264,23 @@ class TestWriteRequiresEvent:
         with pytest.raises(ChainTransactionError, match="DataRegistered"):
             client.batch_anchor([H1, H2], ["t", "t"])
 
+    def test_anchor_storage_ref_event_missing_is_failure(self):
+        """DataRegistered alone does not prove the storage ref was linked."""
+        w3 = _web3()
+        w3.eth.wait_for_transaction_receipt.return_value = _receipt(
+            _log("DataRegistered", H1, WALLET)
+        )
+        client = _client(w3)
+        with pytest.raises(ChainTransactionError, match="StorageRefLinked"):
+            client.anchor(H1, "t", storage_ref=H2)
+
+    def test_error_message_carries_tx_hash(self):
+        w3 = _web3()
+        client = _client(w3)
+        with pytest.raises(ChainTransactionError) as e:
+            client.transform(H1, H2, "d")
+        assert TX_HASH.hex() in str(e.value)
+
     def test_set_storage_ref_without_event_is_failure(self):
         w3 = _web3()
         client = _client(w3)
@@ -281,37 +305,312 @@ class TestWriteRequiresEvent:
         assert contract.receipt_has_event(_receipt(log), "DataMerged", newDataHash=H3)
 
 
-class TestStartupCheck:
-    def test_no_code_disables_writes(self):
-        from swarm_provenance_mcp import server
+# --- A local JSON-RPC endpoint for the start-up check ---
 
-        client = _client(_web3(b""))
+
+class _FakeRpc:
+    """Answers eth_chainId and eth_getCode over HTTP on 127.0.0.1."""
+
+    def __init__(self, code: bytes = DEPLOYED_CODE, chain_id: int = 84532):
+        import http.server
+        import json
+        import threading
+
+        rpc = self
+        self.code = code
+        self.chain_id = chain_id
+        self.calls = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                rpc.calls.append(req["method"])
+                if req["method"] == "eth_chainId":
+                    result = hex(rpc.chain_id)
+                elif req["method"] == "eth_getCode":
+                    result = "0x" + rpc.code.hex()
+                else:
+                    result = None
+                body = json.dumps(
+                    {"jsonrpc": "2.0", "id": req["id"], "result": result}
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
+        threading.Thread(
+            target=self._server.serve_forever, args=(0.05,), daemon=True
+        ).start()
+
+    def close(self):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+@pytest.fixture
+def fake_rpc():
+    rpc = _FakeRpc()
+    yield rpc
+    rpc.close()
+
+
+@pytest.fixture
+def hanging_rpc():
+    """Accepts TCP connections and never answers."""
+    import socket
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(16)
+    yield f"http://127.0.0.1:{sock.getsockname()[1]}"
+    sock.close()
+
+
+def _real_client(monkeypatch, primary: str, fallbacks=()):
+    """ChainClient on the base-sepolia preset with its RPCs pointed locally."""
+    from swarm_provenance_mcp.chain.client import ChainClient
+    from swarm_provenance_mcp.chain.provider import CHAIN_PRESETS
+
+    monkeypatch.setitem(CHAIN_PRESETS["base-sepolia"], "rpc_url", primary)
+    monkeypatch.setitem(CHAIN_PRESETS["base-sepolia"], "rpc_fallbacks", list(fallbacks))
+    return ChainClient(
+        chain="base-sepolia",
+        contract_address=CONTRACT,
+        private_key="0x" + "11" * 32,
+    )
+
+
+@pytest.fixture
+def startup_state(monkeypatch):
+    """Isolate the server's module-level write-client state."""
+    from swarm_provenance_mcp import server
+
+    monkeypatch.setattr(server, "CHAIN_AVAILABLE", True)
+    monkeypatch.setattr(server, "chain_client", None)
+    monkeypatch.setattr(server, "_chain_init_error", None)
+    monkeypatch.setattr(server, "_unverified_write_client", None)
+    return server
+
+
+class TestStartupCheck:
+    def test_no_code_disables_writes(self, monkeypatch, fake_rpc, startup_state):
+        server = startup_state
+        fake_rpc.code = b""
+        client = _real_client(monkeypatch, fake_rpc.url)
         result, reason = server._verify_write_contract(client)
         assert result is None
         assert "No contract code" in reason
+        assert CONTRACT in reason
+        assert "chain id 84532" in reason
 
-    def test_deployed_contract_keeps_client(self):
-        from swarm_provenance_mcp import server
-
-        client = _client(_web3())
+    def test_deployed_contract_keeps_client(self, monkeypatch, fake_rpc, startup_state):
+        server = startup_state
+        client = _real_client(monkeypatch, fake_rpc.url)
         assert server._verify_write_contract(client) == (client, None)
+        assert client._contract_verified
 
-    def test_unreachable_rpc_defers_check(self):
-        from swarm_provenance_mcp import server
-
-        w3 = _web3()
-        w3.eth.get_code.side_effect = ConnectionError("rpc down")
-        client = _client(w3)
+    def test_unreachable_rpc_defers_check(
+        self, monkeypatch, hanging_rpc, startup_state
+    ):
+        server = startup_state
+        monkeypatch.setattr(server, "STARTUP_CONTRACT_CHECK_TIMEOUT", 0.4)
+        client = _real_client(monkeypatch, hanging_rpc)
         assert server._verify_write_contract(client) == (client, None)
+        assert not client._contract_verified  # checked again before sending
 
-    async def test_write_tool_reports_why(self, monkeypatch):
-        from swarm_provenance_mcp import server
+    def test_hanging_primary_does_not_stall_startup(
+        self, monkeypatch, hanging_rpc, fake_rpc, startup_state
+    ):
+        """A primary that accepts and never answers used to cost ~60 s."""
+        import time
 
-        monkeypatch.setattr(server, "CHAIN_AVAILABLE", True)
-        monkeypatch.setattr(server, "chain_client", None)
-        monkeypatch.setattr(server, "_chain_init_error", "No contract code at 0xabc")
-        result = await server.handle_record_transform(
-            {"original_hash": H1, "new_hash": H2, "description": "d"}
+        server = startup_state
+        client = _real_client(monkeypatch, hanging_rpc, [fake_rpc.url])
+        start = time.monotonic()
+        result, reason = server._verify_write_contract(client)
+        elapsed = time.monotonic() - start
+        assert (result, reason) == (client, None)
+        assert client._contract_verified
+        assert "eth_getCode" in fake_rpc.calls  # the fallback answered
+        # Default budget is 5 s for the hung primary; 30 s timeouts took 60 s.
+        assert elapsed < server.STARTUP_CONTRACT_CHECK_TIMEOUT + 3
+
+    def test_fallback_on_another_chain_is_not_asked(
+        self, monkeypatch, hanging_rpc, startup_state
+    ):
+        server = startup_state
+        monkeypatch.setattr(server, "STARTUP_CONTRACT_CHECK_TIMEOUT", 0.4)
+        other = _FakeRpc(code=b"", chain_id=1)
+        try:
+            client = _real_client(monkeypatch, hanging_rpc, [other.url])
+            assert server._verify_write_contract(client) == (client, None)
+            assert "eth_getCode" not in other.calls
+        finally:
+            other.close()
+
+    async def test_empty_code_at_startup_is_rechecked(
+        self, monkeypatch, fake_rpc, startup_state
+    ):
+        """A node that briefly answers "no code" must not disable writes for good."""
+        server = startup_state
+        fake_rpc.code = b""
+        client = _real_client(monkeypatch, fake_rpc.url)
+        server.chain_client, server._chain_init_error = server._verify_write_contract(
+            client
         )
+        assert server.chain_client is None
+
+        await server._recheck_write_contract()  # still no code
+        assert server.chain_client is None
+        assert "No contract code" in server._chain_init_error
+
+        fake_rpc.code = DEPLOYED_CODE
+        await server._recheck_write_contract()
+        assert server.chain_client is client
+        assert server._chain_init_error is None
+
+
+def _held_back_client(server, check_side_effect=None):
+    """A wallet client the start-up check held back."""
+    client = MagicMock()
+    client.chain = "base-sepolia"
+    client._provider.chain_id = 84532
+    client.check_contract.side_effect = check_side_effect
+    server._unverified_write_client = client
+    server._chain_init_error = (
+        f"No contract code at {CONTRACT}. Chain: base-sepolia, chain id 84532."
+    )
+    return client
+
+
+WRITE_TOOLS = [
+    ("handle_record_transform", {"original_hash": H1, "new_hash": H2}),
+    ("handle_record_merge_transform", {"source_hashes": [H1, H2], "new_hash": H3}),
+    ("handle_anchor_hash", {"swarm_hash": H1}),
+    ("handle_set_storage_ref", {"data_hash": H1, "storage_ref": H2}),
+    ("handle_chain_balance", {}),
+]
+
+
+class TestWritesDisabledReason:
+    @pytest.mark.parametrize(
+        "handler,args", WRITE_TOOLS, ids=[w[0] for w in WRITE_TOOLS]
+    )
+    async def test_write_tool_reports_why(self, startup_state, handler, args):
+        server = startup_state
+        _held_back_client(
+            server, ChainConfigurationError(f"No contract code at {CONTRACT}.")
+        )
+        result = await getattr(server, handler)(args)
         assert result.isError
-        assert "No contract code at 0xabc" in result.content[0].text
+        text = result.content[0].text
+        assert f"No contract code at {CONTRACT}" in text
+        assert "chain id 84532" in text
+        assert "PROVENANCE_WALLET_KEY" not in text
+        assert "requires a funded wallet" not in text
+
+    async def test_write_proceeds_once_contract_found(self, startup_state):
+        server = startup_state
+        client = _held_back_client(server)  # check_contract now passes
+        client.transform.side_effect = RuntimeError("reached transform")
+        result = await server.handle_record_transform(
+            {"original_hash": H1, "new_hash": H2}
+        )
+        client.transform.assert_called_once()
+        assert server.chain_client is client
+        assert server._chain_init_error is None
+        assert "No contract code" not in result.content[0].text
+
+    async def test_health_check_reports_why(self, monkeypatch, startup_state):
+        server = startup_state
+        _held_back_client(
+            server, ChainConfigurationError(f"No contract code at {CONTRACT}.")
+        )
+        monkeypatch.setattr(server.settings, "chain_enabled", True)
+        gateway = MagicMock()
+        gateway.health_check.return_value = {"status": "unhealthy", "gateway_url": "x"}
+        monkeypatch.setattr(server, "gateway_client", gateway)
+        text = (await server.handle_health_check({})).content[0].text
+        assert "writes disabled" in text
+        assert f"No contract code at {CONTRACT}" in text
+        assert "no wallet" not in text
+
+    async def test_chain_health_reports_why(self, startup_state):
+        server = startup_state
+        _held_back_client(
+            server, ChainConfigurationError(f"No contract code at {CONTRACT}.")
+        )
+        provider = MagicMock(
+            chain="base-sepolia",
+            chain_id=84532,
+            contract_address=CONTRACT,
+            rpc_url="http://rpc",
+        )
+        provider.get_block_number.return_value = 1
+        from unittest.mock import patch
+
+        with patch(
+            "swarm_provenance_mcp.chain.provider.ChainProvider", return_value=provider
+        ):
+            text = (await server.handle_chain_health({})).content[0].text
+        assert "Chain writes are disabled" in text
+        assert f"No contract code at {CONTRACT}" in text
+
+
+class TestHandlerMissingEvent:
+    """Tool handlers must report a missing event as a failure with the hash."""
+
+    @pytest.mark.parametrize(
+        "handler,args",
+        [
+            ("handle_record_transform", {"original_hash": H1, "new_hash": H2}),
+            ("handle_anchor_hash", {"swarm_hash": H1}),
+        ],
+    )
+    async def test_missing_event_is_error(
+        self, monkeypatch, startup_state, handler, args
+    ):
+        server = startup_state
+        monkeypatch.setattr(server, "chain_client", _client(_web3()))
+        result = await getattr(server, handler)(args)
+        assert result.isError
+        text = result.content[0].text
+        assert "nothing was recorded" in text
+        assert TX_HASH.hex() in text
+        assert "recorded on-chain" not in text
+        assert "Hash anchored" not in text
+
+    async def test_restrict_original_failure_keeps_hash_and_is_error(
+        self, monkeypatch, startup_state
+    ):
+        server = startup_state
+        second_tx = bytes.fromhex("cc" * 32)
+        w3 = _web3()
+        w3.eth.send_raw_transaction.side_effect = [TX_HASH, second_tx]
+        w3.eth.wait_for_transaction_receipt.side_effect = [
+            _receipt(_log("DataTransformed", H1, H2)),
+            dict(_receipt(), transactionHash=second_tx),  # set_status: no event
+        ]
+        monkeypatch.setattr(server, "chain_client", _client(w3))
+        result = await server.handle_record_transform(
+            {"original_hash": H1, "new_hash": H2, "restrict_original": True}
+        )
+        text = result.content[0].text
+        assert "Transformation recorded" in text
+        assert "failed to restrict original" in text
+        assert second_tx.hex() in text
+        assert result.isError
+
+
+def test_tx_hash_not_repeated_when_already_in_message():
+    e = ChainTransactionError("failed: 0xabc", tx_hash="0xabc")
+    assert str(e) == "failed: 0xabc"
+    assert str(ChainTransactionError("failed", tx_hash="0xabc")) == "failed (tx 0xabc)"
+    assert str(ChainTransactionError("failed")) == "failed"

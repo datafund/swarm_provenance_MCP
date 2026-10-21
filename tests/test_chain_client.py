@@ -34,10 +34,12 @@ UNREGISTERED_RECORD = (DUMMY_HASH_BYTES, ZERO_ADDRESS, 0, "", [], [], 0)
 
 
 def _deployed_code() -> bytes:
-    from eth_utils import keccak
+    from web3 import Web3
     from swarm_provenance_mcp.chain.contract import REQUIRED_SELECTORS
 
-    return b"\x60\x80" + b"".join(keccak(text=s)[:4] for s in REQUIRED_SELECTORS)
+    return b"\x60\x80" + b"".join(
+        bytes(Web3.keccak(text=s)[:4]) for s in REQUIRED_SELECTORS
+    )
 
 
 DEPLOYED_CODE = _deployed_code()

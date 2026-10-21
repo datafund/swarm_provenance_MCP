@@ -1,0 +1,75 @@
+name: Tests
+
+# Required check for main and development, and the gate in front of every
+# image publish (docker-publish.yml calls this workflow).
+on:
+  push:
+    branches: [ main, development ]
+  pull_request:
+    branches: [ main, development ]
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Keep every test and smoke run off the production gateway.
+  SWARM_GATEWAY_URL: http://127.0.0.1:9
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package with test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+
+      - name: Run tests (no Docker, no live gateway)
+        run: pytest -m "not docker"
+
+  install-smoke:
+    # A fresh, non-editable install with only the declared dependencies must
+    # start and answer tools/list.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Fresh install into a clean venv
+        run: |
+          python -m venv /tmp/fresh
+          /tmp/fresh/bin/pip install --upgrade pip
+          /tmp/fresh/bin/pip install .
+          /tmp/fresh/bin/pip list
+
+      - name: stdio initialize + tools/list
+        run: python scripts/mcp_stdio_smoke.py -- /tmp/fresh/bin/swarm-provenance-mcp
+
+  image-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t swarm-provenance-mcp:smoke .
+
+      - name: stdio initialize + tools/list in the container
+        run: |
+          python3 scripts/mcp_stdio_smoke.py -- \
+            docker run -i --rm -e SWARM_GATEWAY_URL="$SWARM_GATEWAY_URL" \
+            swarm-provenance-mcp:smoke

@@ -12,7 +12,15 @@ env:
   IMAGE_NAME: datafund/swarm-provenance-mcp
 
 jobs:
+  # Nothing is published unless the test suite, a fresh-install start and an
+  # image start all pass.
+  tests:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/tests.yml
+
   build-and-push:
+    needs: tests
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -31,6 +39,22 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Build image for the smoke test (amd64, not pushed)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: swarm-provenance-mcp:smoke
+          cache-from: type=gha
+
+      - name: Smoke test the image (stdio initialize + tools/list)
+        run: |
+          python3 scripts/mcp_stdio_smoke.py -- \
+            docker run -i --rm -e SWARM_GATEWAY_URL=http://127.0.0.1:9 \
+            swarm-provenance-mcp:smoke
 
       - name: Log in to GHCR
         uses: docker/login-action@v3

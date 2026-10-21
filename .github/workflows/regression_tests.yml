@@ -2,9 +2,9 @@ name: Regression and Safety Tests
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main, development ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, development ]
   schedule:
     # Run daily at 2 AM UTC to catch issues early
     - cron: '0 2 * * *'
@@ -35,7 +35,6 @@ jobs:
     - name: Run smoke tests
       run: |
         pytest tests/test_integration_smoke.py -v --tb=short
-      continue-on-error: true
 
     - name: Run schema compliance tests
       run: |

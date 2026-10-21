@@ -831,12 +831,15 @@ ruff check swarm_provenance_mcp/
 ## Dependencies
 
 - **Core Dependencies**:
-  - `mcp>=1.0.0`: Model Context Protocol framework
-  - `requests>=2.31.0`: HTTP client for gateway communication
-  - `pydantic>=2.0.0`: Data validation and settings
-  - `python-dotenv>=1.0.0`: Environment configuration
-  - `web3>=6.0.0`: Ethereum blockchain interaction for on-chain provenance
-  - `eth-account>=0.10.0`: Wallet and transaction signing for chain anchoring
+  - `mcp>=1.26,<2`: Model Context Protocol framework (the server is written for mcp 1.x)
+  - `requests>=2.31.0,<3`: HTTP client for gateway communication
+  - `pydantic>=2.0.0,<3` and `pydantic-settings>=2.0,<3`: Data validation and settings
+  - `python-dotenv>=1.0.0,<2`: Environment configuration
+  - `web3>=7,<8`: Ethereum blockchain interaction for on-chain provenance
+  - `eth-account>=0.13,<0.14`: Wallet and transaction signing for chain anchoring
+
+  Upper bounds are deliberate. Raise one only together with a passing test run
+  against the new version.
 
 - **Development Dependencies**:
   - `pytest`: Testing framework

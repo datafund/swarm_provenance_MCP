@@ -83,6 +83,21 @@ Tests run automatically on:
 - Daily at 2 AM UTC (scheduled)
 - Manual trigger via GitHub Actions
 
+## The test run never touches the production gateway
+
+`tests/conftest.py` sets `SWARM_GATEWAY_URL` to `SWARM_TEST_GATEWAY_URL`, or to a
+closed local port if that is unset, before the package is imported. A shell
+`SWARM_GATEWAY_URL` or `.env` value does not leak into tests. Tests marked
+`integration` are skipped unless `--run-integration` is passed. Any request to
+the production gateway host fails the test that sent it.
+
+To check that a fresh install starts:
+
+```bash
+python scripts/mcp_stdio_smoke.py -- swarm-provenance-mcp
+python scripts/mcp_stdio_smoke.py -- docker run -i --rm swarm-provenance-mcp
+```
+
 ## Test Markers
 
 Use pytest markers to run specific test categories:
@@ -91,8 +106,9 @@ Use pytest markers to run specific test categories:
 # Fast tests only
 pytest -m "not slow"
 
-# Integration tests only
-pytest -m integration
+# Integration tests only (skipped unless --run-integration is given;
+# point them at a local gateway, never production)
+SWARM_TEST_GATEWAY_URL=http://localhost:8000 pytest -m integration --run-integration
 
 # Security tests only
 pytest -m security

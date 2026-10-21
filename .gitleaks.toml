@@ -1,9 +1,22 @@
-# gitleaks rules for this repository: the default rule set plus a narrow allowlist.
+# gitleaks rules for this repository: the default rule set, one extra rule
+# and a narrow allowlist.
 [extend]
 useDefault = true
 
+# The default generic rule misses an Ethereum private key assigned to a short
+# name such as `pk = "0x..."` or `SIGNER=0x...`. Flag a 0x-prefixed 64-hex
+# value only when it is assigned to a key-like name: bare 64-hex values are
+# also transaction hashes, batch IDs and Swarm references.
+[[rules]]
+id = "hex-private-key-assignment"
+description = "0x-prefixed 64-hex value assigned to a key-like name"
+regex = '''(?i)(?:\b[a-z0-9_.-]*?(?:private[_-]?key|priv[_-]?key|signer|wallet[_-]?key|secret|mnemonic)[a-z0-9_.-]*|(?:\b|[a-z0-9]*[_.-])pk(?:[_.-][a-z0-9_.-]*)?)["'`]?\s*(?:=>|:=|[:=])\s*["'`]?(0x[0-9a-f]{64})\b'''
+secretGroup = 1
+keywords = ["private", "priv", "pk", "signer", "wallet", "secret", "mnemonic"]
+
 # Hardhat/Anvil accounts #0 and #1. These private keys are published in the
-# Hardhat and Foundry docs and are used only as fixtures in tests.
+# Hardhat and Foundry docs and are used as test fixtures. The allowlist applies
+# to every rule and every path.
 [[allowlists]]
 description = "Publicly known Hardhat test account keys"
 regexes = [

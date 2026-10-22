@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     )
 
     mcp_server_version: str = Field(
-        default="0.1.0",
+        default="0.2.0",
         description="Version of the MCP server",
     )
 

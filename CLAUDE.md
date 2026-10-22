@@ -165,7 +165,7 @@ Read from the process environment, then an env file. The env file is never taken
 - `DEFAULT_STAMP_SIZE`: Default stamp size — `small`, `medium`, or `large` (default: `small`)
 - `PAYMENT_MODE`: Gateway payment tier — `free` for rate-limited free tier (default: `free`)
 - `MCP_SERVER_NAME`: Server identification (default: `swarm-provenance-mcp`)
-- `MCP_SERVER_VERSION`: Server version (default: `0.1.0`)
+- `MCP_SERVER_VERSION`: Server version (default: `0.2.0`)
 - `CHAIN_ENABLED`: Enable on-chain provenance anchoring (default: `false`)
 - `CHAIN_NAME`: Blockchain network (`base-sepolia`, `base`, or `localhost`, default: `base-sepolia`)
 - `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x)

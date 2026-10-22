@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-ARG VERSION=0.1.0
+ARG VERSION=0.2.0
 
 LABEL org.opencontainers.image.title="Swarm Provenance MCP" \
       org.opencontainers.image.description="MCP server for Swarm postage stamp management and provenance data storage" \

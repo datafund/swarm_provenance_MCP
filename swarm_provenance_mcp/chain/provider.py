@@ -453,7 +453,7 @@ class ChainProvider:
             if isinstance(e, (ChainConnectionError, ChainIdMismatchError)):
                 raise
             raise ChainConnectionError(
-                f"RPC health check failed: {e}",
+                f"RPC health check failed: {redact_urls(e)}",
                 rpc_url=self.rpc_url,
             ) from e
 
@@ -474,7 +474,7 @@ class ChainProvider:
             if self._fallback_from(used):
                 return self.get_block_number()
             raise ChainConnectionError(
-                f"Failed to get block number: {e}",
+                f"Failed to get block number: {redact_urls(e)}",
                 rpc_url=self.rpc_url,
             ) from e
 

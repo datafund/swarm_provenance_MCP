@@ -97,7 +97,7 @@ def _rpc_failover(method):
                     continue
                 raise ChainConnectionError(
                     f"RPC endpoint unavailable and no fallback could serve the "
-                    f"request: {e}",
+                    f"request: {redact_urls(e)}",
                     rpc_url=failed_url,
                 ) from e
 
@@ -426,7 +426,7 @@ class ChainClient:
             if "tx_hash" in dir():
                 tx_hash_str = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
             raise ChainTransactionError(
-                f"Transaction failed: {e}",
+                f"Transaction failed: {redact_urls(e)}",
                 tx_hash=tx_hash_str,
                 broadcast=broadcast,
             ) from e

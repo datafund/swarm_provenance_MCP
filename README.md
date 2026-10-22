@@ -826,6 +826,21 @@ black swarm_provenance_mcp/
 ruff check swarm_provenance_mcp/
 ```
 
+### Editor settings
+
+The repository commits no editor hooks, MCP servers or permissions. Shared editor settings run on every contributor's machine, so keep your own in per-developer configuration:
+
+- `.claude/settings.local.json` for project hooks and permissions. It is gitignored, and so is any `.claude/*.local.json`.
+- `~/.claude/settings.json` for settings that apply to all your projects.
+- `claude mcp add --scope local` or `--scope user` for MCP servers, instead of a committed `.mcp.json`.
+
+Don't commit:
+
+- Hooks or MCP servers that run a package through `npx`, `uvx` or `pipx` without an exact version, such as `@latest` or a bare package name.
+- Auto-approve permissions (`permissions.allow`) or `enableAllProjectMcpServers`.
+
+`tests/test_editor_settings.py` fails if a committed `.claude/*.json` or `.mcp.json` breaks these rules.
+
 ## Dependencies
 
 - **Core Dependencies**:

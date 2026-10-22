@@ -6,6 +6,40 @@ import requests
 from requests.exceptions import RequestException
 
 from .config import settings
+from .untrusted import MAX_ERROR_DETAIL_CHARS, flatten, one_line
+
+# Longest gateway string value passed on to the server, in characters.
+MAX_GATEWAY_STRING_CHARS = 1000
+
+
+def _clean_strings(value: Any) -> Any:
+    """Flatten and cap every string in a decoded gateway JSON body.
+
+    The server prints many gateway fields into tool results. Cleaning them
+    here means no field, including ones added later, can carry a line break
+    (and so forge a hint line) or a huge value. Hidden characters are left
+    for the printing site (``quote``/``one_line``) to escape, once.
+    """
+    if isinstance(value, str):
+        return flatten(value, MAX_GATEWAY_STRING_CHARS)
+    if isinstance(value, dict):
+        return {_clean_strings(k): _clean_strings(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_clean_strings(v) for v in value]
+    return value
+
+
+def _json(response) -> Any:
+    """The response body as JSON, with its strings cleaned."""
+    try:
+        return _clean_strings(response.json())
+    except RecursionError:
+        # A body nested too deeply is not a real gateway response. Depending
+        # on the Python version the RecursionError comes from json decoding
+        # (3.10's scanner) or from the cleaner walking the decoded value.
+        raise requests.exceptions.InvalidJSONError(
+            "Gateway response is nested too deeply to process", response=response
+        ) from None
 
 
 class SwarmGatewayClient:
@@ -48,13 +82,19 @@ class SwarmGatewayClient:
             elif isinstance(d, str):
                 detail = d
         except Exception:
-            detail = response.text[:200] if response.text else ""
+            detail = response.text or ""
+        # The detail can echo request content or come from a misbehaving
+        # proxy: keep it to one short line so it cannot flood the result or
+        # pass for a hint line.
+        detail = one_line(detail, MAX_ERROR_DETAIL_CHARS)
         try:
             response.raise_for_status()
         except requests.HTTPError as e:
+            # The reason phrase comes from the status line: cap it as well.
+            message = one_line(str(e), 2 * MAX_ERROR_DETAIL_CHARS)
             if detail:
-                raise requests.HTTPError(f"{e} — {detail}", response=response) from e
-            raise
+                message += f" — {detail}"
+            raise requests.HTTPError(message, response=response) from e
 
     def purchase_stamp(
         self,
@@ -89,7 +129,7 @@ class SwarmGatewayClient:
         # success into an apparent failure that invites a second purchase.
         response = self.session.post(url, json=payload, timeout=120)
         self._raise_with_detail(response)
-        return response.json()
+        return _json(response)
 
     def get_stamp_details(self, stamp_id: str) -> Dict[str, Any]:
         """Get details for a specific stamp.
@@ -106,7 +146,7 @@ class SwarmGatewayClient:
         url = f"{self.base_url}/api/v1/stamps/{stamp_id}"
         response = self.session.get(url, timeout=30)
         self._raise_with_detail(response)
-        return response.json()
+        return _json(response)
 
     def list_stamps(self) -> Dict[str, Any]:
         """List local stamps available on the gateway.
@@ -120,7 +160,7 @@ class SwarmGatewayClient:
         url = f"{self.base_url}/api/v1/stamps/"
         response = self.session.get(url, timeout=30)
         self._raise_with_detail(response)
-        return response.json()
+        return _json(response)
 
     def extend_stamp(self, stamp_id: str, duration_hours: int) -> Dict[str, Any]:
         """Extend an existing stamp's TTL.
@@ -142,10 +182,14 @@ class SwarmGatewayClient:
         # success into an "outcome unknown" the agent has to resolve.
         response = self.session.patch(url, json=payload, timeout=120)
         self._raise_with_detail(response)
-        return response.json()
+        return _json(response)
 
     def upload_data(
-        self, data: str, stamp_id: str, content_type: str = "application/json"
+        self,
+        data: str,
+        stamp_id: str,
+        content_type: str = "application/json",
+        sign: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Upload data to Swarm network.
 
@@ -153,6 +197,8 @@ class SwarmGatewayClient:
             data: Data content as string (max 4096 bytes)
             stamp_id: Postage stamp ID to use for upload
             content_type: MIME type of the content (default: application/json)
+            sign: Signing method for provenance. Use 'notary' to have the gateway
+                  cryptographically sign the data at upload time.
 
         Returns:
             Upload response with reference hash
@@ -174,6 +220,8 @@ class SwarmGatewayClient:
         files = {"file": ("data", data_bytes, content_type)}
 
         params = {"stamp_id": stamp_id, "content_type": content_type}
+        if sign:
+            params["sign"] = sign
 
         # For file uploads, temporarily remove Content-Type from session to let requests set multipart/form-data
         original_content_type = self.session.headers.pop("Content-Type", None)
@@ -184,7 +232,7 @@ class SwarmGatewayClient:
             if original_content_type:
                 self.session.headers["Content-Type"] = original_content_type
         self._raise_with_detail(response)
-        return response.json()
+        return _json(response)
 
     def download_data(self, reference: str) -> bytes:
         """Download data from Swarm network.
@@ -217,7 +265,7 @@ class SwarmGatewayClient:
         self._raise_with_detail(response)
 
         # Create meaningful health status
-        health_data = response.json() if response.content else {}
+        health_data = _json(response) if response.content else {}
         return {
             "status": "healthy",
             "gateway_url": self.base_url,
@@ -240,7 +288,7 @@ class SwarmGatewayClient:
         url = f"{self.base_url}/api/v1/stamps/{stamp_id}/check"
         response = self.session.get(url, timeout=30)
         self._raise_with_detail(response)
-        return response.json()
+        return _json(response)
 
     def get_wallet_info(self) -> Dict[str, Any]:
         """Get wallet address and BZZ balance.
@@ -254,7 +302,7 @@ class SwarmGatewayClient:
         url = f"{self.base_url}/api/v1/wallet"
         response = self.session.get(url, timeout=30)
         self._raise_with_detail(response)
-        return response.json()
+        return _json(response)
 
     def get_notary_info(self) -> Dict[str, Any]:
         """Get notary service status and configuration.
@@ -268,7 +316,7 @@ class SwarmGatewayClient:
         url = f"{self.base_url}/api/v1/notary/info"
         response = self.session.get(url, timeout=30)
         self._raise_with_detail(response)
-        return response.json()
+        return _json(response)
 
     def close(self):
         """Close the HTTP session."""

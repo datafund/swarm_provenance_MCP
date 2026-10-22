@@ -827,7 +827,8 @@ class TestRestrictOriginal:
         result = await server.handle_record_transform(dict(self.ARGS))
         assert result.isError
         text = result.content[0].text
-        assert "Transform recorded, restriction NOT applied" in text
+        assert "failed to restrict" in text
+        assert "IS recorded on-chain" in text
         assert TX_HASH.hex() in text
 
 

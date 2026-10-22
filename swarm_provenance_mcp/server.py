@@ -28,7 +28,7 @@ from mcp.types import (
 )
 from requests.exceptions import RequestException
 
-from .config import settings
+from .config import WALLET_KEY_HINT, settings
 from .gateway_client import SwarmGatewayClient
 from .redact import redact_urls
 from .untrusted import (
@@ -2796,7 +2796,7 @@ async def handle_chain_balance(arguments: Dict[str, Any]) -> CallToolResult:
                     type="text",
                     text=_format_error(
                         _no_write_client_text(
-                            "chain_balance requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                            f"chain_balance requires a funded wallet. {WALLET_KEY_HINT}\n"
                             "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
                             "work without a wallet."
                         ),
@@ -2947,7 +2947,7 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
                     type="text",
                     text=_format_error(
                         _no_write_client_text(
-                            "anchor_hash requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                            f"anchor_hash requires a funded wallet. {WALLET_KEY_HINT}\n"
                             "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
                             "work without a wallet."
                         ),
@@ -3399,7 +3399,7 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
                     type="text",
                     text=_format_error(
                         _no_write_client_text(
-                            "record_transform requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                            f"record_transform requires a funded wallet. {WALLET_KEY_HINT}\n"
                             "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
                             "work without a wallet."
                         ),
@@ -3645,7 +3645,7 @@ async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolRe
                     type="text",
                     text=_format_error(
                         _no_write_client_text(
-                            "record_merge_transform requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                            f"record_merge_transform requires a funded wallet. {WALLET_KEY_HINT}\n"
                             "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
                             "work without a wallet."
                         ),
@@ -3999,7 +3999,7 @@ async def handle_set_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
                     type="text",
                     text=_format_error(
                         _no_write_client_text(
-                            "set_storage_ref requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
+                            f"set_storage_ref requires a funded wallet. {WALLET_KEY_HINT}\n"
                             "Read-only chain tools (verify_hash, get_provenance, lookup_by_storage_ref, chain_health) "
                             "work without a wallet."
                         ),

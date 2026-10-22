@@ -85,6 +85,8 @@ if ! err="$(cd / && "$VENV/bin/python" -c "import swarm_provenance_mcp.server" 2
   exit 1
 fi
 
-# config.py reads .env relative to the working directory.
+# Run from the repo. The working directory does not affect configuration:
+# config.py reads the env file from a fixed location (#152), and warns if it
+# finds a .env here that it is ignoring.
 cd "$DIR"
 exec "$VENV/bin/python" -m swarm_provenance_mcp.server "$@"

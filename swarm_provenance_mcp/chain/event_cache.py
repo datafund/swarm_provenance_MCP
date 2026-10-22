@@ -90,7 +90,9 @@ class TransformationEventCache:
 
                 if is_transport_error(e):
                     raise
-                logger.debug("DataMerged event scan skipped: %s", e)
+                from ..redact import redact_urls
+
+                logger.debug("DataMerged event scan skipped: %s", redact_urls(e))
                 merge_events = []
 
             for orig_bytes, new_bytes, desc in events:

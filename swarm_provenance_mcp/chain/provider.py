@@ -11,7 +11,7 @@ import logging
 import threading
 import weakref
 from typing import List, Optional
-from urllib.parse import urlparse
+from ..redact import redact_urls, url_host
 
 from .exceptions import (
     ChainConfigurationError,
@@ -146,10 +146,7 @@ def is_testnet_chain_id(chain_id: int) -> bool:
 
 def _host(url: str) -> str:
     """Hostname only, so log lines never carry an RPC path or API key."""
-    try:
-        return urlparse(url).hostname or "?"
-    except Exception:
-        return "?"
+    return url_host(url, "?")
 
 
 def _http_provider(Web3, url: str, timeout: int):
@@ -339,7 +336,7 @@ class ChainProvider:
             logger.warning(
                 "Could not read the chain id of the RPC at start-up (%s); "
                 "it is checked before first use and before every transaction",
-                e,
+                redact_urls(e),
             )
             return
         self._verified.add(self._web3)
@@ -410,16 +407,20 @@ class ChainProvider:
                 candidate = Web3(_http_provider(Web3, url, self._request_timeout))
                 self._probe(candidate, url)
             except ChainIdMismatchError as e:
-                logger.warning("RPC fallback %s refused: %s", _host(url), e)
+                logger.warning(
+                    "RPC fallback %s refused: %s", _host(url), redact_urls(e)
+                )
                 mismatches.append(e)
                 continue
             except Exception as e:
-                logger.debug("RPC fallback %s failed probe: %s", url, e)
+                logger.debug(
+                    "RPC fallback %s failed probe: %s", _host(url), redact_urls(e)
+                )
                 continue
             logger.info(
                 "RPC fallback: switched from %s to %s",
-                self.rpc_url,
-                url,
+                _host(self.rpc_url),
+                _host(url),
             )
             self._web3 = candidate
             self.rpc_url = url

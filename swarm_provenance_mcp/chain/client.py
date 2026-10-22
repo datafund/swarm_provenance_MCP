@@ -14,6 +14,7 @@ import threading
 from typing import List, Optional
 
 from .contract import DataStatus
+from ..redact import redact_urls, url_host
 from .provider import is_transport_error
 from .exceptions import (
     ChainConfigurationError,
@@ -45,12 +46,7 @@ _BINDING_LOCK = threading.Lock()
 
 def _rpc_host(url: str) -> str:
     """Hostname of an RPC URL for logs: paths and queries can carry API keys."""
-    try:
-        from urllib.parse import urlparse
-
-        return urlparse(url).hostname or "<rpc>"
-    except Exception:
-        return "<rpc>"
+    return url_host(url, "<rpc>")
 
 
 def _should_fail_over(e: Exception) -> bool:
@@ -94,9 +90,9 @@ def _rpc_failover(method):
                     logger.warning(
                         "%s: RPC %s unavailable (%s), retrying on %s",
                         method.__name__,
-                        failed_url,
-                        e,
-                        self._provider.rpc_url,
+                        _rpc_host(failed_url),
+                        redact_urls(e),
+                        _rpc_host(self._provider.rpc_url),
                     )
                     continue
                 raise ChainConnectionError(
@@ -673,7 +669,7 @@ class ChainClient:
             except Exception as e:
                 if is_transport_error(e):
                     raise  # retry on another endpoint, don't truncate
-                logger.warning("State-based duplicate check failed: %s", e)
+                logger.warning("State-based duplicate check failed: %s", redact_urls(e))
         else:
             deploy_block = self._provider.deploy_block
             if deploy_block is not None:
@@ -700,7 +696,9 @@ class ChainClient:
                 except Exception as e:
                     if is_transport_error(e):
                         raise  # retry on another endpoint, don't truncate
-                    logger.warning("Duplicate check failed, proceeding: %s", e)
+                    logger.warning(
+                        "Duplicate check failed, proceeding: %s", redact_urls(e)
+                    )
 
         tx = self._contract.build_record_transformation_tx(
             original_hash=original_hash,
@@ -1267,7 +1265,7 @@ class ChainClient:
         logger.debug(
             "Chain health check: chain=%s rpc=%s",
             self._provider.chain,
-            self._provider.rpc_url,
+            _rpc_host(self._provider.rpc_url),
         )
 
         result = self._provider.health_check()
@@ -1335,7 +1333,7 @@ class ChainClient:
                     raise  # retry on another endpoint, don't truncate
                 logger.warning(
                     "Full event scan failed, falling back to per-node queries: %s",
-                    e,
+                    redact_urls(e),
                 )
 
         chain = []
@@ -1381,7 +1379,7 @@ class ChainClient:
                     logger.warning(
                         "State-based forward read failed for %s: %s",
                         current_hash,
-                        e,
+                        redact_urls(e),
                     )
                 # Reverse: parents via state
                 try:
@@ -1396,7 +1394,7 @@ class ChainClient:
                     logger.warning(
                         "State-based reverse read failed for %s: %s",
                         current_hash,
-                        e,
+                        redact_urls(e),
                     )
             elif use_local_index:
                 # V1 contract: use pre-built event cache index
@@ -1437,7 +1435,9 @@ class ChainClient:
                 except Exception as e:
                     if is_transport_error(e):
                         raise  # retry on another endpoint, don't truncate
-                    logger.warning("Event query failed for %s: %s", current_hash, e)
+                    logger.warning(
+                        "Event query failed for %s: %s", current_hash, redact_urls(e)
+                    )
                     for t in record.transformations:
                         if t.new_data_hash and t.new_data_hash not in visited:
                             to_visit.append((t.new_data_hash, current_depth + 1))
@@ -1458,7 +1458,7 @@ class ChainClient:
                     logger.warning(
                         "Reverse event query failed for %s: %s",
                         current_hash,
-                        e,
+                        redact_urls(e),
                     )
 
             chain.append(record)

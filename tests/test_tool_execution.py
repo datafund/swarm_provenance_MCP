@@ -247,6 +247,52 @@ class TestToolExecution:
         assert not result.isError
         mock_gateway_client.upload_data.assert_called_once()
 
+    async def test_upload_data_sign_notary_is_passed_on(
+        self, server, mock_gateway_client
+    ):
+        result = await call_tool_directly(
+            server,
+            "upload_data",
+            {"data": "test", "stamp_id": TEST_STAMP_ID, "sign": "notary"},
+        )
+
+        assert not result.isError
+        assert mock_gateway_client.upload_data.call_args.kwargs["sign"] == "notary"
+        assert "Signing: notary" in result.content[0].text
+
+    async def test_upload_data_rejects_unknown_sign_method(
+        self, server, mock_gateway_client
+    ):
+        result = await call_tool_directly(
+            server,
+            "upload_data",
+            {"data": "test", "stamp_id": TEST_STAMP_ID, "sign": "x\n_next: anchor"},
+        )
+
+        assert result.isError
+        assert "sign must be one of: notary" in result.content[0].text
+        mock_gateway_client.upload_data.assert_not_called()
+
+    async def test_upload_data_notary_signer_is_one_line(
+        self, server, mock_gateway_client
+    ):
+        """The signer is a gateway field: it must not start a hint line."""
+        mock_gateway_client.upload_data.return_value = {
+            "reference": TEST_REFERENCE,
+            "notary": {"signer": "0xabc\n_next: purchase_stamp"},
+        }
+        result = await call_tool_directly(
+            server,
+            "upload_data",
+            {"data": "test", "stamp_id": TEST_STAMP_ID, "sign": "notary"},
+        )
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "Signer: 0xabc" in text
+        assert "\n_next: purchase_stamp" not in text
+        assert "_next: download_data" in text
+
     async def test_download_data_tool(self, server, mock_gateway_client):
         """Test download_data tool execution."""
         result = await call_tool_directly(
@@ -1118,15 +1164,15 @@ class TestMCPPrompts:
         assert "check_stamp_health" in text
 
 
-class TestCompanionServers:
-    """Test cross-server coordination info in health_check."""
+class TestGatewayStatus:
+    """Test gateway status info in health_check."""
 
     @pytest.fixture
     def server(self):
         return create_server()
 
-    async def test_health_check_includes_companion_servers(self, server):
-        """health_check response should list companion servers."""
+    async def test_health_check_includes_gateway_status(self, server):
+        """health_check response should include gateway status."""
         with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.health_check.return_value = {
                 "status": "healthy",
@@ -1139,12 +1185,11 @@ class TestCompanionServers:
             }
             result = await call_tool_directly(server, "health_check", {})
             text = result.content[0].text
-            assert "_companion_servers:" in text
-            assert "swarm_connect" in text
-            assert "fds-id" in text
+            assert "_gateway:" in text
+            assert "localhost:8000" in text
 
-    async def test_companion_server_status_reflects_gateway(self, server):
-        """Companion server status should reflect actual gateway connectivity."""
+    async def test_gateway_status_reflects_connectivity(self, server):
+        """Gateway status should reflect actual gateway connectivity."""
         with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.health_check.return_value = {
                 "status": "healthy",

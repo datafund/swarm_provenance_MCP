@@ -193,3 +193,20 @@ def test_deeply_nested_gateway_body_is_a_request_error(requests_mock):
     )
     with pytest.raises(requests.exceptions.RequestException):
         client().list_stamps()
+
+
+def test_recursion_error_while_decoding_is_a_request_error(requests_mock):
+    # Python 3.10's JSON scanner raises RecursionError itself, before the
+    # string cleaner runs. Simulate that on every version.
+    requests_mock.get(
+        f"{G}/api/v1/stamps/",
+        text="[]",
+        headers={"Content-Type": "application/json"},
+    )
+
+    def too_deep(*args, **kwargs):
+        raise RecursionError("maximum recursion depth exceeded while decoding")
+
+    with patch.object(requests.Response, "json", too_deep):
+        with pytest.raises(requests.exceptions.InvalidJSONError):
+            client().list_stamps()

@@ -13,6 +13,7 @@ from enum import IntEnum
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from ..redact import redact_urls
 from .provider import is_transport_error
 from .exceptions import ChainConfigurationError, ChainValidationError
 
@@ -610,7 +611,10 @@ class DataProvenanceContract:
             # the record from the scalar mapping.
             if self.supports_transformation_links():
                 raise  # genuine error on v2 — re-raise
-            logger.debug("getDataRecord decode failed on v1, using fallback: %s", e)
+            logger.debug(
+                "getDataRecord decode failed on v1, using fallback: %s",
+                redact_urls(e),
+            )
             return self._get_data_record_v1_fallback(hash_bytes)
 
     def _get_data_record_v1_fallback(self, hash_bytes: bytes) -> Tuple:

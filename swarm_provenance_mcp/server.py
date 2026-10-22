@@ -30,6 +30,7 @@ from requests.exceptions import RequestException
 
 from .config import settings
 from .gateway_client import SwarmGatewayClient
+from .redact import redact_urls
 from .untrusted import (
     QUOTED_NOTE,
     defang_hint_lines,
@@ -138,14 +139,14 @@ def _verify_write_contract(client):
         client.probe_contract(timeout=STARTUP_CONTRACT_CHECK_TIMEOUT)
     except ChainConfigurationError as e:
         reason = _contract_error_reason(client, e)
-        logger.error("Chain writes disabled: %s", reason)
+        logger.error("Chain writes disabled: %s", redact_urls(reason))
         _unverified_write_client = client
         return None, reason
     except Exception as e:
         logger.warning(
             "Could not verify the contract at start-up (%s); it is checked "
             "again before the first transaction",
-            e,
+            redact_urls(e),
         )
     return client, None
 
@@ -170,7 +171,9 @@ async def _recheck_write_contract() -> None:
         _chain_init_error = _contract_error_reason(client, e)
         return
     except Exception as e:
-        logger.warning("Contract re-check failed (%s); writes stay disabled", e)
+        logger.warning(
+            "Contract re-check failed (%s); writes stay disabled", redact_urls(e)
+        )
         return
     logger.info("Contract found at %s; chain writes enabled", client.contract_address)
     chain_client = client
@@ -210,7 +213,7 @@ if settings.chain_enabled:
         if isinstance(e, ChainIdMismatchError):
             # The RPC is on another chain than CHAIN_NAME: refuse to start
             # rather than serve reads from, or sign for, the wrong network.
-            logger.error("Chain configuration refused: %s", e)
+            logger.error("Chain configuration refused: %s", redact_urls(e))
             raise
         # chain_client stays None but CHAIN_AVAILABLE remains True —
         # read-only tools (verify_hash, get_provenance, etc.) work
@@ -222,7 +225,7 @@ if settings.chain_enabled:
                 settings.chain_name,
             )
         else:
-            logger.warning("Chain client init failed: %s", e)
+            logger.warning("Chain client init failed: %s", redact_urls(e))
 
 
 def _load_skills_content() -> str:
@@ -374,9 +377,11 @@ upload_data (transformed data) → record_transform (original, new, description)
 
 COMPANION SERVERS:
 - swarm_connect gateway (required) — the FastAPI gateway this server talks to, handles Bee node communication
-- fds-id MCP (optional) — identity and signing server for cryptographic provenance chain anchoring
-The health_check tool reports gateway connectivity. For full provenance workflows with signed data, an fds-id server is needed but not required for basic storage.
+The health_check tool reports gateway connectivity and connection status.
 """.strip().replace("__CHAIN_NETWORK__", _chain_network_text())
+
+# Values accepted for upload_data's sign argument (the schema's enum).
+UPLOAD_SIGN_METHODS = frozenset({"notary"})
 
 # Validation patterns
 STAMP_ID_PATTERN = re.compile(r"^[a-fA-F0-9]{64}$")
@@ -1118,6 +1123,11 @@ def create_server() -> Server:
                             "description": "MIME type of the content (e.g., application/json, text/plain, image/png)",
                             "default": "application/json",
                         },
+                        "sign": {
+                            "type": "string",
+                            "description": "Signing method for provenance. Use 'notary' to have the gateway cryptographically sign the data at upload time, creating a verifiable proof of upload. Check notary_info first to confirm signing is available. Omit it for an unsigned upload.",
+                            "enum": sorted(UPLOAD_SIGN_METHODS),
+                        },
                     },
                     "required": ["data", "stamp_id"],
                 },
@@ -1438,7 +1448,9 @@ def create_server() -> Server:
                     isError=True,
                 )
         except Exception as e:
-            logger.error(f"Error in tool {name}: {e}", exc_info=True)
+            logger.error(
+                "Error in tool %s: %s", name, redact_urls(e), exc_info=True
+            )
             retryable = _is_retryable_error(e)
             return CallToolResult(
                 content=[
@@ -2093,6 +2105,11 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
         if not stamp_id:
             raise ValueError("Stamp ID cannot be empty")
         content_type = arguments.get("content_type", "application/json")
+        sign = arguments.get("sign") or None
+        if sign is not None and sign not in UPLOAD_SIGN_METHODS:
+            raise ValueError(
+                "sign must be one of: " + ", ".join(sorted(UPLOAD_SIGN_METHODS))
+            )
 
         # Validate inputs
         validate_data_size(data)
@@ -2141,16 +2158,26 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
                 raise
 
         # Proceed with upload if stamp validation passed
-        result = gateway_client.upload_data(data, clean_stamp_id, content_type)
+        result = gateway_client.upload_data(data, clean_stamp_id, content_type, sign=sign)
 
         response_text = f"🎉 Data uploaded successfully to Swarm!\n\n"
         response_text += f"📄 Upload Details:\n"
         response_text += f"   Size: {len(data.encode('utf-8')):,} bytes\n"
         response_text += f"   Content Type: {content_type}\n"
-        response_text += f"   Stamp Used: `{clean_stamp_id}`\n\n"
-        response_text += f"🔗 Retrieval Information:\n"
+        response_text += f"   Stamp Used: `{clean_stamp_id}`\n"
+        if sign:
+            response_text += f"   Signing: {sign}\n"
+        response_text += f"\n🔗 Retrieval Information:\n"
         response_text += f"   Reference Hash: `{result['reference']}`\n"
         response_text += f"   💡 Copy this reference hash to download your data later using the 'download_data' tool."
+
+        # Surface notary signature details when present
+        notary_info = result.get("notary") or result.get("signature")
+        if notary_info and isinstance(notary_info, dict):
+            signer = notary_info.get("signer") or notary_info.get("signerAddress")
+            if signer:
+                # A gateway field: printed on one line and capped.
+                response_text += f"\n\n🔐 Notary Signature:\n   Signer: {_gw(signer)}"
 
         # Add validation warning if applicable
         if stamp_validation_failed:
@@ -2551,10 +2578,8 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     "Reinstall with: pip install -e . (web3/eth-account should be included)"
                 )
 
-        # Cross-server coordination info
-        response_text += f"\n_companion_servers:"
-        response_text += f"\n  - swarm_connect gateway: {gateway_url} (required, {'connected' if gateway_ok else 'unreachable'})"
-        response_text += f"\n  - fds-id MCP: optional (identity/signing for provenance chain anchoring)"
+        # Gateway status
+        response_text += f"\n_gateway: {gateway_url} ({'connected' if gateway_ok else 'unreachable'})"
 
         if next_tool:
             response_text += f"\n\n_next: {next_tool}"
@@ -4299,7 +4324,9 @@ async def main():
                 if chain_client:
                     logger.info("Chain: %s (wallet connected)", chain_client.chain)
                 elif CHAIN_AVAILABLE and _chain_init_error:
-                    logger.info("Chain: writes disabled — %s", _chain_init_error)
+                    logger.info(
+                        "Chain: writes disabled — %s", redact_urls(_chain_init_error)
+                    )
                 elif CHAIN_AVAILABLE:
                     logger.info("Chain: %s (read-only, no wallet)", settings.chain_name)
             await server.run(

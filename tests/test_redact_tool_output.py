@@ -526,3 +526,96 @@ def test_mask_literal_urls_is_linear_on_long_input():
     start = time.monotonic()
     mask_literal_urls(text, [SCHEMELESS, "https://h.test/v2/K", "h/x"])
     assert time.monotonic() - start < 2.0
+
+
+def _raise_missing_schema():
+    raise _missing_schema()
+
+
+def _raise_chained_missing_schema():
+    try:
+        _raise_missing_schema()
+    except requests.exceptions.MissingSchema as e:
+        raise RuntimeError(f"RPC call failed: {e}") from e
+
+
+@pytest.mark.parametrize(
+    "raiser", [_raise_missing_schema, _raise_chained_missing_schema]
+)
+async def test_catch_all_log_hides_schemeless_rpc_url(
+    schemeless, monkeypatch, caplog, raiser
+):
+    """A MissingSchema for a scheme-less RPC URL that escapes a handler: the
+    log message and the traceback, chained cause included, hide the key."""
+
+    async def broken(arguments):
+        raiser()
+
+    monkeypatch.setattr(srv, "handle_verify_hash", broken)
+    caplog.set_level(logging.DEBUG)
+    result = await call_tool("verify_hash", {"swarm_hash": HASH_A})
+    assert result.isError
+    _assert_no_secret(_text(result))
+
+    records = [r for r in caplog.records if "Error in tool" in r.getMessage()]
+    assert records
+    logged = "\n".join(
+        r.getMessage()
+        + (logging.Formatter().formatException(r.exc_info) if r.exc_info else "")
+        for r in records
+    )
+    assert "MissingSchema" in logged and "Traceback" in logged
+    _assert_no_secret(logged)
+
+
+@pytest.fixture
+def schemeless_preset(monkeypatch):
+    """The preset RPC URL without a scheme; its 503s quote it in full."""
+    from swarm_provenance_mcp.chain.provider import CHAIN_PRESETS
+    import tests.test_chain_client as tcc
+
+    preset = dict(CHAIN_PRESETS["base-sepolia"])
+    preset["rpc_url"] = SCHEMELESS
+    preset["rpc_fallbacks"] = []
+    monkeypatch.setitem(CHAIN_PRESETS, "base-sepolia", preset)
+
+    def http_error(status=503):
+        response = requests.Response()
+        response.status_code = status
+        return requests.exceptions.HTTPError(
+            f"{status} Server Error for url: {SCHEMELESS}", response=response
+        )
+
+    monkeypatch.setattr(tcc, "_http_error", http_error)
+    return http_error
+
+
+def test_client_rpc_host_of_schemeless_url():
+    from swarm_provenance_mcp.chain.client import _rpc_host
+
+    assert _rpc_host(SCHEMELESS) == "rpc.leak.test"
+
+
+def test_client_failover_error_hides_schemeless_url(schemeless_preset, endpoints):
+    from swarm_provenance_mcp.chain.client import ChainClient
+
+    endpoints["degrade"](SCHEMELESS)
+    client = ChainClient(chain="base-sepolia")
+    with pytest.raises(ChainConnectionError) as info:
+        client.verify(HASH_A)
+    _assert_no_secret(str(info.value))
+    assert "rpc.leak.test" in str(info.value)
+
+
+def test_client_transaction_error_hides_schemeless_url(schemeless_preset, endpoints):
+    from swarm_provenance_mcp.chain.client import ChainClient
+    from swarm_provenance_mcp.chain.exceptions import ChainTransactionError
+
+    endpoints["web3"][
+        SCHEMELESS
+    ].eth.send_raw_transaction.side_effect = schemeless_preset()
+    client = ChainClient(chain="base-sepolia")
+    with pytest.raises(ChainTransactionError) as info:
+        client.anchor(HASH_A)
+    _assert_no_secret(str(info.value))
+    assert "rpc.leak.test" in str(info.value)

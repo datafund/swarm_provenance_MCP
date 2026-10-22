@@ -30,7 +30,7 @@ from requests.exceptions import RequestException
 
 from .config import settings
 from .gateway_client import SwarmGatewayClient
-from .redact import redact_urls
+from .redact import redact_urls, url_host
 from .untrusted import (
     QUOTED_NOTE,
     defang_hint_lines,
@@ -983,6 +983,35 @@ def _chain_id_lines(provider) -> str:
     return text + "\n   ⚠️  Mainnet — transactions spend real ETH"
 
 
+def _rpc_hosts() -> set:
+    """Hostnames of every configured and every in-use RPC URL."""
+    urls = [settings.chain_rpc_url] + (_parse_rpc_fallbacks() or [])
+    for client in (chain_client, _read_only_client, _unverified_write_client):
+        provider = getattr(client, "_provider", None)
+        if provider is None:
+            continue
+        urls.append(getattr(provider, "rpc_url", None))
+        others = getattr(provider, "_rpc_urls", None)
+        if isinstance(others, (list, tuple)):
+            urls.extend(others)
+    return {url_host(u, "") for u in urls if isinstance(u, str)} - {""}
+
+
+def _redact_rpc_urls(result: CallToolResult) -> CallToolResult:
+    """Cut RPC URLs in a tool result down to scheme, host and port.
+
+    Chain errors often quote the full RPC URL, whose path or query can hold
+    an API key. Other URLs (faucet, explorer, gateway) are left as they are.
+    """
+    hosts = _rpc_hosts()
+    if not hosts or not isinstance(result, CallToolResult):
+        return result
+    for item in result.content:
+        if isinstance(item, TextContent):
+            item.text = redact_urls(item.text, hosts)
+    return result
+
+
 def _mask_rpc_url(url: str) -> str:
     """Extract hostname from RPC URL for display (hide full path/keys)."""
     try:
@@ -1392,7 +1421,15 @@ def create_server() -> Server:
 
     @server.call_tool()
     async def call_tool(name: str, arguments: Dict[str, Any]) -> CallToolResult:
-        """Handle tool calls."""
+        """Handle tool calls; RPC URLs in the result show the host only."""
+        result = await _run_tool(name, arguments)
+        if name == "download_data":
+            # Fenced, capped Swarm content (#162), never chain output.
+            return result
+        return _redact_rpc_urls(result)
+
+    async def _run_tool(name: str, arguments: Dict[str, Any]) -> CallToolResult:
+        """Run the tool's handler; report an escaped exception as an error."""
         try:
             if name == "purchase_stamp":
                 return await handle_purchase_stamp(arguments)

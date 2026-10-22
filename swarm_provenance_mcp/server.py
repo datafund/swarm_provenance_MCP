@@ -7,6 +7,7 @@ import logging
 import re
 import secrets
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
@@ -1485,8 +1486,13 @@ def create_server() -> Server:
                     isError=True,
                 )
         except Exception as e:
+            # The traceback as text, so it is redacted too: its frames and
+            # last line can quote the RPC URL.
             logger.error(
-                "Error in tool %s: %s", name, redact_urls(e), exc_info=True
+                "Error in tool %s: %s\n%s",
+                name,
+                redact_urls(e),
+                redact_urls(traceback.format_exc().rstrip()),
             )
             retryable = _is_retryable_error(e)
             return CallToolResult(

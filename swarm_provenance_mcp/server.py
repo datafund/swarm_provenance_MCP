@@ -10,6 +10,7 @@ import secrets
 import time
 import traceback
 from pathlib import Path
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from mcp.server import Server
@@ -31,7 +32,7 @@ from mcp.types import (
 from requests.exceptions import RequestException
 
 from .config import WALLET_KEY_HINT, settings
-from .gateway_client import SwarmGatewayClient
+from .gateway_client import PaymentRequiredError, SwarmGatewayClient
 from .redact import mask_literal_urls, redact_urls, rpc_host
 from .untrusted import (
     QUOTED_NOTE,
@@ -885,6 +886,151 @@ def _gateway_error_text(message: str, e: Exception) -> str:
             "report it to the gateway operator."
         )
     return message
+
+
+# Decimals of the x402 assets this server can name, keyed by (network,
+# lower-case asset address). These are the USDC contracts the gateway offers
+# (Base mainnet and Base Sepolia), under x402 v1 and v2 network names. Any
+# other asset is shown in atomic units only: its decimals are not guessed.
+_KNOWN_X402_ASSETS: Dict[Tuple[str, str], Tuple[str, int]] = {}
+for _net in ("base", "eip155:8453"):
+    _KNOWN_X402_ASSETS[(_net, "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")] = (
+        "USDC",
+        6,
+    )
+for _net in ("base-sepolia", "eip155:84532"):
+    _KNOWN_X402_ASSETS[(_net, "0x036cbd53842c5426634e7929541ec2318f3dcf7e")] = (
+        "USDC",
+        6,
+    )
+
+# Payment options listed in a Payment Required message, at most.
+_MAX_PAYMENT_OPTIONS = 5
+
+
+def _format_x402_amount(amount: Any, network: Any, asset: Any) -> str:
+    """An x402 amount (atomic units of the asset) for display.
+
+    Converted to a decimal value only for an asset in _KNOWN_X402_ASSETS.
+    """
+    text = _gw(amount, 80)
+    if not isinstance(amount, (str, int)) or isinstance(amount, bool):
+        return text or "not given"
+    raw = str(amount).strip()
+    if not raw.isdigit():
+        return text
+    known = _KNOWN_X402_ASSETS.get((str(network).lower(), str(asset).lower()))
+    if known is None:
+        return f"{int(raw)} atomic units of the asset (decimals unknown)"
+    symbol, decimals = known
+    try:
+        value = (Decimal(int(raw)).scaleb(-decimals)).normalize()
+    except InvalidOperation:
+        return f"{int(raw)} atomic units"
+    return f"{int(raw)} atomic units ({value:f} {symbol})"
+
+
+def _format_payment_options(accepts: List[Dict[str, Any]]) -> str:
+    """The ``accepts`` entries of an x402 payment request, for display."""
+    msg = "\n📋 Payment details (from the gateway's x402 payment request):\n"
+    for i, option in enumerate(accepts[:_MAX_PAYMENT_OPTIONS]):
+        if len(accepts) > 1:
+            msg += f"   Option {i + 1}:\n"
+        network = option.get("network")
+        asset = option.get("asset")
+        amount = option.get("maxAmountRequired", option.get("amount"))
+        pay_to = _gw(option.get("payTo"), 100) or "not given"
+        msg += f"   Amount: {_format_x402_amount(amount, network, asset)}\n"
+        msg += f"   Asset: {_gw(asset, 100) or 'not given'}\n"
+        msg += f"   Network: {_gw(network, 60) or 'not given'}\n"
+        msg += f"   Recipient (payTo): {pay_to}\n"
+        if option.get("scheme"):
+            msg += f"   Scheme: {_gw(option.get('scheme'), 40)}\n"
+        if option.get("description"):
+            msg += f"   Description: {_gw(option.get('description'), 200)}\n"
+    if len(accepts) > _MAX_PAYMENT_OPTIONS:
+        extra = len(accepts) - _MAX_PAYMENT_OPTIONS
+        msg += f"   ... and {extra} more options not shown\n"
+    return msg
+
+
+def _format_free_tier(free_tier: Any) -> str:
+    """The gateway's ``freeTier`` block of a 402, if it says one is available."""
+    if not isinstance(free_tier, dict) or not free_tier.get("available"):
+        return ""
+    msg = "\n🆓 The gateway reports that it offers a free tier"
+    remaining = free_tier.get("requestsRemaining")
+    limit = free_tier.get("requestsLimit")
+    window = free_tier.get("windowSeconds")
+    if remaining is not None and limit is not None:
+        msg += f": {_gw(remaining, 20)} of {_gw(limit, 20)} requests left"
+        if window is not None:
+            msg += f" in a {_gw(window, 20)}-second window"
+    return msg + ".\n"
+
+
+def _free_tier_option() -> str:
+    """The free-tier next step, which depends on this server's PAYMENT_MODE."""
+    mode = (settings.payment_mode or "").strip().lower()
+    if mode in ("free", "free-tier"):
+        return (
+            "Ask the gateway operator whether the free tier covers this "
+            "operation: this server already requests the free tier "
+            "(PAYMENT_MODE=free), and the gateway still asks for payment."
+        )
+    current = _gw(settings.payment_mode or "empty", 40)
+    return (
+        "Use the gateway's free tier, if it offers one: this server is not "
+        f"requesting it (PAYMENT_MODE is {current}). Set PAYMENT_MODE=free "
+        "and restart this server."
+    )
+
+
+def format_payment_required(payment_info: Dict[str, Any], action: str) -> str:
+    """Explain an HTTP 402 Payment Required from the gateway.
+
+    ``payment_info`` comes from ``gateway_client.parse_payment_required``.
+    Every value in it is gateway text, so it is printed through ``_gw``.
+    """
+    msg = (
+        "💳 Payment required: the gateway requires payment for this operation "
+        f"({action}) and refused the request.\n"
+    )
+    if payment_info.get("error"):
+        msg += f"   Gateway message: {_gw(payment_info['error'], 300)}\n"
+    if payment_info.get("code"):
+        msg += f"   Gateway error code: {_gw(payment_info['code'], 60)}\n"
+
+    accepts = [a for a in payment_info.get("accepts") or [] if isinstance(a, dict)]
+    if accepts:
+        msg += _format_payment_options(accepts)
+    else:
+        msg += "\n📋 The gateway sent no payment details.\n"
+        if payment_info.get("raw"):
+            msg += f"   Response body (start): {_gw(payment_info['raw'], 300)}\n"
+
+    msg += _format_free_tier(payment_info.get("free_tier"))
+    msg += (
+        "\nPaid x402 access is not supported by this server yet, so it cannot "
+        "pay for this request.\n"
+        "\nOptions:\n"
+        "   1. Contact the gateway operator and ask for whitelisted (free) access.\n"
+        "   2. Use a different gateway that does not require x402 payment or that "
+        "offers a free tier: set SWARM_GATEWAY_URL and restart this server.\n"
+        f"   3. {_free_tier_option()}\n"
+        "\nRetrying without one of these changes will not help."
+    )
+    return msg
+
+
+def _payment_required_result(e: PaymentRequiredError, action: str) -> CallToolResult:
+    """A tool error for an HTTP 402 Payment Required from the gateway."""
+    text = format_payment_required(e.payment_info, action)
+    logger.error(f"{action}: gateway requires payment (HTTP 402)")
+    return CallToolResult(
+        content=[TextContent(type="text", text=_format_error(text, retryable=False))],
+        isError=True,
+    )
 
 
 def _bee_advisories(gateway_response: Dict[str, Any]) -> List[str]:
@@ -2063,6 +2209,8 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
             ],
             isError=True,
         )
+    except PaymentRequiredError as e:
+        return _payment_required_result(e, "purchase_stamp")
     except RequestException as e:
         if _is_ambiguous_write_error(e):
             return _ambiguous_write_result(
@@ -2344,6 +2492,8 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
             ],
             isError=True,
         )
+    except PaymentRequiredError as e:
+        return _payment_required_result(e, "extend_stamp")
     except RequestException as e:
         if _is_ambiguous_write_error(e):
             return _ambiguous_write_result(
@@ -2478,6 +2628,8 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
             ],
             isError=True,
         )
+    except PaymentRequiredError as e:
+        return _payment_required_result(e, "upload_data")
     except RequestException as e:
         error_msg = _gateway_error_text(f"Failed to upload data: {str(e)}", e)
         logger.error(error_msg)

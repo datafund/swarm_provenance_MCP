@@ -566,6 +566,7 @@ _next: <recovery_tool>           # Tool to call for recovery
 
 - **retryable: true** — transient errors (timeouts, rate limits, 502/503/504). Wait and retry.
 - **retryable: false** — permanent errors (validation failures, unknown tools). Fix input and try a different approach.
+- **Payment required (HTTP 402)** — the gateway has x402 payment enabled and refused a write (`purchase_stamp`, `upload_data`, `extend_stamp`). The error shows the gateway's payment details (amount, asset, network, recipient) and the options. This server cannot pay x402 requests yet.
 
 #### Adaptive Health Check
 

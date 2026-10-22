@@ -10,7 +10,7 @@ import secrets
 import time
 import traceback
 from pathlib import Path
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, localcontext
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from mcp.server import Server
@@ -904,6 +904,8 @@ for _net in ("base-sepolia", "eip155:84532"):
         6,
     )
 
+# Longest x402 amount shown, in digits.
+_MAX_AMOUNT_DIGITS = 40
 # Payment options listed in a Payment Required message, at most.
 _MAX_PAYMENT_OPTIONS = 5
 
@@ -912,22 +914,32 @@ def _format_x402_amount(amount: Any, network: Any, asset: Any) -> str:
     """An x402 amount (atomic units of the asset) for display.
 
     Converted to a decimal value only for an asset in _KNOWN_X402_ASSETS.
+    Anything that is not a plain ASCII digit string is shown as given.
     """
-    text = _gw(amount, 80)
     if not isinstance(amount, (str, int)) or isinstance(amount, bool):
-        return text or "not given"
-    raw = str(amount).strip()
-    if not raw.isdigit():
-        return text
+        return _gw(amount, 80) or "not given"
+    try:
+        raw = str(amount).strip()
+    except ValueError:  # an int too large to convert to text
+        return "a number too long to show"
+    # isascii(): str.isdigit() accepts characters such as "²" that int()
+    # and Decimal() reject.
+    if not (raw.isascii() and raw.isdigit()):
+        return _gw(raw, 80)
+    digits = raw.lstrip("0") or "0"
+    if len(digits) > _MAX_AMOUNT_DIGITS:
+        return (
+            f"{_gw(digits, _MAX_AMOUNT_DIGITS)} atomic units "
+            f"(a {len(digits)}-digit number, cut short)"
+        )
     known = _KNOWN_X402_ASSETS.get((str(network).lower(), str(asset).lower()))
     if known is None:
-        return f"{int(raw)} atomic units of the asset (decimals unknown)"
+        return f"{digits} atomic units of the asset (decimals unknown)"
     symbol, decimals = known
-    try:
-        value = (Decimal(int(raw)).scaleb(-decimals)).normalize()
-    except InvalidOperation:
-        return f"{int(raw)} atomic units"
-    return f"{int(raw)} atomic units ({value:f} {symbol})"
+    with localcontext() as ctx:
+        ctx.prec = _MAX_AMOUNT_DIGITS + 10  # exact for every amount shown
+        value = Decimal(digits).scaleb(-decimals).normalize()
+    return f"{digits} atomic units ({value:f} {symbol})"
 
 
 def _format_payment_options(accepts: List[Dict[str, Any]]) -> str:
@@ -1017,7 +1029,8 @@ def format_payment_required(payment_info: Dict[str, Any], action: str) -> str:
         "\nPaid x402 access is not supported by this server yet, so it cannot "
         "pay for this request.\n"
         "\nOptions:\n"
-        "   1. Contact the gateway operator and ask for whitelisted (free) access.\n"
+        "   1. Ask the gateway operator which access options exist for this "
+        "operation, for example whether its free tier covers it.\n"
         "   2. Use a different gateway that does not require x402 payment or that "
         "offers a free tier: set SWARM_GATEWAY_URL and restart this server.\n"
         f"   3. {_free_tier_option()}\n"

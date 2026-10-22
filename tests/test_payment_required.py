@@ -259,10 +259,37 @@ class TestFormatPaymentRequired:
         text = format_payment_required(_info(accepts=accepts), "x")
         assert "Amount: ten dollars" in text
 
+    @pytest.mark.parametrize("amount", ["1²", "١٢٣", "12a", "-5", "1.5"])
+    def test_non_ascii_or_odd_digits_shown_as_given(self, amount):
+        accepts = [_requirement(amount=amount)]
+        text = format_payment_required(_info(accepts=accepts), "x")
+        assert f"Amount: {amount}" in text
+        assert "USDC)" not in text
+
+    def test_long_amount_is_cut_short(self):
+        accepts = [_requirement(amount="9" * 1000)]
+        text = format_payment_required(_info(accepts=accepts), "x")
+        assert "a 1000-digit number, cut short" in text
+        assert "9" * 41 not in text
+        assert "USDC)" not in text
+
+    def test_forty_digit_usdc_amount_is_exact(self):
+        accepts = [_requirement(amount="1" * 40)]
+        text = format_payment_required(_info(accepts=accepts), "x")
+        assert f"({'1' * 34}.{'1' * 6} USDC)" in text
+
+    def test_leading_zeros_dropped(self):
+        accepts = [_requirement(amount="0005")]
+        text = format_payment_required(_info(accepts=accepts), "x")
+        assert "5 atomic units (0.000005 USDC)" in text
+
     def test_options_are_truthful(self):
         text = format_payment_required(_info(), "upload_data")
         assert "Paid x402 access is not supported by this server yet" in text
-        assert "1. Contact the gateway operator" in text
+        assert "1. Ask the gateway operator which access options exist" in text
+        # The gateway has no payment allowlist: never promise one.
+        assert "whitelist" not in text.lower()
+        assert "allowlist" not in text.lower()
         assert "2. Use a different gateway" in text
         assert "SWARM_GATEWAY_URL" in text
         assert "3. " in text
@@ -366,6 +393,19 @@ class TestHandlers:
             result = await handle_upload_data({"data": "hello", "stamp_id": STAMP_ID})
         _assert_payment_result(result, "upload_data")
         assert "offers a free tier" in result.content[0].text
+
+    async def test_purchase_stamp_with_non_ascii_digit_amount(self, monkeypatch):
+        _gateway(monkeypatch)
+        body = _x402_body(amount="1²")
+        with requests_mock.Mocker() as m:
+            m.post(f"{BASE_URL}/api/v1/stamps/", status_code=402, json=body)
+            result = await handle_purchase_stamp({"duration_hours": 25})
+        assert result.isError is True
+        text = result.content[0].text
+        assert text.startswith("💳 Payment required")
+        assert "Amount: 1²" in text
+        assert PAY_TO in text
+        assert "retryable: false" in text
 
     @pytest.mark.parametrize("kwargs", [{"text": ""}, {"text": "<html>oops</html>"}])
     async def test_purchase_stamp_without_details(self, monkeypatch, kwargs):

@@ -14,6 +14,7 @@ import threading
 from typing import List, Optional
 
 from .contract import DataStatus
+from ..redact import redact_urls, url_host
 from .provider import is_transport_error
 from .exceptions import (
     ChainConfigurationError,
@@ -41,6 +42,11 @@ logger = logging.getLogger(__name__)
 # Guards the (contract, Web3) pair so it is rebuilt and assigned as one step.
 # Held only briefly, unlike SWITCH_LOCK, which spans endpoint probes.
 _BINDING_LOCK = threading.Lock()
+
+
+def _rpc_host(url: str) -> str:
+    """Hostname of an RPC URL for logs: paths and queries can carry API keys."""
+    return url_host(url, "<rpc>")
 
 
 def _should_fail_over(e: Exception) -> bool:
@@ -71,6 +77,8 @@ def _rpc_failover(method):
             attempt_web3 = self._sync_contract()
             attempt_url = self._provider.rpc_url  # for messages only
             try:
+                # Once per endpoint: no read or write on an unchecked chain.
+                self._provider.ensure_chain_id(attempt_web3)
                 return method(self, *args, **kwargs)
             except Exception as e:
                 if not _should_fail_over(e):
@@ -82,9 +90,9 @@ def _rpc_failover(method):
                     logger.warning(
                         "%s: RPC %s unavailable (%s), retrying on %s",
                         method.__name__,
-                        failed_url,
-                        e,
-                        self._provider.rpc_url,
+                        _rpc_host(failed_url),
+                        redact_urls(e),
+                        _rpc_host(self._provider.rpc_url),
                     )
                     continue
                 raise ChainConnectionError(
@@ -122,6 +130,7 @@ class ChainClient:
     """
 
     _contract_web3 = None  # the Web3 instance _contract was built on
+    _contract_verified = False  # check_deployed() passed for this address
 
     def __init__(
         self,
@@ -243,21 +252,123 @@ class ChainClient:
         self._sync_contract()
         return True
 
-    def _send_transaction(self, tx: dict) -> dict:
+    def verify_contract(self) -> None:
+        """
+        Require DataProvenance code at the configured address (cached).
+
+        Raises:
+            ChainConfigurationError: If the address has no code or the code
+                is not a DataProvenance contract.
+        """
+        if self._contract_verified:
+            return
+        self._contract.check_deployed()
+        self._contract_verified = True
+
+    def probe_contract(self, timeout: float = 5.0) -> None:
+        """
+        ``verify_contract()`` across all configured RPCs, bounded in time.
+
+        Asks each endpoint in turn (current one first), allowing about
+        ``timeout`` seconds per endpoint (two attempts of ``timeout / 2``)
+        instead of the client's 30 s request timeout. Fallbacks on another
+        chain id are skipped. An endpoint that answers "no code" does not
+        decide alone: the others are asked too, and the client switches to
+        the first endpoint that has the contract code.
+
+        Raises:
+            ChainConfigurationError: Every endpoint that answered reports no
+                DataProvenance code at the address.
+            ChainConnectionError: No endpoint answered in time.
+        """
+        from .contract import DataProvenanceContract
+        from .provider import _http_provider, _import_web3
+
+        if self._contract_verified:
+            return
+        Web3 = _import_web3()
+        provider = self._provider
+        urls = [provider.rpc_url] + [
+            u for u in provider._rpc_urls if u != provider.rpc_url
+        ]
+        no_code = None
+        last_error = None
+        for url in urls:
+            try:
+                web3 = Web3(_http_provider(Web3, url, timeout / 2))
+                if url != provider.rpc_url and web3.eth.chain_id != provider.chain_id:
+                    last_error = "fallback endpoint is on another chain"
+                    continue
+                DataProvenanceContract(
+                    web3=web3, contract_address=provider.contract_address
+                ).check_deployed()
+            except ChainConfigurationError as e:
+                no_code = no_code or e
+                continue
+            except Exception as e:
+                # Not str(e): requests errors quote the URL path.
+                last_error = f"{type(e).__name__} from {_rpc_host(url)}"
+                continue
+            if url != provider.rpc_url:
+                self._use_endpoint(url)
+            self._contract_verified = True
+            return
+        if no_code is not None:
+            raise no_code
+        raise ChainConnectionError(
+            f"No RPC endpoint answered the contract check: {last_error}",
+            rpc_url=provider.rpc_url,
+        )
+
+    def _use_endpoint(self, url: str) -> None:
+        """Switch the provider to ``url`` (normal timeout) and rebind."""
+        from .provider import SWITCH_LOCK, _http_provider, _import_web3
+
+        Web3 = _import_web3()
+        provider = self._provider
+        with SWITCH_LOCK:
+            if provider.rpc_url != url:
+                logger.info(
+                    "RPC %s has the contract code; switching from %s",
+                    _rpc_host(url),
+                    _rpc_host(provider.rpc_url),
+                )
+                provider._web3 = Web3(
+                    _http_provider(Web3, url, provider._request_timeout)
+                )
+                provider.rpc_url = url
+        self._sync_contract()
+
+    def _send_transaction(self, tx: dict, expected_events=()) -> dict:
         """
         Estimate gas, sign, broadcast, and wait for receipt.
 
         Args:
             tx: Unsigned transaction dict from a build_*_tx method.
+            expected_events: ``(event_name, indexed_filters)`` pairs that the
+                receipt must contain. A status-1 receipt without them means
+                nothing was recorded (for example the address has no
+                contract code), so it is reported as a failure.
 
         Returns:
             Transaction receipt dict.
 
         Raises:
-            ChainTransactionError: If transaction fails.
+            ChainConfigurationError: If the contract is not deployed at the
+                configured address (checked before signing).
+            ChainTransactionError: If transaction fails or an expected event
+                is missing.
         """
+        # Before any gas is spent: refuse an address without the contract.
+        self.verify_contract()
+
         web3 = self._provider.web3
         broadcast = False
+
+        # Never sign for a chain other than the configured one: ask the
+        # endpoint this transaction goes to, every time, before signing.
+        # A mismatch raises ChainIdMismatchError (not retried, not failed over).
+        self._provider.check_chain_id(web3)
 
         try:
             # Fill in nonce
@@ -289,6 +400,16 @@ class ChainClient:
                     tx_hash=tx_hash.hex(),
                     broadcast=True,
                 )
+
+            for event_name, filters in expected_events:
+                if not self._contract.receipt_has_event(receipt, event_name, **filters):
+                    raise ChainTransactionError(
+                        f"Transaction was mined but the contract emitted no "
+                        f"{event_name} event, so nothing was recorded. Check "
+                        "CHAIN_CONTRACT and CHAIN_NAME.",
+                        tx_hash=tx_hash.hex(),
+                        broadcast=True,
+                    )
 
             logger.debug(
                 "Transaction confirmed in block %d, gas used: %d",
@@ -368,8 +489,18 @@ class ChainClient:
                 data_type=data_type,
                 sender=self._wallet.address,
             )
+        expected = [
+            ("DataRegistered", {"dataHash": swarm_hash, "owner": self._wallet.address})
+        ]
+        if storage_ref:
+            expected.append(
+                (
+                    "StorageRefLinked",
+                    {"dataHash": swarm_hash, "storageRef": storage_ref},
+                )
+            )
         try:
-            receipt = self._send_transaction(tx)
+            receipt = self._send_transaction(tx, expected)
         except ChainTransactionError as e:
             # Detect "already registered" revert that the pre-check missed
             # (can happen when public RPC serves stale reads)
@@ -439,7 +570,9 @@ class ChainClient:
             actual_owner=owner,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx, [("DataRegistered", {"dataHash": swarm_hash, "owner": owner})]
+        )
 
         return AnchorResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -474,7 +607,9 @@ class ChainClient:
             data_types=data_types,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx, [("DataRegistered", {"dataHash": h}) for h in swarm_hashes]
+        )
 
         return AnchorResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -534,7 +669,7 @@ class ChainClient:
             except Exception as e:
                 if is_transport_error(e):
                     raise  # retry on another endpoint, don't truncate
-                logger.warning("State-based duplicate check failed: %s", e)
+                logger.warning("State-based duplicate check failed: %s", redact_urls(e))
         else:
             deploy_block = self._provider.deploy_block
             if deploy_block is not None:
@@ -561,7 +696,9 @@ class ChainClient:
                 except Exception as e:
                     if is_transport_error(e):
                         raise  # retry on another endpoint, don't truncate
-                    logger.warning("Duplicate check failed, proceeding: %s", e)
+                    logger.warning(
+                        "Duplicate check failed, proceeding: %s", redact_urls(e)
+                    )
 
         tx = self._contract.build_record_transformation_tx(
             original_hash=original_hash,
@@ -569,7 +706,15 @@ class ChainClient:
             description=description,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx,
+            [
+                (
+                    "DataTransformed",
+                    {"originalDataHash": original_hash, "newDataHash": new_hash},
+                )
+            ],
+        )
 
         return TransformResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -601,7 +746,15 @@ class ChainClient:
             data_hash=swarm_hash,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx,
+            [
+                (
+                    "DataAccessed",
+                    {"dataHash": swarm_hash, "accessor": self._wallet.address},
+                )
+            ],
+        )
 
         return AccessResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -632,7 +785,9 @@ class ChainClient:
             data_hashes=swarm_hashes,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx, [("DataAccessed", {"dataHash": h}) for h in swarm_hashes]
+        )
 
         return AccessResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -668,7 +823,9 @@ class ChainClient:
             status=status,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx, [("DataStatusChanged", {"dataHash": swarm_hash})]
+        )
 
         return AnchorResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -703,7 +860,9 @@ class ChainClient:
             statuses=statuses,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx, [("DataStatusChanged", {"dataHash": h}) for h in swarm_hashes]
+        )
 
         return AnchorResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -738,7 +897,15 @@ class ChainClient:
             new_owner=new_owner,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx,
+            [
+                (
+                    "DataOwnershipTransferred",
+                    {"dataHash": swarm_hash, "newOwner": new_owner},
+                )
+            ],
+        )
 
         return AnchorResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -774,7 +941,15 @@ class ChainClient:
             authorized=authorized,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx,
+            [
+                (
+                    "DelegateAuthorized",
+                    {"owner": self._wallet.address, "delegate": delegate},
+                )
+            ],
+        )
 
         return AnchorResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -826,7 +1001,15 @@ class ChainClient:
             sender=self._wallet.address,
         )
         try:
-            receipt = self._send_transaction(tx)
+            receipt = self._send_transaction(
+                tx,
+                [
+                    (
+                        "StorageRefLinked",
+                        {"dataHash": data_hash, "storageRef": storage_ref},
+                    )
+                ],
+            )
         except ChainTransactionError as e:
             if "already set" in str(e).lower() or "storage ref" in str(e).lower():
                 raise StorageRefAlreadySetError(
@@ -910,7 +1093,9 @@ class ChainClient:
             new_data_type=new_data_type,
             sender=self._wallet.address,
         )
-        receipt = self._send_transaction(tx)
+        receipt = self._send_transaction(
+            tx, [("DataMerged", {"newDataHash": new_hash})]
+        )
 
         return MergeTransformResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -1080,7 +1265,7 @@ class ChainClient:
         logger.debug(
             "Chain health check: chain=%s rpc=%s",
             self._provider.chain,
-            self._provider.rpc_url,
+            _rpc_host(self._provider.rpc_url),
         )
 
         result = self._provider.health_check()
@@ -1148,7 +1333,7 @@ class ChainClient:
                     raise  # retry on another endpoint, don't truncate
                 logger.warning(
                     "Full event scan failed, falling back to per-node queries: %s",
-                    e,
+                    redact_urls(e),
                 )
 
         chain = []
@@ -1194,7 +1379,7 @@ class ChainClient:
                     logger.warning(
                         "State-based forward read failed for %s: %s",
                         current_hash,
-                        e,
+                        redact_urls(e),
                     )
                 # Reverse: parents via state
                 try:
@@ -1209,7 +1394,7 @@ class ChainClient:
                     logger.warning(
                         "State-based reverse read failed for %s: %s",
                         current_hash,
-                        e,
+                        redact_urls(e),
                     )
             elif use_local_index:
                 # V1 contract: use pre-built event cache index
@@ -1250,7 +1435,9 @@ class ChainClient:
                 except Exception as e:
                     if is_transport_error(e):
                         raise  # retry on another endpoint, don't truncate
-                    logger.warning("Event query failed for %s: %s", current_hash, e)
+                    logger.warning(
+                        "Event query failed for %s: %s", current_hash, redact_urls(e)
+                    )
                     for t in record.transformations:
                         if t.new_data_hash and t.new_data_hash not in visited:
                             to_visit.append((t.new_data_hash, current_depth + 1))
@@ -1271,7 +1458,7 @@ class ChainClient:
                     logger.warning(
                         "Reverse event query failed for %s: %s",
                         current_hash,
-                        e,
+                        redact_urls(e),
                     )
 
             chain.append(record)

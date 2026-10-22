@@ -16,6 +16,10 @@ pytestmark = pytest.mark.docker
 
 IMAGE_NAME = "swarm-provenance-mcp:test"
 
+# A closed port inside the container: tool calls fail fast instead of reaching
+# the production gateway that the image defaults to.
+CONTAINER_GATEWAY_URL = "http://127.0.0.1:9"
+
 INITIALIZE_REQUEST = {
     "jsonrpc": "2.0",
     "id": 1,
@@ -76,6 +80,8 @@ def docker_available():
 def send_mcp_messages(messages, env_vars=None, timeout=30):
     """Send MCP messages to the Docker container and return parsed responses."""
     cmd = ["docker", "run", "-i", "--rm"]
+    # Never let a container under test call the production gateway.
+    env_vars = {"SWARM_GATEWAY_URL": CONTAINER_GATEWAY_URL, **(env_vars or {})}
     if env_vars:
         for key, value in env_vars.items():
             cmd.extend(["-e", f"{key}={value}"])
@@ -457,7 +463,7 @@ class TestMCPProtocol:
         content = health_response["result"]["content"]
         assert len(content) >= 1
         assert content[0]["type"] == "text"
-        assert "provenance-gateway.datafund.io" in content[0]["text"]
+        assert CONTAINER_GATEWAY_URL in content[0]["text"]
 
     def test_invalid_tool_returns_error(self):
         """Calling a non-existent tool returns an error response."""

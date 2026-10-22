@@ -569,9 +569,7 @@ The `health_check` tool returns additional fields:
 ready: true|false                # Whether the system is ready for uploads
 _recommendations:                # Actionable suggestions (only when issues exist)
   - No stamps found — purchase one before uploading
-_companion_servers:              # Related servers in the ecosystem
-  - swarm_connect gateway: <url> (connected|unreachable)
-  - fds-id MCP: optional (identity/signing for provenance chain anchoring)
+_gateway: <url> (connected|unreachable)
 ```
 
 ### MCP Prompts
@@ -700,8 +698,7 @@ cp .env.example ~/.config/swarm-provenance-mcp/.env
 {
   "mcpServers": {
     "swarm-provenance": {
-      "command": "/path/to/swarm_provenance_mcp/venv/bin/python",
-      "args": ["-m", "swarm_provenance_mcp.server"]
+      "command": "/path/to/swarm_provenance_mcp/run.sh"
     }
   }
 }
@@ -721,6 +718,10 @@ cp .env.example ~/.config/swarm-provenance-mcp/.env
 
 *Note: Replace `/path/to/swarm_provenance_mcp` with the actual path where you cloned the repository.*
 
+The `run.sh` launcher (macOS/Linux) starts the server from the repo's venv, with the repo as working directory. The working directory does not affect configuration: settings come from the env file described above, and a `.env` in the repository is no longer read (see [Upgrading from a `.env` in the repository](#upgrading-from-a-env-in-the-repository); the server logs a warning if it finds one). If the venv stops working — typically after moving or renaming the repo directory — it rebuilds it automatically. Make it executable once with `chmod +x run.sh`.
+
+The rebuild installs all dependencies and can take a few minutes, longer than an MCP client waits for the server on startup. If the first launch after a move times out, run `./run.sh < /dev/null` once in a terminal to finish the rebuild, then restart the client. The Windows config above does not use the launcher yet; after moving the repo on Windows, recreate the venv manually.
+
 **Alternative (if package is installed)**: You can use `"command": "swarm-provenance-mcp"` instead after running `pip install -e .`
 
 #### With on-chain provenance
@@ -731,8 +732,7 @@ To enable blockchain anchoring, add an `"env"` block to the config. You can use 
 {
   "mcpServers": {
     "swarm-provenance": {
-      "command": "/path/to/swarm_provenance_mcp/venv/bin/python",
-      "args": ["-m", "swarm_provenance_mcp.server"],
+      "command": "/path/to/swarm_provenance_mcp/run.sh",
       "env": {
         "CHAIN_ENABLED": "true",
         "PROVENANCE_WALLET_KEY": "0x...your_private_key_here..."
@@ -814,9 +814,9 @@ Claude will register the hash on the blockchain and confirm the provenance recor
 
 If Claude Desktop doesn't show the Swarm tools:
 1. Check the config file path is correct for your OS
-2. Verify the `command` path points to the Python executable inside your venv
+2. Verify the `command` path points to `run.sh` in your clone (macOS/Linux), or to the Python executable inside your venv (Windows)
 3. Check Claude Desktop logs: **Help > Show Logs** (look for MCP connection errors)
-4. Test manually: run `swarm-provenance-mcp` in your terminal — it should start without errors and wait for MCP input
+4. Test manually: run `./run.sh` (or `swarm-provenance-mcp`) in your terminal — it should start without errors and wait for MCP input. Launcher messages, including a venv rebuild, go to stderr
 
 ## Development
 
@@ -860,12 +860,16 @@ ruff check swarm_provenance_mcp/
 ## Dependencies
 
 - **Core Dependencies**:
-  - `mcp>=1.0.0`: Model Context Protocol framework
-  - `requests>=2.31.0`: HTTP client for gateway communication
-  - `pydantic>=2.0.0`: Data validation and settings
-  - `python-dotenv>=1.0.0`: Environment configuration
-  - `web3>=6.0.0`: Ethereum blockchain interaction for on-chain provenance
-  - `eth-account>=0.10.0`: Wallet and transaction signing for chain anchoring
+  - `mcp>=1.26,<2`: Model Context Protocol framework (the server is written for mcp 1.x)
+  - `requests>=2.31.0,<3`: HTTP client for gateway communication
+  - `pydantic>=2.0.0,<3` and `pydantic-settings>=2.0,<3`: Data validation and settings
+  - `python-dotenv>=1.0.0,<2`: Environment configuration
+  - `web3>=7,<8`: Ethereum blockchain interaction for on-chain provenance
+  - `eth-account>=0.13,<0.14`: Wallet and transaction signing for chain anchoring
+  - `eth-utils>=5,<6`: Hashing helpers (keccak) used directly by the chain module
+
+  Upper bounds are deliberate. Raise one only together with a passing test run
+  against the new version.
 
 - **Development Dependencies**:
   - `pytest`: Testing framework

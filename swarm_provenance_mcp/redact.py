@@ -47,6 +47,59 @@ def url_host(url: Any, default: str = "<rpc>") -> str:
         return default
 
 
+def rpc_host(url: Any, default: str = "") -> str:
+    """The hostname of an RPC URL, also of one written without a scheme.
+
+    ``rpc.example.com/v2/<key>`` gives ``rpc.example.com``: the part before
+    the first ``/``, ``?`` or ``#``, without credentials or port.
+    """
+    host = url_host(url, "")
+    if host:
+        return host
+    text = str(url or "").strip()
+    if "://" in text:
+        return default
+    head = re.split(r"[/?#]", text, maxsplit=1)[0].rsplit("@", 1)[-1]
+    if head.startswith("["):
+        head = head[1 : head.find("]")] if "]" in head else ""
+    else:
+        head = head.split(":", 1)[0]
+    return head.lower() or default
+
+
+def _secret_part(url: str) -> str:
+    """The path, query and fragment of ``url``, with or without a scheme."""
+    start = url.find("://")
+    start = start + 3 if start >= 0 else 0
+    match = re.search(r"[/?#]", url[start:])
+    if not match:
+        return ""
+    rest = url[start + match.start() :]
+    return rest if rest.strip("/?#") else ""
+
+
+def mask_literal_urls(value: Any, urls: Iterable[str]) -> str:
+    """``str(value)`` with each of ``urls`` written out literally masked.
+
+    Every occurrence of a URL that has a path, query or credentials becomes
+    its host, and every remaining occurrence of its path and query becomes
+    ``<path>``. A URL with none of these is left alone. This covers text
+    that ``redact_urls`` cannot match, such as an RPC URL configured without
+    a scheme and quoted back by requests ("Invalid URL 'host/v2/<key>'").
+    """
+    text = str(value)
+    for url in sorted(
+        {u for u in urls if isinstance(u, str) and u}, key=len, reverse=True
+    ):
+        secret = _secret_part(url)
+        if not secret and "@" not in url:
+            continue
+        text = text.replace(url, rpc_host(url) or "<rpc>")
+        if secret:
+            text = text.replace(secret, "<path>")
+    return text
+
+
 def redact_urls(value: Any, hosts: Optional[Iterable[str]] = None) -> str:
     """``str(value)`` with every URL cut down to scheme, host and port.
 

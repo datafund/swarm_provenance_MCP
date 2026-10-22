@@ -478,3 +478,51 @@ def test_schemeless_rpc_url_hidden_in_startup_log(caplog):
 def test_mask_rpc_url_never_returns_a_schemeless_url():
     assert srv._mask_rpc_url(SCHEMELESS) == "rpc.leak.test"
     assert "SECRET" not in srv._mask_rpc_url("/v2/SECRETKEY123")
+
+
+@pytest.mark.parametrize(
+    "url, host",
+    [
+        ("https://rpc.leak.test/v2/SECRET", "rpc.leak.test"),
+        ("rpc.leak.test/v2/SECRET", "rpc.leak.test"),
+        ("RPC.leak.test:8545?apikey=SECRET", "rpc.leak.test"),
+        ("u:SECRET@rpc.leak.test/x", "rpc.leak.test"),
+        ("[::1]:8545/v2/SECRET", "::1"),
+        ("/v2/SECRET", ""),
+        ("", ""),
+    ],
+)
+def test_rpc_host(url, host):
+    from swarm_provenance_mcp.redact import rpc_host
+
+    assert rpc_host(url) == host
+
+
+def test_mask_literal_urls():
+    from swarm_provenance_mcp.redact import mask_literal_urls
+
+    text = (
+        f"Invalid URL '{SCHEMELESS}': No scheme supplied. "
+        f"Perhaps you meant https://{SCHEMELESS}? path /v2/SECRETKEY123 alone"
+    )
+    masked = mask_literal_urls(text, [SCHEMELESS, "https://ok.rpc.test"])
+    assert "SECRET" not in masked
+    assert masked.startswith("Invalid URL 'rpc.leak.test'")
+    # A URL with no path, query or credentials leaves the text alone.
+    assert mask_literal_urls("see https://ok.rpc.test/", ["https://ok.rpc.test"]) == (
+        "see https://ok.rpc.test/"
+    )
+    assert "SECRET" not in mask_literal_urls(
+        "at u:SECRET@rpc.leak.test", ["u:SECRET@rpc.leak.test"]
+    )
+
+
+def test_mask_literal_urls_is_linear_on_long_input():
+    import time
+
+    from swarm_provenance_mcp.redact import mask_literal_urls
+
+    text = (SCHEMELESS[:-1] + " ") * 100_000
+    start = time.monotonic()
+    mask_literal_urls(text, [SCHEMELESS, "https://h.test/v2/K", "h/x"])
+    assert time.monotonic() - start < 2.0

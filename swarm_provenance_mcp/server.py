@@ -1484,12 +1484,14 @@ def create_server() -> Server:
                 )
         except Exception as e:
             # The traceback as text, so it is redacted too: its frames and
-            # last line can quote the RPC URL.
+            # last line can quote the RPC URL, also one without a scheme.
+            urls = _rpc_urls()
+            trace = traceback.format_exc().rstrip()
             logger.error(
                 "Error in tool %s: %s\n%s",
                 name,
-                redact_urls(e),
-                redact_urls(traceback.format_exc().rstrip()),
+                redact_urls(mask_literal_urls(e, urls)),
+                redact_urls(mask_literal_urls(trace, urls)),
             )
             retryable = _is_retryable_error(e)
             return CallToolResult(

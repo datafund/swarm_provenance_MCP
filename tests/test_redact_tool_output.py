@@ -362,3 +362,119 @@ def test_client_transaction_error_names_host_only(secret_preset, endpoints):
         client.anchor(HASH_A)
     assert "SECRET" not in str(info.value)
     assert RPC_HOST in str(info.value)
+
+
+# --- an RPC URL configured without a scheme ---
+
+SCHEMELESS = "rpc.leak.test/v2/SECRETKEY123"
+
+
+def _missing_schema():
+    """What requests raises for a URL without a scheme; it quotes the URL."""
+    try:
+        requests.get(SCHEMELESS, timeout=1)
+    except requests.exceptions.MissingSchema as e:
+        return e
+    raise AssertionError("requests accepted a URL without a scheme")
+
+
+def _assert_no_secret(text):
+    assert "SECRET" not in text, text
+
+
+@pytest.fixture
+def schemeless(monkeypatch):
+    """CHAIN_RPC_URL without a scheme, and no clients built yet."""
+    monkeypatch.setattr(srv.settings, "chain_enabled", True)
+    monkeypatch.setattr(srv.settings, "chain_name", "base-sepolia")
+    monkeypatch.setattr(srv.settings, "chain_rpc_url", SCHEMELESS)
+    monkeypatch.setattr(srv.settings, "chain_rpc_urls", None)
+    monkeypatch.setattr(srv, "CHAIN_AVAILABLE", True)
+    monkeypatch.setattr(srv, "chain_client", None)
+    monkeypatch.setattr(srv, "_read_only_client", None)
+    monkeypatch.setattr(srv, "_unverified_write_client", None)
+    monkeypatch.setattr(srv, "_chain_init_error", None)
+
+
+async def test_schemeless_rpc_url_hidden_in_chain_health(schemeless):
+    result = await call_tool("chain_health", {})
+    assert result.isError
+    _assert_no_secret(_text(result))
+    assert "rpc.leak.test" in _text(result)
+
+
+async def test_schemeless_rpc_url_hidden_in_verify_hash(schemeless):
+    result = await call_tool("verify_hash", {"swarm_hash": HASH_A})
+    assert result.isError
+    _assert_no_secret(_text(result))
+    assert "rpc.leak.test" in _text(result)
+
+
+async def test_schemeless_rpc_url_hidden_in_chain_balance_error(
+    schemeless, monkeypatch
+):
+    client = _client()
+    client._provider.rpc_url = SCHEMELESS
+    client._provider._rpc_urls = [SCHEMELESS]
+    client.balance.side_effect = _missing_schema()
+    monkeypatch.setattr(srv, "chain_client", client)
+    result = await call_tool("chain_balance", {})
+    assert result.isError
+    _assert_no_secret(_text(result))
+
+
+async def test_schemeless_rpc_url_hidden_in_chain_balance_rpc_line(
+    schemeless, monkeypatch
+):
+    client = _client()
+    client._provider.rpc_url = SCHEMELESS
+    client._provider._rpc_urls = [SCHEMELESS]
+    info = MagicMock()
+    info.address = client.address
+    info.balance_wei = 10**18
+    info.balance_eth = "1.0"
+    info.chain = "base-sepolia"
+    info.contract_address = client.contract_address
+    client.balance.return_value = info
+    monkeypatch.setattr(srv, "chain_client", client)
+    result = await call_tool("chain_balance", {})
+    assert not result.isError
+    _assert_no_secret(_text(result))
+    assert "RPC: rpc.leak.test" in _text(result)
+
+
+async def test_schemeless_fallback_url_hidden_in_tool_result(monkeypatch):
+    """A CHAIN_RPC_URLS entry without a scheme is hidden too."""
+    monkeypatch.setattr(srv.settings, "chain_rpc_url", None)
+    monkeypatch.setattr(
+        srv.settings, "chain_rpc_urls", f"https://ok.rpc.test,{SCHEMELESS}"
+    )
+    monkeypatch.setattr(srv, "chain_client", None)
+    monkeypatch.setattr(srv, "_read_only_client", None)
+    monkeypatch.setattr(srv, "_unverified_write_client", None)
+    result = srv.CallToolResult(
+        content=[srv.TextContent(type="text", text=f"Error: {_missing_schema()}")],
+        isError=True,
+    )
+    text = _text(srv._redact_rpc_urls(result))
+    _assert_no_secret(text)
+    assert "rpc.leak.test" in text
+
+
+def test_schemeless_rpc_url_hidden_in_startup_log(caplog):
+    from swarm_provenance_mcp.chain.provider import ChainProvider
+
+    caplog.set_level(logging.DEBUG)
+    ChainProvider(chain="base-sepolia", rpc_url=SCHEMELESS)
+    logged = "\n".join(
+        r.getMessage()
+        for r in caplog.records
+        if r.name.startswith("swarm_provenance_mcp")
+    )
+    assert "Could not read the chain id" in logged
+    _assert_no_secret(logged)
+
+
+def test_mask_rpc_url_never_returns_a_schemeless_url():
+    assert srv._mask_rpc_url(SCHEMELESS) == "rpc.leak.test"
+    assert "SECRET" not in srv._mask_rpc_url("/v2/SECRETKEY123")

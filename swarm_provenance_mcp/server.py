@@ -998,8 +998,11 @@ def format_payment_required(payment_info: Dict[str, Any], action: str) -> str:
     )
     if payment_info.get("error"):
         msg += f"   Gateway message: {_gw(payment_info['error'], 300)}\n"
-    if payment_info.get("code"):
-        msg += f"   Gateway error code: {_gw(payment_info['code'], 60)}\n"
+    code = payment_info.get("code") or ""
+    # The gateway's error envelope sets HTTP_<status> when an endpoint gave no
+    # code of its own, as every standard x402 402 does: that adds nothing.
+    if code and not re.fullmatch(r"HTTP_\d+", code):
+        msg += f"   Gateway error code: {_gw(code, 60)}\n"
 
     accepts = [a for a in payment_info.get("accepts") or [] if isinstance(a, dict)]
     if accepts:

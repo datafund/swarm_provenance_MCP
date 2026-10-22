@@ -296,6 +296,18 @@ class TestFormatPaymentRequired:
         assert "The gateway sent no payment details" in text
         assert "<html>gateway</html>" in text
 
+    def test_generic_http_status_code_is_hidden(self):
+        text = format_payment_required(_info(code="HTTP_402"), "x")
+        assert "HTTP_402" not in text
+        assert "Gateway error code" not in text
+
+    @pytest.mark.parametrize(
+        "code", ["PAYMENT_SETTLEMENT_FAILED", "FREE_TIER_DISABLED"]
+    )
+    def test_specific_code_is_shown(self, code):
+        text = format_payment_required(_info(accepts=[], code=code), "x")
+        assert f"Gateway error code: {code}" in text
+
     def test_many_options_are_capped(self):
         accepts = [_requirement(amount=str(i)) for i in range(1, 9)]
         text = format_payment_required(_info(accepts=accepts), "x")

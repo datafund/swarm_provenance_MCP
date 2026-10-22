@@ -15,6 +15,10 @@ from mcp.types import CallToolRequest, CallToolRequestParams
 from swarm_provenance_mcp import server as srv
 from swarm_provenance_mcp.chain.exceptions import ChainConnectionError
 from swarm_provenance_mcp.redact import redact_urls
+from tests.test_chain_client import (  # noqa: F401  (fixtures)
+    endpoints,
+    mock_chain_deps,
+)
 
 RPC = "https://rpc.leak.test/v2/SECRETKEY123?apikey=SECRETQ456"
 RPC_HOST = "rpc.leak.test"
@@ -128,7 +132,11 @@ TOOL_CASES = [
         {"source_hashes": [HASH_A, HASH_B], "new_hash": HASH_C},
         "merge_transform",
     ),
-    ("set_storage_ref", {"data_hash": HASH_A, "storage_ref": HASH_B}, "set_storage_ref"),
+    (
+        "set_storage_ref",
+        {"data_hash": HASH_A, "storage_ref": HASH_B},
+        "set_storage_ref",
+    ),
     ("lookup_by_storage_ref", {"storage_ref": HASH_B}, "lookup_by_storage_ref"),
 ]
 
@@ -162,16 +170,16 @@ async def test_chain_health_without_wallet_hides_rpc_path_and_query(
     monkeypatch.setattr(srv, "_unverified_write_client", None)
     provider = _client()._provider
     provider.health_check.side_effect = ERRORS[error]()
-    with patch("swarm_provenance_mcp.chain.provider.ChainProvider", return_value=provider):
+    with patch(
+        "swarm_provenance_mcp.chain.provider.ChainProvider", return_value=provider
+    ):
         result = await call_tool("chain_health", {})
     assert result.isError
     _assert_redacted(result)
 
 
 @pytest.mark.parametrize("error", sorted(ERRORS))
-async def test_record_transform_restrict_failure_hides_rpc_path_and_query(
-    chain, error
-):
+async def test_record_transform_restrict_failure_hides_rpc_path_and_query(chain, error):
     done = MagicMock()
     done.original_hash, done.new_hash = HASH_A, HASH_B
     done.tx_hash, done.block_number, done.gas_used = "0x" + "bb" * 32, 1, 1
@@ -228,7 +236,8 @@ async def test_catch_all_result_and_log_hide_rpc_path_and_query(
     records = [r for r in caplog.records if "Error in tool" in r.getMessage()]
     assert records
     logged = "\n".join(
-        r.getMessage() + (logging.Formatter().formatException(r.exc_info) if r.exc_info else "")
+        r.getMessage()
+        + (logging.Formatter().formatException(r.exc_info) if r.exc_info else "")
         for r in records
     )
     assert "SECRET" not in logged
@@ -304,9 +313,6 @@ def secret_preset(monkeypatch):
     preset["rpc_fallbacks"] = []
     monkeypatch.setitem(CHAIN_PRESETS, "base-sepolia", preset)
     monkeypatch.setattr(tcc, "_http_error", lambda status: _http_error())
-
-
-from tests.test_chain_client import endpoints, mock_chain_deps  # noqa: E402,F401
 
 
 def test_provider_health_check_error_names_host_only(secret_preset, endpoints):

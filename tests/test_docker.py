@@ -417,7 +417,7 @@ class TestMCPProtocol:
         result = init_response["result"]
         assert result["protocolVersion"] == "2024-11-05"
         assert result["serverInfo"]["name"] == "swarm-provenance-mcp"
-        assert result["serverInfo"]["version"] == "0.1.0"
+        assert result["serverInfo"]["version"] == "0.2.0"
 
     def test_tools_list(self):
         """Server returns all 7 expected tools."""

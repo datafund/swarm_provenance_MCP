@@ -29,8 +29,8 @@ The Docker image must be published to GHCR first. The image is **automatically r
 
 ```bash
 # Force a publish via version tag
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 The image is available at `ghcr.io/datafund/swarm-provenance-mcp:latest`.

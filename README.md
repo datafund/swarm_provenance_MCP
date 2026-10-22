@@ -608,7 +608,7 @@ docker build -t swarm-provenance-mcp .
 To tag with a specific version:
 
 ```bash
-docker build --build-arg VERSION=0.1.0 -t swarm-provenance-mcp:0.1.0 .
+docker build --build-arg VERSION=0.2.0 -t swarm-provenance-mcp:0.2.0 .
 ```
 
 ### Running

@@ -14,7 +14,7 @@ import threading
 from typing import List, Optional
 
 from .contract import DataStatus
-from ..redact import redact_urls, url_host
+from ..redact import redact_urls, rpc_host
 from .provider import is_transport_error
 from .exceptions import (
     ChainConfigurationError,
@@ -46,7 +46,7 @@ _BINDING_LOCK = threading.Lock()
 
 def _rpc_host(url: str) -> str:
     """Hostname of an RPC URL for logs: paths and queries can carry API keys."""
-    return url_host(url, "<rpc>")
+    return rpc_host(url, "<rpc>")
 
 
 def _should_fail_over(e: Exception) -> bool:
@@ -91,13 +91,13 @@ def _rpc_failover(method):
                         "%s: RPC %s unavailable (%s), retrying on %s",
                         method.__name__,
                         _rpc_host(failed_url),
-                        redact_urls(e),
+                        self._provider._redact(e),
                         _rpc_host(self._provider.rpc_url),
                     )
                     continue
                 raise ChainConnectionError(
                     f"RPC endpoint unavailable and no fallback could serve the "
-                    f"request: {e}",
+                    f"request: {self._provider._redact(e)}",
                     rpc_url=failed_url,
                 ) from e
 
@@ -426,7 +426,7 @@ class ChainClient:
             if "tx_hash" in dir():
                 tx_hash_str = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
             raise ChainTransactionError(
-                f"Transaction failed: {e}",
+                f"Transaction failed: {self._provider._redact(e)}",
                 tx_hash=tx_hash_str,
                 broadcast=broadcast,
             ) from e

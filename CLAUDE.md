@@ -74,7 +74,7 @@ pytest tests/test_docker.py -v -m docker
 
 ### Editor settings
 
-The repository commits no `.claude/settings.json` or `.mcp.json`. Put hooks, MCP servers and permissions in per-developer configuration: `.claude/settings.local.json` (gitignored), `~/.claude/settings.json`, or `claude mcp add --scope local|user`. Never commit hooks or MCP servers that run `npx`, `uvx` or `pipx` without an exact package version, and never commit `permissions.allow` or `enableAllProjectMcpServers`. `tests/test_editor_settings.py` enforces this. See "Editor settings" in README.md.
+The repository commits no `.claude/settings.json` or `.mcp.json`. Put hooks, MCP servers and permissions in per-developer configuration: `.claude/settings.local.json` (gitignored), `~/.claude/settings.json`, or `claude mcp add --scope local|user`. A committed `.claude/**/*.json` (except `*.local.json`), `.mcp.json`, `.cursor/mcp.json` or `.cursor/hooks.json` must not contain a `hooks`, `mcpServers`, `statusLine`, `apiKeyHelper`, `enableAllProjectMcpServers` or `enabledMcpjsonServers` key, a non-empty `permissions.allow`, or a `permissions.defaultMode` other than `"default"`. `tests/test_editor_settings.py` enforces this. See "Editor settings" in README.md.
 
 ## Architecture Overview
 

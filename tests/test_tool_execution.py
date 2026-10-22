@@ -3287,7 +3287,7 @@ class TestRecordTransform:
         text = result.content[0].text
         assert "Transformation recorded" in text
         assert "failed to restrict" in text
-        assert "0xabc123" in text
+        assert "IS recorded on-chain (tx 0xabc123)" in text
         assert "set_status reverted" in text
 
     async def test_transform_same_hash_rejected(self, server):

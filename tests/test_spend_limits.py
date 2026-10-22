@@ -828,8 +828,7 @@ class TestRestrictOriginal:
         assert result.isError
         text = result.content[0].text
         assert "failed to restrict" in text
-        assert "IS recorded on-chain" in text
-        assert TX_HASH.hex() in text
+        assert f"IS recorded on-chain (tx {TX_HASH.hex()})" in text
 
 
 class TestHold:

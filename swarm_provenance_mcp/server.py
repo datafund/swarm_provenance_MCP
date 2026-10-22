@@ -8,9 +8,9 @@ import logging
 import re
 import secrets
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from urllib.parse import urlparse
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -32,7 +32,7 @@ from requests.exceptions import RequestException
 
 from .config import WALLET_KEY_HINT, settings
 from .gateway_client import SwarmGatewayClient
-from .redact import redact_urls
+from .redact import mask_literal_urls, redact_urls, rpc_host
 from .untrusted import (
     QUOTED_NOTE,
     defang_hint_lines,
@@ -994,13 +994,40 @@ def _chain_id_lines(provider) -> str:
     return text + "\n   ⚠️  Mainnet — transactions spend real ETH"
 
 
+def _rpc_urls() -> List[str]:
+    """Every configured and every in-use RPC URL."""
+    urls = [settings.chain_rpc_url] + (_parse_rpc_fallbacks() or [])
+    for client in (chain_client, _read_only_client, _unverified_write_client):
+        provider = getattr(client, "_provider", None)
+        if provider is None:
+            continue
+        urls.append(getattr(provider, "rpc_url", None))
+        others = getattr(provider, "_rpc_urls", None)
+        if isinstance(others, (list, tuple)):
+            urls.extend(others)
+    return [u for u in urls if isinstance(u, str) and u]
+
+
+def _redact_rpc_urls(result: CallToolResult) -> CallToolResult:
+    """Cut RPC URLs in a tool result down to scheme, host and port.
+
+    Chain errors often quote the full RPC URL, whose path or query can hold
+    an API key. Other URLs (faucet, explorer, gateway) are left as they are.
+    """
+    urls = _rpc_urls()
+    if not urls or not isinstance(result, CallToolResult):
+        return result
+    hosts = {rpc_host(u) for u in urls} - {""}
+    for item in result.content:
+        if isinstance(item, TextContent):
+            # Literal URLs first: one without a scheme matches no URL pattern.
+            item.text = redact_urls(mask_literal_urls(item.text, urls), hosts)
+    return result
+
+
 def _mask_rpc_url(url: str) -> str:
-    """Extract hostname from RPC URL for display (hide full path/keys)."""
-    try:
-        parsed = urlparse(url)
-        return parsed.hostname or url
-    except Exception:
-        return url
+    """Hostname of an RPC URL for display; never the path, query or key."""
+    return rpc_host(url) or "<RPC URL hidden>"
 
 
 def _format_funding_guidance(address: str, balance_wei: int, chain: str) -> str:
@@ -1625,7 +1652,15 @@ def create_server() -> Server:
 
     @server.call_tool()
     async def call_tool(name: str, arguments: Dict[str, Any]) -> CallToolResult:
-        """Handle tool calls."""
+        """Handle tool calls; RPC URLs in the result show the host only."""
+        result = await _run_tool(name, arguments)
+        if name == "download_data":
+            # Fenced, capped Swarm content (#162), never chain output.
+            return result
+        return _redact_rpc_urls(result)
+
+    async def _run_tool(name: str, arguments: Dict[str, Any]) -> CallToolResult:
+        """Run the tool's handler; report an escaped exception as an error."""
         try:
             if name == "purchase_stamp":
                 return await handle_purchase_stamp(arguments)
@@ -1681,8 +1716,15 @@ def create_server() -> Server:
                     isError=True,
                 )
         except Exception as e:
+            # The traceback as text, so it is redacted too: its frames and
+            # last line can quote the RPC URL, also one without a scheme.
+            urls = _rpc_urls()
+            trace = traceback.format_exc().rstrip()
             logger.error(
-                "Error in tool %s: %s", name, redact_urls(e), exc_info=True
+                "Error in tool %s: %s\n%s",
+                name,
+                redact_urls(mask_literal_urls(e, urls)),
+                redact_urls(mask_literal_urls(trace, urls)),
             )
             retryable = _is_retryable_error(e)
             return CallToolResult(

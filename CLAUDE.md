@@ -73,6 +73,10 @@ docker compose run --rm swarm-provenance-mcp
 pytest tests/test_docker.py -v -m docker
 ```
 
+### Editor settings
+
+The repository commits no `.claude/settings.json` or `.mcp.json`. Put hooks, MCP servers and permissions in per-developer configuration: `.claude/settings.local.json` (gitignored), `~/.claude/settings.json`, or `claude mcp add --scope local|user`. A committed `.claude/**/*.json` (except `*.local.json`), `.mcp.json`, `.cursor/mcp.json` or `.cursor/hooks.json` must not contain a `hooks`, `mcpServers`, `statusLine`, `apiKeyHelper`, `enableAllProjectMcpServers` or `enabledMcpjsonServers` key, a non-empty `permissions.allow`, or a `permissions.defaultMode` other than `"default"`. `tests/test_editor_settings.py` enforces this. See "Editor settings" in README.md.
+
 ## Architecture Overview
 
 ### Core Components
@@ -263,7 +267,7 @@ This ensures engrams are tagged for retrieval in the right context across the gl
 
 You have persistent memory via PLUR. Corrections, preferences, and conventions persist across sessions as engrams.
 
-> **PLUR is its own MCP server.** The tools below come from the `plur` MCP server registered by `plur init` — `plur_session_start`, `plur_learn`, `plur_recall_hybrid`, `plur_feedback`, `plur_session_end`. If you do not see these exact tool names, **PLUR is not connected**: stop and run `plur doctor` to diagnose. Do **not** substitute tools from other MCP servers (e.g. `datacore_*`) — those belong to a different system and will not persist anything for PLUR.
+> **PLUR is its own MCP server.** The tools below come from the `plur` MCP server registered by `plur init` in your own per-developer configuration, not in this repository — `plur_session_start`, `plur_learn`, `plur_recall_hybrid`, `plur_feedback`, `plur_session_end`. If you do not see these exact tool names, **PLUR is not connected**: stop and run `plur doctor` to diagnose. Do **not** substitute tools from other MCP servers (e.g. `datacore_*`) — those belong to a different system and will not persist anything for PLUR.
 
 ### Session Workflow
 

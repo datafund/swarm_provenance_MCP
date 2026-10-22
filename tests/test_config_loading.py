@@ -39,6 +39,12 @@ DOCUMENTED_VARS = {
     "CHAIN_CONTRACT_ADDRESS": ("chain_contract_address", "0x" + "22" * 20, None),
     "CHAIN_EXPLORER_URL": ("chain_explorer_url", "https://explorer.example", None),
     "CHAIN_GAS_LIMIT": ("chain_gas_limit", "500000", 500000),
+    "CHAIN_MAX_FEE_GWEI": ("chain_max_fee_gwei", "0.5", 0.5),
+    "CHAIN_SESSION_BUDGET_ETH": ("chain_session_budget_eth", "0.01", 0.01),
+    "CHAIN_MAX_TX_PER_SESSION": ("chain_max_tx_per_session", "5", 5),
+    "CHAIN_L1_FEE_ALLOWANCE_ETH": ("chain_l1_fee_allowance_eth", "0.0001", 0.0001),
+    "CHAIN_REQUIRE_CONFIRM": ("chain_require_confirm", "true", True),
+    "MAX_STAMP_DURATION_HOURS": ("max_stamp_duration_hours", "720", 720),
 }
 
 # Documented variables that are not Settings fields.

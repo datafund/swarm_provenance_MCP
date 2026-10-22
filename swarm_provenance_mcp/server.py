@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import re
@@ -25,6 +26,7 @@ from mcp.types import (
     PromptArgument,
     PromptMessage,
     GetPromptResult,
+    ToolAnnotations,
 )
 from requests.exceptions import RequestException
 
@@ -195,6 +197,10 @@ if settings.chain_enabled:
                 explorer_url=settings.chain_explorer_url,
                 gas_limit=settings.chain_gas_limit,
                 rpc_fallbacks=_parse_rpc_fallbacks(),
+                max_fee_gwei=settings.chain_max_fee_gwei,
+                session_budget_eth=settings.chain_session_budget_eth,
+                max_tx_per_session=settings.chain_max_tx_per_session,
+                l1_fee_allowance_eth=settings.chain_l1_fee_allowance_eth,
             )
             logger.info(
                 "Chain client initialized: chain=%s contract=%s",
@@ -456,6 +462,11 @@ def validate_stamp_duration_hours(duration_hours: int) -> None:
     if duration_hours < 24:
         raise ValueError(
             f"Stamp duration must be at least 24 hours, got: {duration_hours}"
+        )
+    if duration_hours > settings.max_stamp_duration_hours:
+        raise ValueError(
+            f"Stamp duration must be at most {settings.max_stamp_duration_hours} "
+            f"hours (MAX_STAMP_DURATION_HOURS), got: {duration_hours}"
         )
 
 
@@ -1017,6 +1028,221 @@ def _format_funding_guidance(address: str, balance_wei: int, chain: str) -> str:
     return msg
 
 
+# MCP tool annotations (hints for clients deciding whether to ask the user).
+# Tools that spend funds (gas from the chain wallet, or the gateway operator's
+# BZZ) are marked destructive and non-idempotent: the spend is irreversible
+# and a repeated call can spend again, so clients should not auto-approve or
+# auto-retry them.
+_READ = ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+)
+_SPEND = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True
+)
+TOOL_ANNOTATIONS: Dict[str, ToolAnnotations] = {
+    # Gateway
+    "purchase_stamp": _SPEND,
+    "extend_stamp": _SPEND,
+    "upload_data": ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+    "get_stamp_status": _READ,
+    "list_stamps": _READ,
+    "download_data": _READ,
+    "check_stamp_health": _READ,
+    "get_wallet_info": _READ,
+    "get_notary_info": _READ,
+    "health_check": _READ,
+    # Chain
+    "chain_balance": _READ,
+    "chain_health": _READ,
+    "verify_hash": _READ,
+    "get_provenance": _READ,
+    "get_provenance_chain": _READ,
+    "lookup_by_storage_ref": _READ,
+    "anchor_hash": _SPEND,
+    "record_transform": _SPEND,
+    "record_merge_transform": _SPEND,
+    "set_storage_ref": _SPEND,
+}
+
+# Chain tools that send transactions; they take a `confirm` argument.
+SPENDING_CHAIN_TOOLS = (
+    "anchor_hash",
+    "record_transform",
+    "record_merge_transform",
+    "set_storage_ref",
+)
+
+CONFIRM_PROPERTY = {
+    "type": "boolean",
+    "description": (
+        "Set to true, together with quote_id, to send the transaction. When "
+        "confirmation is required (mainnet by default) a call without a "
+        "matching quote sends nothing and returns a quote of the exact action "
+        "with a quote_id. Get the user's approval before confirming."
+    ),
+    "default": False,
+}
+
+QUOTE_ID_PROPERTY = {
+    "type": "string",
+    "description": (
+        "The quote_id returned by the quote for exactly these arguments. "
+        "Single use, valid for 10 minutes."
+    ),
+}
+
+QUOTE_TTL_SECONDS = 600
+
+# Per-process key: quote ids from another process (or a restart) never match.
+_QUOTE_KEY = secrets.token_bytes(32)
+# Issued, unused quotes: quote_id -> (tool, canonical action, expiry).
+_issued_quotes: Dict[str, tuple] = {}
+MAX_ISSUED_QUOTES = 1000  # oldest are evicted beyond this
+
+# Action fields holding hashes or addresses: compared case-insensitively.
+_HEX_FIELDS = (
+    "swarm_hash",
+    "storage_ref",
+    "owner",
+    "original_hash",
+    "new_hash",
+    "source_hashes",
+    "data_hash",
+)
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+def _canonical(action: Dict[str, Any]) -> str:
+    """Canonical JSON of an action: hex fields lower-cased, empty values
+    treated as absent."""
+    norm = {}
+    for key, value in action.items():
+        if value in ("", None, []):
+            value = None
+        elif key in _HEX_FIELDS:
+            if isinstance(value, list):
+                value = [v.lower() if isinstance(v, str) else v for v in value]
+            elif isinstance(value, str):
+                value = value.lower()
+        norm[key] = value
+    return json.dumps(norm, sort_keys=True, separators=(",", ":"))
+
+
+def _quote_digest(tool: str, canonical: str, expires: float) -> str:
+    payload = f"{tool}\n{canonical}\n{expires!r}".encode()
+    return hmac.new(_QUOTE_KEY, payload, hashlib.sha256).hexdigest()[:32]
+
+
+def _issue_quote_id(tool: str, action: Dict[str, Any]) -> str:
+    now = _now()
+    for qid in [q for q, v in _issued_quotes.items() if v[2] <= now]:
+        del _issued_quotes[qid]  # prune expired
+    canonical = _canonical(action)
+    expires = now + QUOTE_TTL_SECONDS
+    qid = _quote_digest(tool, canonical, expires)
+    _issued_quotes[qid] = (tool, canonical, expires)
+    while len(_issued_quotes) > MAX_ISSUED_QUOTES:
+        del _issued_quotes[next(iter(_issued_quotes))]  # oldest first
+    return qid
+
+
+def _redeem_quote_id(tool: str, action: Dict[str, Any], quote_id: Any) -> bool:
+    """True, and the quote is used up, when quote_id was issued for exactly
+    this tool and action and has not expired."""
+    if not isinstance(quote_id, str):
+        return False
+    entry = _issued_quotes.get(quote_id)
+    if entry is None:
+        return False
+    q_tool, q_canonical, expires = entry
+    if expires <= _now():
+        del _issued_quotes[quote_id]
+        return False
+    canonical = _canonical(action)
+    if q_tool != tool or q_canonical != canonical:
+        return False
+    if not hmac.compare_digest(quote_id, _quote_digest(tool, canonical, expires)):
+        return False
+    del _issued_quotes[quote_id]  # single use
+    return True
+
+
+def _confirm_required() -> bool:
+    """Whether gas-spending tools need a confirmed quote: CHAIN_REQUIRE_CONFIRM,
+    or by default only on mainnet (any chain id not a known testnet)."""
+    if settings.chain_require_confirm is not None:
+        return settings.chain_require_confirm
+    return bool(chain_client and chain_client.spend.mainnet)
+
+
+async def _spend_confirmation(
+    tool: str,
+    arguments: Dict[str, Any],
+    action: Dict[str, Any],
+    tx_count: int = 1,
+) -> Optional[CallToolResult]:
+    """
+    Two-step confirmation for gas-spending tools.
+
+    ``action`` holds the validated arguments that decide what is sent. A call
+    proceeds only with confirm: true and a quote_id issued for exactly that
+    action, unexpired and unused. Otherwise it sends nothing and returns a
+    quote of the action with a new quote_id.
+
+    Returns None when the call may proceed.
+    """
+    if not _confirm_required():
+        return None
+    if arguments.get("confirm") is True and _redeem_quote_id(
+        tool, action, arguments.get("quote_id")
+    ):
+        return None
+
+    quote = await asyncio.to_thread(chain_client.fee_quote)
+    quote_id = _issue_quote_id(tool, action)
+    text = "Confirmation required: nothing was sent.\n\n"
+    if arguments.get("confirm") is True:
+        text += (
+            "The quote_id is missing, expired, already used, or was issued "
+            "for different arguments. A new quote follows.\n\n"
+        )
+    text += f"   Action: {tool}\n"
+    for key in sorted(action):
+        text += f"   {key}: {json.dumps(action[key])}\n"
+    text += (
+        f"\n   Sends {tx_count} transaction(s) paying gas from wallet "
+        f"{chain_client.address} on {chain_client.chain}.\n"
+        f"   Fee cap: {quote['max_fee_gwei']:g} gwei per gas\n"
+    )
+    if "fee_error" in quote:
+        text += f"   Current fee: {quote['fee_error']}\n"
+    else:
+        text += f"   Max fee per gas now: {quote['max_fee_per_gas_gwei']:.6g} gwei\n"
+    if "max_cost_per_tx_eth" in quote:
+        text += f"   Max cost per transaction: {quote['max_cost_per_tx_eth']:.6g} ETH\n"
+    text += (
+        f"   Session budget left: {quote['remaining_eth']:.6g} of "
+        f"{quote['budget_eth']:g} ETH\n"
+        f"   Transactions left this session: "
+        f"{quote['max_txs'] - quote['txs_sent']} of {quote['max_txs']}\n\n"
+        f"   quote_id: {quote_id}\n"
+        f"   (single use, valid for {QUOTE_TTL_SECONDS // 60} minutes, only for "
+        f"exactly the arguments above)\n\n"
+        f"To proceed, get the user's approval for this action, then call {tool} "
+        f"again with the same arguments plus confirm: true and quote_id: "
+        f"{quote_id}."
+    )
+    return CallToolResult(content=[TextContent(type="text", text=text)])
+
+
 def create_server() -> Server:
     """Create and configure the MCP server."""
     server = Server(
@@ -1040,6 +1266,7 @@ def create_server() -> Server:
                             "description": f"Duration in hours — controls TTL (time-to-live). Minimum 24 hours (default: {settings.default_stamp_duration_hours})",
                             "default": settings.default_stamp_duration_hours,
                             "minimum": 24,
+                            "maximum": settings.max_stamp_duration_hours,
                         },
                         "size": {
                             "type": "string",
@@ -1097,6 +1324,7 @@ def create_server() -> Server:
                             "type": "integer",
                             "description": "Additional duration in hours to add to the stamp's TTL. Minimum 24 hours.",
                             "minimum": 24,
+                            "maximum": settings.max_stamp_duration_hours,
                         },
                     },
                     "required": ["stamp_id", "duration_hours"],
@@ -1388,6 +1616,11 @@ def create_server() -> Server:
                 ]
             )
 
+        for tool in tools:
+            tool.annotations = TOOL_ANNOTATIONS[tool.name]
+            if tool.name in SPENDING_CHAIN_TOOLS:
+                tool.inputSchema["properties"]["confirm"] = CONFIRM_PROPERTY
+                tool.inputSchema["properties"]["quote_id"] = QUOTE_ID_PROPERTY
         return tools
 
     @server.call_tool()
@@ -2969,10 +3202,31 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
         if len(data_type) > 64:
             raise ValueError("data_type must be 64 characters or fewer")
 
-        owner = arguments.get("owner")
-        storage_ref = arguments.get("storage_ref")
+        owner = arguments.get("owner") or None
+        storage_ref = arguments.get("storage_ref") or None
         if storage_ref:
             storage_ref = validate_and_clean_reference_hash(storage_ref)
+        if owner and storage_ref:
+            # anchor_for has no storage ref variant: it would be dropped.
+            raise ValueError(
+                "storage_ref cannot be combined with owner: registering on "
+                "behalf of another owner does not link a storage reference. "
+                "Anchor without storage_ref, then have the owner call "
+                "set_storage_ref."
+            )
+
+        gate = await _spend_confirmation(
+            "anchor_hash",
+            arguments,
+            {
+                "swarm_hash": clean_hash,
+                "data_type": data_type,
+                "owner": owner,
+                "storage_ref": storage_ref,
+            },
+        )
+        if gate:
+            return gate
 
         if owner:
             result = await asyncio.to_thread(
@@ -3431,34 +3685,56 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
 
         restrict_original = arguments.get("restrict_original", False)
 
-        result = await asyncio.to_thread(
-            chain_client.transform, clean_original, clean_new, description
+        gate = await _spend_confirmation(
+            "record_transform",
+            arguments,
+            {
+                "original_hash": clean_original,
+                "new_hash": clean_new,
+                "description": description,
+                "restrict_original": bool(restrict_original),
+            },
+            tx_count=2 if restrict_original else 1,
         )
+        if gate:
+            return gate
 
-        response_text = f"⛓️  Transformation recorded on-chain\n\n"
-        response_text += f"   Original: {result.original_hash}\n"
-        response_text += f"   Transformed: {result.new_hash}\n"
-        if description:
-            response_text += f"   Description: {description}\n"
-        response_text += f"   Tx Hash: {result.tx_hash}\n"
-        response_text += f"   Block: {result.block_number:,}\n"
-        response_text += f"   Gas Used: {result.gas_used:,}"
-        if result.explorer_url:
-            response_text += f"\n   Explorer: {result.explorer_url}"
-
-        # Optionally restrict the original data after transformation
+        # With restrict_original, both transactions are reserved before the
+        # first is sent, so the session limits cannot stop it half-way.
+        hold = None
         restrict_failed = False
         if restrict_original:
-            try:
-                await asyncio.to_thread(
-                    chain_client.set_status, clean_original, 1
-                )  # 1 = RESTRICTED
-                response_text += f"\n\n   ⚠️  Original data status set to RESTRICTED"
-            except Exception as restrict_err:
-                restrict_failed = True
-                response_text += _restrict_failure_text(
-                    restrict_err, result.tx_hash, clean_original
-                )
+            hold = await asyncio.to_thread(chain_client.hold_transactions, 2)
+        with chain_client.using_hold(hold):
+            result = await asyncio.to_thread(
+                chain_client.transform, clean_original, clean_new, description
+            )
+
+            response_text = f"⛓️  Transformation recorded on-chain\n\n"
+            response_text += f"   Original: {result.original_hash}\n"
+            response_text += f"   Transformed: {result.new_hash}\n"
+            if description:
+                response_text += f"   Description: {description}\n"
+            response_text += f"   Tx Hash: {result.tx_hash}\n"
+            response_text += f"   Block: {result.block_number:,}\n"
+            response_text += f"   Gas Used: {result.gas_used:,}"
+            if result.explorer_url:
+                response_text += f"\n   Explorer: {result.explorer_url}"
+
+            # Optionally restrict the original data after transformation
+            if restrict_original:
+                try:
+                    await asyncio.to_thread(
+                        chain_client.set_status, clean_original, 1
+                    )  # 1 = RESTRICTED
+                    response_text += (
+                        f"\n\n   ⚠️  Original data status set to RESTRICTED"
+                    )
+                except Exception as restrict_err:
+                    restrict_failed = True
+                    response_text += _restrict_failure_text(
+                        restrict_err, result.tx_hash, clean_original
+                    )
 
         # Post-tx balance check
         try:
@@ -3682,6 +3958,19 @@ async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolRe
         new_data_type = arguments.get("new_data_type", "merged")
         if len(new_data_type) > 64:
             raise ValueError("new_data_type must be 64 characters or fewer")
+
+        gate = await _spend_confirmation(
+            "record_merge_transform",
+            arguments,
+            {
+                "source_hashes": clean_sources,
+                "new_hash": clean_new,
+                "description": description,
+                "new_data_type": new_data_type,
+            },
+        )
+        if gate:
+            return gate
 
         result = await asyncio.to_thread(
             chain_client.merge_transform,
@@ -4021,6 +4310,14 @@ async def handle_set_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
         if not storage_ref:
             raise ValueError("storage_ref is required")
         clean_ref = validate_and_clean_reference_hash(storage_ref)
+
+        gate = await _spend_confirmation(
+            "set_storage_ref",
+            arguments,
+            {"data_hash": clean_hash, "storage_ref": clean_ref},
+        )
+        if gate:
+            return gate
 
         result = await asyncio.to_thread(
             chain_client.set_storage_ref, clean_hash, clean_ref

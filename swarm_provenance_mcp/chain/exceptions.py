@@ -59,6 +59,13 @@ class ChainTransactionError(ChainError):
         return message
 
 
+class ChainSpendLimitError(ChainError):
+    """A transaction was refused before signing: fee above the cap, or the
+    session spend budget or transaction count would be exceeded."""
+
+    pass
+
+
 class ChainValidationError(ChainError):
     """Input validation failed (hash format, string lengths, batch limits)."""
 

@@ -8,6 +8,7 @@ gas estimation, signing, broadcasting, and receipt parsing.
 Dependencies (web3, eth-account) are included in the default install.
 """
 
+import contextlib
 import functools
 import logging
 import threading
@@ -20,6 +21,7 @@ from .exceptions import (
     ChainConfigurationError,
     ChainConnectionError,
     ChainError,
+    ChainSpendLimitError,
     ChainTransactionError,
     DataAlreadyRegisteredError,
     DataNotRegisteredError,
@@ -104,6 +106,28 @@ def _rpc_failover(method):
     return wrapper
 
 
+# Node errors that mean the transaction was refused before it entered the
+# mempool. Anything else ("already known", "internal error", timeouts,
+# unparseable responses...) may mean it was accepted, so it keeps its slot.
+_PRE_MEMPOOL_REJECTIONS = (
+    "nonce too low",
+    "replacement transaction underpriced",
+    "insufficient funds",
+    "intrinsic gas too low",
+    "exceeds block gas limit",
+    "invalid sender",
+)
+
+
+def _rejected_by_node(e: Exception) -> bool:
+    """Whether send_raw_transaction failed with a definite pre-mempool
+    rejection (an allowlist), so the transaction never reached the network."""
+    if is_transport_error(e):
+        return False
+    text = str(e).lower()
+    return any(reason in text for reason in _PRE_MEMPOOL_REJECTIONS)
+
+
 class WalletRequiredError(ChainConfigurationError, AttributeError):
     """A write was attempted on a read-only client.
 
@@ -130,6 +154,7 @@ class ChainClient:
     """
 
     _contract_web3 = None  # the Web3 instance _contract was built on
+    _spend = None  # SpendGuard; built from the chain id when first needed
     _contract_verified = False  # check_deployed() passed for this address
 
     def __init__(
@@ -144,6 +169,10 @@ class ChainClient:
         gas_limit: Optional[int] = None,
         rpc_fallbacks: Optional[List[str]] = None,
         read_only: bool = False,
+        max_fee_gwei: Optional[float] = None,
+        session_budget_eth: Optional[float] = None,
+        max_tx_per_session: Optional[int] = None,
+        l1_fee_allowance_eth: Optional[float] = None,
     ):
         """
         Initialize the chain client.
@@ -160,6 +189,13 @@ class ChainClient:
             rpc_fallbacks: Fallback RPC URLs tried in order on failure.
             read_only: Skip wallet loading. Read methods work as usual; write
                 methods raise ChainConfigurationError.
+            max_fee_gwei: Fee cap (maxFeePerGas). None uses the chain default.
+            session_budget_eth: Worst-case spend allowed per session. None
+                uses the chain default.
+            max_tx_per_session: Transactions allowed per session. None uses
+                the chain default.
+            l1_fee_allowance_eth: L1 data fee reserved per transaction on
+                top of L2 gas. None uses the default.
 
         Raises:
             ChainConfigurationError: If dependencies missing or config invalid.
@@ -189,6 +225,15 @@ class ChainClient:
         self._contract_web3 = self._provider.web3
         self._gas_limit_multiplier = gas_limit_multiplier
         self._gas_limit = gas_limit
+        from .spend import SpendGuard
+
+        self._spend = SpendGuard(
+            self._provider.chain_id,
+            max_fee_gwei=max_fee_gwei,
+            budget_eth=session_budget_eth,
+            max_txs=max_tx_per_session,
+            l1_fee_allowance_eth=l1_fee_allowance_eth,
+        )
 
     @property
     def address(self) -> str:
@@ -204,6 +249,61 @@ class ChainClient:
     def contract_address(self) -> str:
         """DataProvenance contract address."""
         return self._provider.contract_address
+
+    @property
+    def spend(self):
+        """The SpendGuard enforcing the fee cap, budget and tx count."""
+        if self._spend is None:
+            from .spend import SpendGuard
+
+            self._spend = SpendGuard(self._provider.chain_id)
+        return self._spend
+
+    def hold_transactions(self, n: int):
+        """
+        Set aside ``n`` transaction slots and their worst-case cost (at the
+        current fee) before the first is sent. Use with ``using_hold``.
+
+        Raises:
+            ChainSpendLimitError: If the fee is above the cap or the
+                transactions do not all fit in the session limits.
+        """
+        from .spend import HOLD_GAS_PER_TX
+
+        _, max_fee = self.spend.fee_fields(self._provider.web3)
+        gas = self._gas_limit if self._gas_limit is not None else HOLD_GAS_PER_TX
+        return self.spend.hold(n, self.spend.worst_case(gas, max_fee))
+
+    @contextlib.contextmanager
+    def using_hold(self, hold):
+        """Draw the transactions sent inside this block from ``hold``, and
+        give back whatever is unused when it ends."""
+        from .spend import ACTIVE_HOLD
+
+        token = ACTIVE_HOLD.set(hold)
+        try:
+            yield hold
+        finally:
+            ACTIVE_HOLD.reset(token)
+            if hold is not None:
+                self.spend.end_hold(hold)
+
+    def fee_quote(self) -> dict:
+        """
+        Current fee figures and spend limits, for a confirmation prompt.
+
+        Read-only. ``fee_error`` is set instead of the fee figure when the
+        current fee is above the cap or could not be read.
+        """
+        quote = dict(self.spend.summary())
+        try:
+            _, max_fee = self.spend.fee_fields(self._provider.web3)
+            quote["max_fee_per_gas_gwei"] = max_fee / 10**9
+            if self._gas_limit is not None:
+                quote["max_cost_per_tx_eth"] = self._gas_limit * max_fee / 10**18
+        except Exception as e:
+            quote["fee_error"] = str(e)
+        return quote
 
     # --- Internal helpers ---
 
@@ -384,15 +484,34 @@ class ChainClient:
                 tx["gas"] = int(estimated_gas * self._gas_limit_multiplier)
                 logger.debug("Estimated gas: %d, limit: %d", estimated_gas, tx["gas"])
 
+            # Explicit fee fields within the cap (replacing whatever the RPC
+            # suggested when the tx was built), then reserve the worst case.
+            fee_fields, max_fee = self.spend.fee_fields(web3)
+            for key in ("gasPrice", "maxFeePerGas", "maxPriorityFeePerGas"):
+                tx.pop(key, None)
+            tx.update(fee_fields)
+            reserved = self.spend.reserve(self.spend.worst_case(tx["gas"], max_fee))
+
             # Sign and send
-            raw_tx = self._wallet.sign_transaction(tx)
+            try:
+                raw_tx = self._wallet.sign_transaction(tx)
+            except Exception:
+                self.spend.release(reserved)
+                raise
             broadcast = True
-            tx_hash = web3.eth.send_raw_transaction(raw_tx)
+            try:
+                tx_hash = web3.eth.send_raw_transaction(raw_tx)
+            except Exception as send_err:
+                if _rejected_by_node(send_err):
+                    # The node refused it: nothing reached the network.
+                    self.spend.release(reserved)
+                raise
 
             logger.debug("Transaction sent: %s", tx_hash.hex())
 
             # Wait for receipt
             receipt = web3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+            self.spend.settle(reserved, receipt)
 
             if receipt["status"] != 1:
                 raise ChainTransactionError(
@@ -419,7 +538,7 @@ class ChainClient:
 
             return receipt
 
-        except ChainTransactionError:
+        except (ChainTransactionError, ChainSpendLimitError):
             raise
         except Exception as e:
             tx_hash_str = None

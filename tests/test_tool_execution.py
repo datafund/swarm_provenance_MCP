@@ -3287,6 +3287,7 @@ class TestRecordTransform:
         text = result.content[0].text
         assert "Transformation recorded" in text
         assert "failed to restrict" in text
+        assert "IS recorded on-chain (tx 0xabc123)" in text
         assert "set_status reverted" in text
 
     async def test_transform_same_hash_rejected(self, server):
@@ -6117,8 +6118,9 @@ class TestAnchorHashWithStorageRef:
             TEST_REFERENCE, "swarm-provenance", None
         )
 
-    async def test_anchor_with_owner_ignores_storage_ref(self, server):
-        """anchor_hash with owner uses anchor_for which does not support storage_ref."""
+    async def test_anchor_with_owner_rejects_storage_ref(self, server):
+        """anchor_for has no storage_ref variant, so owner + storage_ref is
+        refused instead of silently dropping the storage ref."""
         delegate_owner = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
         mock_client = MagicMock()
         mock_result = self._mock_anchor_result(storage_ref=None)
@@ -6140,9 +6142,9 @@ class TestAnchorHashWithStorageRef:
                 },
             )
 
-        assert not result.isError
-        # anchor_for is called (not anchor), storage_ref is not passed
-        mock_client.anchor_for.assert_called_once()
+        assert result.isError
+        assert "storage_ref cannot be combined with owner" in result.content[0].text
+        mock_client.anchor_for.assert_not_called()
         mock_client.anchor.assert_not_called()
 
 

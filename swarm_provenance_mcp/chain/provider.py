@@ -11,7 +11,7 @@ import logging
 import threading
 import weakref
 from typing import List, Optional
-from ..redact import redact_urls, url_host
+from ..redact import mask_literal_urls, redact_urls, rpc_host
 
 from .exceptions import (
     ChainConfigurationError,
@@ -146,7 +146,7 @@ def is_testnet_chain_id(chain_id: int) -> bool:
 
 def _host(url: str) -> str:
     """Hostname only, so log lines never carry an RPC path or API key."""
-    return url_host(url, "?")
+    return rpc_host(url, "?")
 
 
 def _http_provider(Web3, url: str, timeout: int):
@@ -284,6 +284,10 @@ class ChainProvider:
         """Whether the effective chain id is a valueless test network."""
         return is_testnet_chain_id(self.chain_id)
 
+    def _redact(self, error) -> str:
+        """Error text without RPC URL paths, also of URLs lacking a scheme."""
+        return redact_urls(mask_literal_urls(error, self._rpc_urls))
+
     def check_chain_id(self, web3, url: Optional[str] = None) -> None:
         """
         Refuse ``web3`` unless its ``eth_chainId`` equals ``self.chain_id``.
@@ -336,7 +340,7 @@ class ChainProvider:
             logger.warning(
                 "Could not read the chain id of the RPC at start-up (%s); "
                 "it is checked before first use and before every transaction",
-                redact_urls(e),
+                self._redact(e),
             )
             return
         self._verified.add(self._web3)
@@ -408,13 +412,13 @@ class ChainProvider:
                 self._probe(candidate, url)
             except ChainIdMismatchError as e:
                 logger.warning(
-                    "RPC fallback %s refused: %s", _host(url), redact_urls(e)
+                    "RPC fallback %s refused: %s", _host(url), self._redact(e)
                 )
                 mismatches.append(e)
                 continue
             except Exception as e:
                 logger.debug(
-                    "RPC fallback %s failed probe: %s", _host(url), redact_urls(e)
+                    "RPC fallback %s failed probe: %s", _host(url), self._redact(e)
                 )
                 continue
             logger.info(
@@ -453,7 +457,7 @@ class ChainProvider:
             if isinstance(e, (ChainConnectionError, ChainIdMismatchError)):
                 raise
             raise ChainConnectionError(
-                f"RPC health check failed: {redact_urls(e)}",
+                f"RPC health check failed: {self._redact(e)}",
                 rpc_url=self.rpc_url,
             ) from e
 
@@ -474,7 +478,7 @@ class ChainProvider:
             if self._fallback_from(used):
                 return self.get_block_number()
             raise ChainConnectionError(
-                f"Failed to get block number: {redact_urls(e)}",
+                f"Failed to get block number: {self._redact(e)}",
                 rpc_url=self.rpc_url,
             ) from e
 

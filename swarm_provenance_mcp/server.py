@@ -10,7 +10,6 @@ import time
 import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from urllib.parse import urlparse
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -31,7 +30,7 @@ from requests.exceptions import RequestException
 
 from .config import settings
 from .gateway_client import SwarmGatewayClient
-from .redact import redact_urls, url_host
+from .redact import mask_literal_urls, redact_urls, rpc_host
 from .untrusted import (
     QUOTED_NOTE,
     defang_hint_lines,
@@ -984,8 +983,8 @@ def _chain_id_lines(provider) -> str:
     return text + "\n   ⚠️  Mainnet — transactions spend real ETH"
 
 
-def _rpc_hosts() -> set:
-    """Hostnames of every configured and every in-use RPC URL."""
+def _rpc_urls() -> List[str]:
+    """Every configured and every in-use RPC URL."""
     urls = [settings.chain_rpc_url] + (_parse_rpc_fallbacks() or [])
     for client in (chain_client, _read_only_client, _unverified_write_client):
         provider = getattr(client, "_provider", None)
@@ -995,7 +994,7 @@ def _rpc_hosts() -> set:
         others = getattr(provider, "_rpc_urls", None)
         if isinstance(others, (list, tuple)):
             urls.extend(others)
-    return {url_host(u, "") for u in urls if isinstance(u, str)} - {""}
+    return [u for u in urls if isinstance(u, str) and u]
 
 
 def _redact_rpc_urls(result: CallToolResult) -> CallToolResult:
@@ -1004,22 +1003,20 @@ def _redact_rpc_urls(result: CallToolResult) -> CallToolResult:
     Chain errors often quote the full RPC URL, whose path or query can hold
     an API key. Other URLs (faucet, explorer, gateway) are left as they are.
     """
-    hosts = _rpc_hosts()
-    if not hosts or not isinstance(result, CallToolResult):
+    urls = _rpc_urls()
+    if not urls or not isinstance(result, CallToolResult):
         return result
+    hosts = {rpc_host(u) for u in urls} - {""}
     for item in result.content:
         if isinstance(item, TextContent):
-            item.text = redact_urls(item.text, hosts)
+            # Literal URLs first: one without a scheme matches no URL pattern.
+            item.text = redact_urls(mask_literal_urls(item.text, urls), hosts)
     return result
 
 
 def _mask_rpc_url(url: str) -> str:
-    """Extract hostname from RPC URL for display (hide full path/keys)."""
-    try:
-        parsed = urlparse(url)
-        return parsed.hostname or url
-    except Exception:
-        return url
+    """Hostname of an RPC URL for display; never the path, query or key."""
+    return rpc_host(url) or "<RPC URL hidden>"
 
 
 def _format_funding_guidance(address: str, balance_wei: int, chain: str) -> str:

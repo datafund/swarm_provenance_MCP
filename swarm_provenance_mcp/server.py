@@ -1,13 +1,16 @@
 """MCP server implementation for Swarm stamp management."""
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import re
+import secrets
 import time
+import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
-from urllib.parse import urlparse
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -23,11 +26,27 @@ from mcp.types import (
     PromptArgument,
     PromptMessage,
     GetPromptResult,
+    ToolAnnotations,
 )
 from requests.exceptions import RequestException
 
-from .config import settings
+from .config import WALLET_KEY_HINT, settings
 from .gateway_client import SwarmGatewayClient
+from .redact import mask_literal_urls, redact_urls, rpc_host
+from .untrusted import (
+    QUOTED_NOTE,
+    defang_hint_lines,
+    fence,
+    flatten,
+    one_line,
+    quote,
+)
+
+
+def _gw(value: Any, max_chars: int = 100) -> str:
+    """A gateway or RPC field, flattened to one capped line for printing."""
+    return one_line(value, max_chars)
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -39,6 +58,9 @@ gateway_client = SwarmGatewayClient()
 # Chain client (initialized when chain_enabled=true and dependencies available)
 chain_client = None
 CHAIN_AVAILABLE = False
+# Why writes are disabled although a wallet is configured (e.g. no contract
+# code at the configured address). Reported by the write tools.
+_chain_init_error: Optional[str] = None
 
 
 def _parse_rpc_fallbacks():
@@ -46,6 +68,119 @@ def _parse_rpc_fallbacks():
     if settings.chain_rpc_urls:
         return [u.strip() for u in settings.chain_rpc_urls.split(",") if u.strip()]
     return None
+
+
+_read_only_client = None
+
+
+def _chain_reader():
+    """
+    ChainClient for the read-only tools: the wallet client when configured,
+    otherwise a read-only client, so reads get the same RPC failover either way.
+
+    The read-only client is kept across calls so a switch to a fallback RPC
+    persists instead of every call starting on the degraded primary again.
+    """
+    global _read_only_client
+    if chain_client:
+        return chain_client
+    if _read_only_client is not None:
+        return _read_only_client
+    from .chain.client import ChainClient
+
+    _read_only_client = ChainClient(
+        chain=settings.chain_name,
+        rpc_url=settings.chain_rpc_url,
+        contract_address=settings.chain_contract_address,
+        explorer_url=settings.chain_explorer_url,
+        rpc_fallbacks=_parse_rpc_fallbacks(),
+        read_only=True,
+    )
+    return _read_only_client
+
+
+# Budget per RPC endpoint for the start-up contract check and its re-check
+# while writes are held back, in seconds.
+STARTUP_CONTRACT_CHECK_TIMEOUT = 5.0
+
+# Wallet client held back because the start-up check found no DataProvenance
+# code. Re-checked before each write (see _recheck_write_contract), so a node
+# that briefly answered "no code" does not disable writes until restart.
+_unverified_write_client = None
+
+
+def _contract_error_reason(client, error) -> str:
+    """Reason that writes are disabled, naming the address and chain."""
+    try:
+        chain = f"{client.chain}, chain id {client._provider.chain_id}"
+    except Exception:
+        chain = settings.chain_name
+    return f"{error} Chain: {chain}."
+
+
+def _verify_write_contract(client):
+    """
+    Start-up check that the configured address holds the DataProvenance
+    contract.
+
+    Uses a short per-endpoint timeout and tries the fallback RPCs, so a hung
+    primary cannot stall start-up.
+
+    Returns:
+        ``(client, None)`` when the check passes or cannot run yet (no RPC
+        answered: it runs again before the first transaction), or
+        ``(None, reason)`` when the address has no DataProvenance code — a
+        transaction there would spend gas and record nothing. The client is
+        then kept in ``_unverified_write_client`` and re-checked before the
+        next write.
+    """
+    global _unverified_write_client
+    from .chain.exceptions import ChainConfigurationError
+
+    try:
+        client.probe_contract(timeout=STARTUP_CONTRACT_CHECK_TIMEOUT)
+    except ChainConfigurationError as e:
+        reason = _contract_error_reason(client, e)
+        logger.error("Chain writes disabled: %s", redact_urls(reason))
+        _unverified_write_client = client
+        return None, reason
+    except Exception as e:
+        logger.warning(
+            "Could not verify the contract at start-up (%s); it is checked "
+            "again before the first transaction",
+            redact_urls(e),
+        )
+    return client, None
+
+
+async def _recheck_write_contract() -> None:
+    """
+    Re-run the contract check for a wallet client that the start-up check
+    held back. On success writes are enabled again; otherwise the reason is
+    refreshed and writes stay disabled.
+    """
+    global chain_client, _chain_init_error, _unverified_write_client
+    client = _unverified_write_client
+    if chain_client is not None or client is None:
+        return
+    from .chain.exceptions import ChainConfigurationError
+
+    try:
+        await asyncio.to_thread(
+            client.probe_contract, timeout=STARTUP_CONTRACT_CHECK_TIMEOUT
+        )
+    except ChainConfigurationError as e:
+        _chain_init_error = _contract_error_reason(client, e)
+        return
+    except Exception as e:
+        logger.warning(
+            "Contract re-check failed (%s); writes stay disabled", redact_urls(e)
+        )
+        return
+    logger.info("Contract found at %s; chain writes enabled", client.contract_address)
+    chain_client = client
+    _chain_init_error = None
+    _unverified_write_client = None
 
 
 if settings.chain_enabled:
@@ -62,21 +197,33 @@ if settings.chain_enabled:
                 explorer_url=settings.chain_explorer_url,
                 gas_limit=settings.chain_gas_limit,
                 rpc_fallbacks=_parse_rpc_fallbacks(),
+                max_fee_gwei=settings.chain_max_fee_gwei,
+                session_budget_eth=settings.chain_session_budget_eth,
+                max_tx_per_session=settings.chain_max_tx_per_session,
+                l1_fee_allowance_eth=settings.chain_l1_fee_allowance_eth,
             )
             logger.info(
                 "Chain client initialized: chain=%s contract=%s",
                 chain_client.chain,
                 chain_client.contract_address,
             )
+            chain_client, _chain_init_error = _verify_write_contract(chain_client)
         else:
             logger.warning(
                 "Chain enabled but blockchain dependencies not available. "
                 "Reinstall with: pip install -e ."
             )
     except Exception as e:
+        from .chain.exceptions import ChainIdMismatchError
+
+        if isinstance(e, ChainIdMismatchError):
+            # The RPC is on another chain than CHAIN_NAME: refuse to start
+            # rather than serve reads from, or sign for, the wrong network.
+            logger.error("Chain configuration refused: %s", redact_urls(e))
+            raise
         # chain_client stays None but CHAIN_AVAILABLE remains True —
         # read-only tools (verify_hash, get_provenance, etc.) work
-        # without a wallet via temporary provider+contract fallback.
+        # without a wallet via _chain_reader().
         err_msg = str(e).lower()
         if "wallet" in err_msg or "private key" in err_msg:
             logger.info(
@@ -84,7 +231,7 @@ if settings.chain_enabled:
                 settings.chain_name,
             )
         else:
-            logger.warning("Chain client init failed: %s", e)
+            logger.warning("Chain client init failed: %s", redact_urls(e))
 
 
 def _load_skills_content() -> str:
@@ -97,6 +244,63 @@ def _load_skills_content() -> str:
 
 
 _SKILLS_CONTENT = _load_skills_content()
+
+_CHAIN_ID_NAMES = {
+    84532: "Base Sepolia",
+    8453: "Base mainnet",
+    11155111: "Ethereum Sepolia",
+    1: "Ethereum mainnet",
+    31337: "a local Hardhat/Anvil chain",
+    1337: "a local dev chain",
+}
+
+
+def _effective_chain_id(chain_name: str, client=None) -> Optional[int]:
+    """
+    Chain id for ``chain_name``: the client's (pinned or auto-detected) id
+    when a client on that chain is available, else the preset id. None when
+    the id is only known from the RPC (localhost with a custom RPC).
+    """
+    from .chain.provider import CHAIN_PRESETS, PINNED_CHAINS
+
+    client = client or chain_client
+    if client is not None and getattr(client, "chain", None) == chain_name:
+        chain_id = getattr(getattr(client, "_provider", None), "chain_id", None)
+        if isinstance(chain_id, int):
+            return chain_id
+    preset = CHAIN_PRESETS.get(chain_name)
+    if preset is None:
+        return None
+    if chain_name in PINNED_CHAINS or not settings.chain_rpc_url:
+        return preset["chain_id"]
+    return None
+
+
+def _is_testnet(chain_name: str, client=None) -> bool:
+    """Testnet decision from the effective chain id (unknown → not a testnet)."""
+    from .chain.provider import is_testnet_chain_id
+
+    chain_id = _effective_chain_id(chain_name, client)
+    return chain_id is not None and is_testnet_chain_id(chain_id)
+
+
+def _chain_network_text() -> str:
+    """The network the chain tools act on, worded from the effective chain id."""
+    chain_id = _effective_chain_id(settings.chain_name)
+    if chain_id is None:
+        return (
+            f"on the chain behind CHAIN_RPC_URL (CHAIN_NAME={settings.chain_name}; "
+            "its id is read from the RPC, run chain_health to see it, and treat "
+            "it as mainnet unless that reports a testnet)"
+        )
+    name = _CHAIN_ID_NAMES.get(chain_id, f"chain {chain_id}")
+    if _is_testnet(settings.chain_name):
+        return f"on {name} (chain id {chain_id}, a testnet: tokens have no value)"
+    return (
+        f"on {name} (chain id {chain_id}). This is MAINNET: every write spends "
+        "real ETH"
+    )
+
 
 # Agent-facing instructions sent during MCP initialization handshake
 MCP_INSTRUCTIONS = """
@@ -146,7 +350,7 @@ ERRORS:
 
 CHAIN ANCHORING (optional):
 When chain_enabled=true, on-chain provenance tools become available (blockchain dependencies are included in the default install).
-These register Swarm hashes in the DataProvenance smart contract on Base Sepolia, creating an immutable on-chain record.
+These register Swarm hashes in the DataProvenance smart contract __CHAIN_NETWORK__, creating an immutable on-chain record.
 - chain_health — test RPC connectivity (no wallet needed)
 - chain_balance — check wallet ETH balance with funding guidance when low
 - anchor_hash — register a Swarm hash on-chain, optionally with a storage_ref for bidirectional lookup (costs gas, requires funded wallet)
@@ -180,7 +384,10 @@ upload_data (transformed data) → record_transform (original, new, description)
 COMPANION SERVERS:
 - swarm_connect gateway (required) — the FastAPI gateway this server talks to, handles Bee node communication
 The health_check tool reports gateway connectivity and connection status.
-""".strip()
+""".strip().replace("__CHAIN_NETWORK__", _chain_network_text())
+
+# Values accepted for upload_data's sign argument (the schema's enum).
+UPLOAD_SIGN_METHODS = frozenset({"notary"})
 
 # Validation patterns
 STAMP_ID_PATTERN = re.compile(r"^[a-fA-F0-9]{64}$")
@@ -255,6 +462,11 @@ def validate_stamp_duration_hours(duration_hours: int) -> None:
     if duration_hours < 24:
         raise ValueError(
             f"Stamp duration must be at least 24 hours, got: {duration_hours}"
+        )
+    if duration_hours > settings.max_stamp_duration_hours:
+        raise ValueError(
+            f"Stamp duration must be at most {settings.max_stamp_duration_hours} "
+            f"hours (MAX_STAMP_DURATION_HOURS), got: {duration_hours}"
         )
 
 
@@ -376,15 +588,110 @@ def _format_hints(next_tool: str, related: List[str]) -> str:
     return lines
 
 
+def _writes_disabled_text() -> str:
+    """Why write tools are disabled although a wallet is configured."""
+    return (
+        f"Chain writes are disabled: {_chain_init_error}\n"
+        "Fix CHAIN_CONTRACT or CHAIN_NAME, then restart the server. The "
+        "address is checked again before each write."
+    )
+
+
+def _no_write_client_text(no_wallet_text: str) -> str:
+    """Error text for a write tool without a usable wallet client."""
+    if _chain_init_error:
+        return _writes_disabled_text()
+    return no_wallet_text
+
+
 def _format_error(
     message: str, retryable: bool, next_tool: Optional[str] = None
 ) -> str:
-    """Format structured error message with retryable flag and recovery hint."""
-    lines = message
+    """Format structured error message with retryable flag and recovery hint.
+
+    The message often embeds exception text, so lines in it that look like
+    the hints appended here are marked as quoted.
+    """
+    lines = defang_hint_lines(message)
     lines += f"\n\nretryable: {str(retryable).lower()}"
     if next_tool:
         lines += f"\n_next: {next_tool}"
     return lines
+
+
+def _may_be_pending(e: Exception) -> bool:
+    """Whether a failed write may still land: it was broadcast and then the
+    endpoint dropped out or the receipt wait timed out."""
+    if not getattr(e, "broadcast", False):
+        return False
+    from .chain.provider import is_transport_error
+
+    if is_transport_error(e):
+        return True
+    cause = e
+    while cause is not None:
+        if type(cause).__name__ == "TimeExhausted":  # web3 receipt timeout
+            return True
+        cause = cause.__cause__ or cause.__context__
+    return False
+
+
+def _pending_tx_result(e: Exception, check_tool: str) -> CallToolResult:
+    """Report a broadcast write with an unknown outcome as possibly pending."""
+    msg = (
+        "Transaction outcome unknown: it was sent, but the RPC failed or the "
+        f"receipt did not arrive in time ({e}).\n"
+    )
+    if getattr(e, "tx_hash", None):
+        msg += f"   Tx Hash: {e.tx_hash}\n"
+    msg += (
+        "\nIt may be pending or already mined. Do not send it again: check "
+        f"with {check_tool} first, and retry only if the change is not there."
+    )
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=_format_error(msg, retryable=False, next_tool=check_tool),
+            )
+        ],
+        isError=True,
+    )
+
+
+def _restrict_failure_text(e: Exception, transform_tx: str, original: str) -> str:
+    """
+    record_transform succeeded but restricting the original did not: say what
+    is recorded and what the agent should do next, so it does not re-run the
+    transform.
+    """
+    restrict_call = (
+        f"   To restrict the original, the owner wallet calls "
+        f"setDataStatus(0x{original}, 1) on the DataProvenance contract "
+        f'(Python: ChainClient.set_status("{original}", 1)). This server has '
+        "no tool for it.\n"
+    )
+    recorded = (
+        f"   The transformation IS recorded on-chain (tx {transform_tx}). "
+        "Do not re-run record_transform: only the status change "
+    )
+    if _may_be_pending(e):
+        tx = getattr(e, "tx_hash", None) or "unknown"
+        return (
+            "\n\n   ⚠️  Restricting the original was sent, outcome unknown: it "
+            f"may still be pending (tx {tx}).\n" + recorded + "is unconfirmed.\n"
+            "   Do not send the status change again: check the original's Status "
+            "with get_provenance first, and only if it is not RESTRICTED:\n"
+            + restrict_call
+            + "\nretryable: false"
+        )
+    return (
+        f"\n\n   ⚠️  Transform succeeded but failed to restrict original: {e}\n"
+        + recorded
+        + "failed.\n"
+        + restrict_call
+        + "\nretryable: false"
+    )
 
 
 def _is_retryable_error(e: Exception) -> bool:
@@ -403,6 +710,238 @@ def _is_retryable_error(e: Exception) -> bool:
         error_str = str(e).lower()
         return any(w in error_str for w in ("timeout", "connection", "connect"))
     return False
+
+
+def _recovery_hint(e: Exception) -> Optional[str]:
+    """Point at health_check only when it can explain or change the outcome.
+
+    That is a transient failure, or any 5xx (health_check reports whether the
+    Bee node can reach the Swarm network). For other permanent errors an agent
+    following the hint would loop without progress.
+    """
+    response = getattr(e, "response", None)
+    if response is not None and response.status_code == 429:
+        return None  # the fix is to wait, which the error text says
+    if response is not None and response.status_code >= 500:
+        # Even when not retryable: health_check reports whether the gateway's
+        # Bee node can reach the Swarm network, the usual cause of a 5xx.
+        return "health_check"
+    return "health_check" if _is_retryable_error(e) else None
+
+
+def _is_ambiguous_write_error(e: Exception) -> bool:
+    """Whether a write may have completed even though no answer came back.
+
+    A read timeout or a proxy 502/504 means the request reached the gateway,
+    which may have finished it (bought or topped up a batch) after the client
+    stopped waiting. A connect failure means it never arrived, so it is not
+    ambiguous.
+    """
+    from requests.exceptions import (
+        ChunkedEncodingError,
+        ConnectTimeout,
+        JSONDecodeError,
+        ReadTimeout,
+    )
+    from requests.exceptions import ConnectionError as ReqConnectionError
+
+    if isinstance(e, (ReadTimeout, ChunkedEncodingError, JSONDecodeError)):
+        # JSONDecodeError: a 2xx whose body could not be parsed — it succeeded.
+        return True
+    if isinstance(e, ReqConnectionError) and not isinstance(e, ConnectTimeout):
+        # Dropped after sending ("Connection aborted", RemoteDisconnected), or
+        # a 2xx whose body stalled: requests wraps that read timeout as a
+        # ConnectionError("... Read timed out."), not ReadTimeout. Unlike a
+        # refused or unresolvable connection, the write may have happened.
+        text = str(e)
+        return any(
+            marker in text
+            for marker in ("Connection aborted", "RemoteDisconnected", "Read timed out")
+        )
+    response = getattr(e, "response", None)
+    # 500 too: the gateway returns it for errors raised after the purchase call.
+    return response is not None and response.status_code in (500, 502, 504)
+
+
+def _ambiguous_write_result(
+    action: str, e: Exception, check_tool: str, how_to_check: str = ""
+) -> CallToolResult:
+    """Tell the agent not to repeat a write whose outcome is unknown.
+
+    The free tier carries no payment, so the gateway's Idempotency-Key support
+    does not apply to it; a blind retry buys (or extends) a second time.
+    """
+    msg = (
+        f"{action} outcome unknown: {e}\n\n"
+        "The request reached the gateway but no usable answer came back, so "
+        "it may have completed. Do not repeat it yet: call "
+        f"{check_tool} first and only retry if the change is not there."
+    )
+    if how_to_check:
+        msg += f"\n{how_to_check}"
+    logger.error(msg)
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=_format_error(msg, retryable=False, next_tool=check_tool),
+            )
+        ],
+        isError=True,
+    )
+
+
+def _stamp_baseline(stamp_id: str) -> str:
+    """The stamp's expiry before an extension, to compare against afterwards."""
+    # Best effort: nothing here may stop the extension itself.
+    try:
+        details = gateway_client.get_stamp_details(stamp_id)
+    except Exception:
+        return ""
+    if not isinstance(details, dict):
+        return ""
+    parts = []
+    if details.get("expectedExpiration"):
+        parts.append(f"expiry {_gw(details['expectedExpiration'])}")
+    if details.get("batchTTL") is not None:
+        parts.append(f"TTL {_gw(details['batchTTL'])}s")
+    return ", ".join(parts)
+
+
+# A top-up is an on-chain transaction the node applies when it processes the
+# event, so get_stamp_status may show the old expiry for a while. How long has
+# not been measured against the gateway (#188); err on the side of waiting.
+_TOP_UP_DELAY_NOTE = (
+    " A top-up can take a few minutes to show: if the expiry has not moved, "
+    "wait a few minutes and check again before extending again."
+)
+
+
+def _extension_hint(baseline: str, hours: Any) -> str:
+    """How to tell from get_stamp_status whether the extension went through."""
+    if baseline:
+        return (
+            f"Before this call the stamp had {baseline}. If get_stamp_status now "
+            f"shows an expiry about {hours}h later, the extension went through."
+            + _TOP_UP_DELAY_NOTE
+        )
+    return (
+        "The stamp's state before this call could not be read. If its expiry is "
+        f"about {hours}h later than you expected, the extension went through."
+        + _TOP_UP_DELAY_NOTE
+    )
+
+
+def _format_age(seconds: float) -> str:
+    """Compact age: 45s, 12m, 3h, 2d."""
+    seconds = int(seconds)
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
+def _label(label: Any) -> str:
+    """A label as list_stamps prints it: the gateway client flattens it
+    (``gateway_client._clean_strings``), then it is quoted."""
+    from .gateway_client import MAX_GATEWAY_STRING_CHARS
+
+    return quote(flatten(label, MAX_GATEWAY_STRING_CHARS))
+
+
+def _new_batch_hint(label: Optional[str], depth: Optional[int]) -> str:
+    """How to spot, in list_stamps output, a batch the unanswered purchase made.
+
+    Only fields list_stamps prints. Free-tier purchases are shared batches,
+    so access mode does not identify them. Every purchase carries a label
+    (generated when the caller gave none), so the label always identifies it.
+    """
+    traits = []
+    if label:
+        traits.append(f"'Label: {_label(label)}'")
+    if depth is not None:
+        traits.append(f"'Depth: {depth}'")
+    traits.append("a batch ID that was not listed before this call")
+    return (
+        "In list_stamps, a batch from this call shows "
+        + ", ".join(traits)
+        + "; where the gateway reports it, 'Purchased' is a few minutes ago. "
+        "It may still be propagating."
+    )
+
+
+def _gateway_error_text(message: str, e: Exception) -> str:
+    """Append what the caller can do when the error says more than its status."""
+    response = getattr(e, "response", None)
+    if response is not None and response.status_code == 429:
+        wait = response.headers.get("Retry-After")
+        message += "\n\nRate limited by the gateway"
+        message += f": wait {_gw(wait, 40)} seconds before retrying." if wait else "."
+        message += " The free tier allows a few write requests per minute."
+    if _is_insufficient_funds_error(e):
+        message += (
+            "\n\nOperator action required: the gateway's wallet cannot pay for "
+            "this operation. Retrying or calling other tools will not help — "
+            "report it to the gateway operator."
+        )
+    return message
+
+
+def _bee_advisories(gateway_response: Dict[str, Any]) -> List[str]:
+    """The gateway's advisory ``bee_node.warnings`` (few peers, chain lag)."""
+    bee = gateway_response.get("bee_node")
+    if not isinstance(bee, dict):
+        return []
+    return [str(w) for w in bee.get("warnings") or []]
+
+
+def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Summarise whether the gateway's Bee node can reach the Swarm network.
+
+    Gateway liveness says nothing about this: a node with no peers serves
+    its own local data and accepts uploads that never propagate.
+
+    Returns:
+        None if the gateway does not report the node's network state, otherwise
+        a dict with ``ok`` (bool), ``summary`` (str), ``problems`` (list of
+        str) and ``advisories`` (list of str).
+
+    ``bee_node.warnings`` are advisory (few peers, chain lag) and the gateway
+    keeps ``healthy: true`` for them, so they are reported without changing
+    ``ok``.
+    """
+    bee = gateway_response.get("bee_node")
+    state_keys = ("healthy", "network_availability", "connected_peers", "warming_up")
+    if not isinstance(bee, dict) or not any(k in bee for k in state_keys):
+        return None
+
+    peers = bee.get("connected_peers")
+    availability = bee.get("network_availability")
+    problems = []
+    if bee.get("healthy") is False:
+        problems.append("gateway reports the Bee node unhealthy")
+    if availability is not None and availability != "Available":
+        problems.append(f"network availability is {_gw(availability)}")
+    if peers is not None and peers == 0:
+        problems.append("Bee node has no connected peers")
+    if bee.get("warming_up"):
+        problems.append("Bee node is still warming up")
+    advisories = _bee_advisories(gateway_response)
+
+    parts = []
+    if peers is not None:
+        parts.append(f"{_gw(peers)} peers")
+    if availability:
+        parts.append(f"availability {_gw(availability)}")
+    if bee.get("reachability"):
+        parts.append(f"reachability {_gw(bee['reachability'])}")
+    return {
+        "ok": not problems,
+        "summary": ", ".join(parts) or "no details reported",
+        "problems": problems,
+        "advisories": advisories,
+    }
 
 
 # Chain balance thresholds and funding URLs
@@ -428,22 +967,67 @@ def _format_insufficient_funds_error(tool_name: str, chain_client_ref) -> str:
         chain = chain_client_ref.chain
     else:
         chain = settings.chain_name
-    faucet = _FAUCET_URLS.get(chain)
-    if faucet:
-        msg += f"\n   Fund with testnet ETH: {faucet}"
-    else:
-        msg += f"\n   Bridge ETH to Base: {_BRIDGE_URL}"
+    msg += _funding_hint(chain, chain_client_ref)
     msg += "\n\n   Run chain_balance to check your current balance."
     return msg
 
 
+def _funding_hint(chain: str, client=None) -> str:
+    """Where to get ETH, decided by the effective chain id, not the name."""
+    if not _is_testnet(chain, client):
+        return f"\n   Bridge ETH to Base: {_BRIDGE_URL}"
+    faucet = _FAUCET_URLS.get(chain)
+    if faucet:
+        return f"\n   Fund with testnet ETH: {faucet}"
+    return "\n   Fund the account from your local test node (testnet ETH)"
+
+
+def _chain_id_lines(provider) -> str:
+    """
+    Chain id and a testnet/mainnet label, each line starting "\n   ".
+
+    The label comes from the effective chain id, not from CHAIN_NAME.
+    """
+    text = f"\n   Chain ID: {provider.chain_id}"
+    if provider.is_testnet:
+        return text + "\n   ⚠️  Testnet — tokens have no value, state may be reset"
+    return text + "\n   ⚠️  Mainnet — transactions spend real ETH"
+
+
+def _rpc_urls() -> List[str]:
+    """Every configured and every in-use RPC URL."""
+    urls = [settings.chain_rpc_url] + (_parse_rpc_fallbacks() or [])
+    for client in (chain_client, _read_only_client, _unverified_write_client):
+        provider = getattr(client, "_provider", None)
+        if provider is None:
+            continue
+        urls.append(getattr(provider, "rpc_url", None))
+        others = getattr(provider, "_rpc_urls", None)
+        if isinstance(others, (list, tuple)):
+            urls.extend(others)
+    return [u for u in urls if isinstance(u, str) and u]
+
+
+def _redact_rpc_urls(result: CallToolResult) -> CallToolResult:
+    """Cut RPC URLs in a tool result down to scheme, host and port.
+
+    Chain errors often quote the full RPC URL, whose path or query can hold
+    an API key. Other URLs (faucet, explorer, gateway) are left as they are.
+    """
+    urls = _rpc_urls()
+    if not urls or not isinstance(result, CallToolResult):
+        return result
+    hosts = {rpc_host(u) for u in urls} - {""}
+    for item in result.content:
+        if isinstance(item, TextContent):
+            # Literal URLs first: one without a scheme matches no URL pattern.
+            item.text = redact_urls(mask_literal_urls(item.text, urls), hosts)
+    return result
+
+
 def _mask_rpc_url(url: str) -> str:
-    """Extract hostname from RPC URL for display (hide full path/keys)."""
-    try:
-        parsed = urlparse(url)
-        return parsed.hostname or url
-    except Exception:
-        return url
+    """Hostname of an RPC URL for display; never the path, query or key."""
+    return rpc_host(url) or "<RPC URL hidden>"
 
 
 def _format_funding_guidance(address: str, balance_wei: int, chain: str) -> str:
@@ -455,7 +1039,6 @@ def _format_funding_guidance(address: str, balance_wei: int, chain: str) -> str:
     if balance_wei >= _LOW_BALANCE_WEI:
         return ""
 
-    is_testnet = chain in _FAUCET_URLS
     balance_eth = balance_wei / 10**18
 
     if balance_wei < _MIN_BALANCE_WEI:
@@ -467,13 +1050,224 @@ def _format_funding_guidance(address: str, balance_wei: int, chain: str) -> str:
         msg += f"\n   Balance: {balance_eth:.6f} ETH (may run out soon)"
         msg += f"\n   Wallet: {address}"
 
-    if is_testnet:
-        faucet_url = _FAUCET_URLS[chain]
-        msg += f"\n   Fund with testnet ETH: {faucet_url}"
-    else:
-        msg += f"\n   Bridge ETH to Base: {_BRIDGE_URL}"
+    msg += _funding_hint(chain)
 
     return msg
+
+
+# MCP tool annotations (hints for clients deciding whether to ask the user).
+# Tools that spend funds (gas from the chain wallet, or the gateway operator's
+# BZZ) are marked destructive and non-idempotent: the spend is irreversible
+# and a repeated call can spend again, so clients should not auto-approve or
+# auto-retry them.
+_READ = ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+)
+_SPEND = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True
+)
+TOOL_ANNOTATIONS: Dict[str, ToolAnnotations] = {
+    # Gateway
+    "purchase_stamp": _SPEND,
+    "extend_stamp": _SPEND,
+    "upload_data": ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+    "get_stamp_status": _READ,
+    "list_stamps": _READ,
+    "download_data": _READ,
+    "check_stamp_health": _READ,
+    "get_wallet_info": _READ,
+    "get_notary_info": _READ,
+    "health_check": _READ,
+    # Chain
+    "chain_balance": _READ,
+    "chain_health": _READ,
+    "verify_hash": _READ,
+    "get_provenance": _READ,
+    "get_provenance_chain": _READ,
+    "lookup_by_storage_ref": _READ,
+    "anchor_hash": _SPEND,
+    "record_transform": _SPEND,
+    "record_merge_transform": _SPEND,
+    "set_storage_ref": _SPEND,
+}
+
+# Chain tools that send transactions; they take a `confirm` argument.
+SPENDING_CHAIN_TOOLS = (
+    "anchor_hash",
+    "record_transform",
+    "record_merge_transform",
+    "set_storage_ref",
+)
+
+CONFIRM_PROPERTY = {
+    "type": "boolean",
+    "description": (
+        "Set to true, together with quote_id, to send the transaction. When "
+        "confirmation is required (mainnet by default) a call without a "
+        "matching quote sends nothing and returns a quote of the exact action "
+        "with a quote_id. Get the user's approval before confirming."
+    ),
+    "default": False,
+}
+
+QUOTE_ID_PROPERTY = {
+    "type": "string",
+    "description": (
+        "The quote_id returned by the quote for exactly these arguments. "
+        "Single use, valid for 10 minutes."
+    ),
+}
+
+QUOTE_TTL_SECONDS = 600
+
+# Per-process key: quote ids from another process (or a restart) never match.
+_QUOTE_KEY = secrets.token_bytes(32)
+# Issued, unused quotes: quote_id -> (tool, canonical action, expiry).
+_issued_quotes: Dict[str, tuple] = {}
+MAX_ISSUED_QUOTES = 1000  # oldest are evicted beyond this
+
+# Action fields holding hashes or addresses: compared case-insensitively.
+_HEX_FIELDS = (
+    "swarm_hash",
+    "storage_ref",
+    "owner",
+    "original_hash",
+    "new_hash",
+    "source_hashes",
+    "data_hash",
+)
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+def _canonical(action: Dict[str, Any]) -> str:
+    """Canonical JSON of an action: hex fields lower-cased, empty values
+    treated as absent."""
+    norm = {}
+    for key, value in action.items():
+        if value in ("", None, []):
+            value = None
+        elif key in _HEX_FIELDS:
+            if isinstance(value, list):
+                value = [v.lower() if isinstance(v, str) else v for v in value]
+            elif isinstance(value, str):
+                value = value.lower()
+        norm[key] = value
+    return json.dumps(norm, sort_keys=True, separators=(",", ":"))
+
+
+def _quote_digest(tool: str, canonical: str, expires: float) -> str:
+    payload = f"{tool}\n{canonical}\n{expires!r}".encode()
+    return hmac.new(_QUOTE_KEY, payload, hashlib.sha256).hexdigest()[:32]
+
+
+def _issue_quote_id(tool: str, action: Dict[str, Any]) -> str:
+    now = _now()
+    for qid in [q for q, v in _issued_quotes.items() if v[2] <= now]:
+        del _issued_quotes[qid]  # prune expired
+    canonical = _canonical(action)
+    expires = now + QUOTE_TTL_SECONDS
+    qid = _quote_digest(tool, canonical, expires)
+    _issued_quotes[qid] = (tool, canonical, expires)
+    while len(_issued_quotes) > MAX_ISSUED_QUOTES:
+        del _issued_quotes[next(iter(_issued_quotes))]  # oldest first
+    return qid
+
+
+def _redeem_quote_id(tool: str, action: Dict[str, Any], quote_id: Any) -> bool:
+    """True, and the quote is used up, when quote_id was issued for exactly
+    this tool and action and has not expired."""
+    if not isinstance(quote_id, str):
+        return False
+    entry = _issued_quotes.get(quote_id)
+    if entry is None:
+        return False
+    q_tool, q_canonical, expires = entry
+    if expires <= _now():
+        del _issued_quotes[quote_id]
+        return False
+    canonical = _canonical(action)
+    if q_tool != tool or q_canonical != canonical:
+        return False
+    if not hmac.compare_digest(quote_id, _quote_digest(tool, canonical, expires)):
+        return False
+    del _issued_quotes[quote_id]  # single use
+    return True
+
+
+def _confirm_required() -> bool:
+    """Whether gas-spending tools need a confirmed quote: CHAIN_REQUIRE_CONFIRM,
+    or by default only on mainnet (any chain id not a known testnet)."""
+    if settings.chain_require_confirm is not None:
+        return settings.chain_require_confirm
+    return bool(chain_client and chain_client.spend.mainnet)
+
+
+async def _spend_confirmation(
+    tool: str,
+    arguments: Dict[str, Any],
+    action: Dict[str, Any],
+    tx_count: int = 1,
+) -> Optional[CallToolResult]:
+    """
+    Two-step confirmation for gas-spending tools.
+
+    ``action`` holds the validated arguments that decide what is sent. A call
+    proceeds only with confirm: true and a quote_id issued for exactly that
+    action, unexpired and unused. Otherwise it sends nothing and returns a
+    quote of the action with a new quote_id.
+
+    Returns None when the call may proceed.
+    """
+    if not _confirm_required():
+        return None
+    if arguments.get("confirm") is True and _redeem_quote_id(
+        tool, action, arguments.get("quote_id")
+    ):
+        return None
+
+    quote = await asyncio.to_thread(chain_client.fee_quote)
+    quote_id = _issue_quote_id(tool, action)
+    text = "Confirmation required: nothing was sent.\n\n"
+    if arguments.get("confirm") is True:
+        text += (
+            "The quote_id is missing, expired, already used, or was issued "
+            "for different arguments. A new quote follows.\n\n"
+        )
+    text += f"   Action: {tool}\n"
+    for key in sorted(action):
+        text += f"   {key}: {json.dumps(action[key])}\n"
+    text += (
+        f"\n   Sends {tx_count} transaction(s) paying gas from wallet "
+        f"{chain_client.address} on {chain_client.chain}.\n"
+        f"   Fee cap: {quote['max_fee_gwei']:g} gwei per gas\n"
+    )
+    if "fee_error" in quote:
+        text += f"   Current fee: {quote['fee_error']}\n"
+    else:
+        text += f"   Max fee per gas now: {quote['max_fee_per_gas_gwei']:.6g} gwei\n"
+    if "max_cost_per_tx_eth" in quote:
+        text += f"   Max cost per transaction: {quote['max_cost_per_tx_eth']:.6g} ETH\n"
+    text += (
+        f"   Session budget left: {quote['remaining_eth']:.6g} of "
+        f"{quote['budget_eth']:g} ETH\n"
+        f"   Transactions left this session: "
+        f"{quote['max_txs'] - quote['txs_sent']} of {quote['max_txs']}\n\n"
+        f"   quote_id: {quote_id}\n"
+        f"   (single use, valid for {QUOTE_TTL_SECONDS // 60} minutes, only for "
+        f"exactly the arguments above)\n\n"
+        f"To proceed, get the user's approval for this action, then call {tool} "
+        f"again with the same arguments plus confirm: true and quote_id: "
+        f"{quote_id}."
+    )
+    return CallToolResult(content=[TextContent(type="text", text=text)])
 
 
 def create_server() -> Server:
@@ -499,6 +1293,7 @@ def create_server() -> Server:
                             "description": f"Duration in hours — controls TTL (time-to-live). Minimum 24 hours (default: {settings.default_stamp_duration_hours})",
                             "default": settings.default_stamp_duration_hours,
                             "minimum": 24,
+                            "maximum": settings.max_stamp_duration_hours,
                         },
                         "size": {
                             "type": "string",
@@ -514,7 +1309,7 @@ def create_server() -> Server:
                         },
                         "label": {
                             "type": "string",
-                            "description": "Optional human-readable label for easier stamp identification",
+                            "description": "Optional human-readable label for easier stamp identification. If omitted, a unique label (mcp-<hex>) is generated so the batch can be found in list_stamps.",
                             "maxLength": 100,
                         },
                     },
@@ -556,6 +1351,7 @@ def create_server() -> Server:
                             "type": "integer",
                             "description": "Additional duration in hours to add to the stamp's TTL. Minimum 24 hours.",
                             "minimum": 24,
+                            "maximum": settings.max_stamp_duration_hours,
                         },
                     },
                     "required": ["stamp_id", "duration_hours"],
@@ -584,8 +1380,8 @@ def create_server() -> Server:
                         },
                         "sign": {
                             "type": "string",
-                            "description": "Signing method for provenance. Use 'notary' to have the gateway cryptographically sign the data at upload time, creating a verifiable proof of upload. Check notary_info first to confirm signing is available. Leave empty for unsigned upload.",
-                            "enum": ["notary"],
+                            "description": "Signing method for provenance. Use 'notary' to have the gateway cryptographically sign the data at upload time, creating a verifiable proof of upload. Check notary_info first to confirm signing is available. Omit it for an unsigned upload.",
+                            "enum": sorted(UPLOAD_SIGN_METHODS),
                         },
                     },
                     "required": ["data", "stamp_id"],
@@ -593,7 +1389,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="download_data",
-                description="Download data from the Swarm network using a reference hash. The reference hash is returned by upload_data after a successful upload. Returns the decoded content for text/JSON, or size and type metadata for binary data.",
+                description="Download data from the Swarm network using a reference hash, retrieved through the gateway's Bee node. The reference can come from upload_data or any other Swarm upload. Returns the decoded content for text/JSON, or size and type metadata for binary data. A not-found result says whether the gateway is connected to the Swarm network — do not re-upload when it is not.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -847,11 +1643,24 @@ def create_server() -> Server:
                 ]
             )
 
+        for tool in tools:
+            tool.annotations = TOOL_ANNOTATIONS[tool.name]
+            if tool.name in SPENDING_CHAIN_TOOLS:
+                tool.inputSchema["properties"]["confirm"] = CONFIRM_PROPERTY
+                tool.inputSchema["properties"]["quote_id"] = QUOTE_ID_PROPERTY
         return tools
 
     @server.call_tool()
     async def call_tool(name: str, arguments: Dict[str, Any]) -> CallToolResult:
-        """Handle tool calls."""
+        """Handle tool calls; RPC URLs in the result show the host only."""
+        result = await _run_tool(name, arguments)
+        if name == "download_data":
+            # Fenced, capped Swarm content (#162), never chain output.
+            return result
+        return _redact_rpc_urls(result)
+
+    async def _run_tool(name: str, arguments: Dict[str, Any]) -> CallToolResult:
+        """Run the tool's handler; report an escaped exception as an error."""
         try:
             if name == "purchase_stamp":
                 return await handle_purchase_stamp(arguments)
@@ -907,7 +1716,16 @@ def create_server() -> Server:
                     isError=True,
                 )
         except Exception as e:
-            logger.error(f"Error in tool {name}: {e}", exc_info=True)
+            # The traceback as text, so it is redacted too: its frames and
+            # last line can quote the RPC URL, also one without a scheme.
+            urls = _rpc_urls()
+            trace = traceback.format_exc().rstrip()
+            logger.error(
+                "Error in tool %s: %s\n%s",
+                name,
+                redact_urls(mask_literal_urls(e, urls)),
+                redact_urls(mask_literal_urls(trace, urls)),
+            )
             retryable = _is_retryable_error(e)
             return CallToolResult(
                 content=[
@@ -916,7 +1734,7 @@ def create_server() -> Server:
                         text=_format_error(
                             f"Error executing {name}: {str(e)}",
                             retryable=retryable,
-                            next_tool="health_check",
+                            next_tool=_recovery_hint(e),
                         ),
                     )
                 ],
@@ -1135,13 +1953,16 @@ def create_server() -> Server:
 
 async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle stamp purchase requests."""
+    label, depth = None, None
     try:
         duration_hours = arguments.get(
             "duration_hours", settings.default_stamp_duration_hours
         )
         size = arguments.get("size", settings.default_stamp_size)
         depth = arguments.get("depth")
-        label = arguments.get("label")
+        # Always label the batch: if the answer to this call is lost, the
+        # label is how the agent finds the batch again instead of buying twice.
+        label = arguments.get("label") or f"mcp-{secrets.token_hex(4)}"
 
         # Validate inputs
         validate_stamp_duration_hours(duration_hours)
@@ -1172,8 +1993,10 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         # Check if purchase was actually successful
         batch_id = result.get("batchID")
         if not batch_id:
-            error_msg = f"❌ Stamp purchase failed - no stamp ID returned!\n\nGateway response: {result}"
-            logger.error(f"Purchase failed - missing batchID in response: {result}")
+            error_msg = f"❌ Stamp purchase failed - no stamp ID returned!\n\nGateway response: {_gw(repr(result), 300)}"
+            logger.error(
+                f"Purchase failed - missing batchID in response: {_gw(repr(result), 300)}"
+            )
             return CallToolResult(
                 content=[
                     TextContent(
@@ -1195,7 +2018,7 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         else:
             response_text += f"   Size: {size}\n"
         if label:
-            response_text += f"   Label: {label}\n"
+            response_text += f"   Label: {_label(label)}\n"
         response_text += f"\n✅ Stamp ID: `{batch_id}`\n"
 
         propagation_status = result.get("propagationStatus")
@@ -1203,9 +2026,7 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         if propagation_status == "ready":
             response_text += "⏱️  Stamp is ready immediately (from the gateway pool).\n"
         elif propagation_status == "propagating" and estimated_ready:
-            response_text += (
-                f"⏱️  Stamp is propagating — estimated ready at {estimated_ready}.\n"
-            )
+            response_text += f"⏱️  Stamp is propagating — estimated ready at {_gw(estimated_ready)}.\n"
             response_text += (
                 "   → Use check_stamp_health to confirm it's ready before uploading."
             )
@@ -1222,6 +2043,13 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
     except ValueError as e:
+        from requests.exceptions import JSONDecodeError
+
+        if isinstance(e, JSONDecodeError):
+            # A 2xx with an unreadable body — the write probably succeeded
+            return _ambiguous_write_result(
+                "Stamp purchase", e, "list_stamps", _new_batch_hint(label, depth)
+            )
         error_msg = f"Validation error: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
@@ -1236,7 +2064,11 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
             isError=True,
         )
     except RequestException as e:
-        error_msg = f"Failed to purchase stamp: {str(e)}"
+        if _is_ambiguous_write_error(e):
+            return _ambiguous_write_result(
+                "Stamp purchase", e, "list_stamps", _new_batch_hint(label, depth)
+            )
+        error_msg = _gateway_error_text(f"Failed to purchase stamp: {str(e)}", e)
         logger.error(error_msg)
         return CallToolResult(
             content=[
@@ -1245,7 +2077,7 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         error_msg,
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],
@@ -1281,7 +2113,7 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += f"Batch TTL: {batch_ttl}\n"
 
         response_text += (
-            f"Expected Expiration: {result.get('expectedExpiration', 'N/A')}\n"
+            f"Expected Expiration: {_gw(result.get('expectedExpiration', 'N/A'))}\n"
         )
 
         # Enhanced usability information
@@ -1303,7 +2135,8 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"Local: {result.get('local', 'N/A')}\n"
 
         if result.get("label"):
-            response_text += f"Label: {result['label']}\n"
+            response_text += f"Label: {quote(result['label'])}\n"
+            response_text += f"{QUOTED_NOTE}\n"
 
         # Propagation timing (from gateway, when available)
         propagation_status = result.get("propagationStatus")
@@ -1311,7 +2144,7 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         estimated_ready = result.get("estimatedReadyAt")
 
         if propagation_status:
-            response_text += f"Propagation: {propagation_status}"
+            response_text += f"Propagation: {_gw(propagation_status)}"
             if seconds_since is not None:
                 response_text += f" ({seconds_since}s since purchase)"
             if estimated_ready and propagation_status == "propagating":
@@ -1354,7 +2187,7 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         error_msg,
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],
@@ -1397,18 +2230,34 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                 # Surface access mode when provided by gateway
                 access_mode = stamp.get("accessMode")
                 if access_mode:
-                    detail_line += f" | Access: {access_mode}"
+                    detail_line += f" | Access: {_gw(access_mode)}"
 
                 # Surface propagation status when provided
                 propagation_status = stamp.get("propagationStatus")
                 if propagation_status:
-                    detail_line += f" | Propagation: {propagation_status}"
+                    detail_line += f" | Propagation: {_gw(propagation_status)}"
+
+                # What identifies a batch from an unanswered purchase
+                identity = []
+                if stamp.get("label"):
+                    identity.append(f"Label: {quote(stamp['label'])}")
+                if stamp.get("depth") is not None:
+                    identity.append(f"Depth: {stamp['depth']}")
+                age = stamp.get("secondsSincePurchase")
+                if isinstance(age, (int, float)):
+                    identity.append(f"Purchased: {_format_age(age)} ago")
+                if identity:
+                    detail_line += "\n  " + " | ".join(identity)
 
                 response_text += detail_line + "\n\n"
 
         # Public-only hint: all stamps are shared, none owned
         if stamps and not any(s.get("accessMode") == "owned" for s in stamps):
             response_text += "\n💡 All stamps are public (shared). For production use with predictable capacity, configure your own wallet for dedicated stamps.\n"
+
+        # Labels of shared stamps are written by other gateway users.
+        if any(isinstance(s, dict) and s.get("label") for s in stamps or []):
+            response_text += f"\n{QUOTED_NOTE}\n"
 
         # Contextual hints
         if has_usable:
@@ -1430,7 +2279,7 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         error_msg,
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],
@@ -1440,6 +2289,7 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
 
 async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle stamp extension requests."""
+    baseline = ""
     try:
         stamp_id = arguments.get("stamp_id")
         duration_hours = arguments.get("duration_hours")
@@ -1453,6 +2303,9 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         clean_stamp_id = validate_and_clean_stamp_id(stamp_id)
         validate_stamp_duration_hours(duration_hours)
 
+        # Read before writing: if the answer is lost, this is what the agent
+        # compares against to tell whether the extension happened.
+        baseline = _stamp_baseline(clean_stamp_id)
         result = gateway_client.extend_stamp(clean_stamp_id, duration_hours)
 
         response_text = f"✅ Stamp extended successfully!\n\n"
@@ -1460,7 +2313,7 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         batch_id = result.get("batchID", "N/A")
         response_text += f"   Batch ID: `{batch_id}`\n"
         response_text += f"   Additional Duration: {duration_hours} hours\n"
-        response_text += f"   Status: {result.get('message', 'Extended')}\n\n"
+        response_text += f"   Status: {one_line(result.get('message', 'Extended'))}\n\n"
         response_text += f"⏱️  Important: Extension takes up to 2 minutes to propagate through the blockchain.\n"
         response_text += f"🔍 Check stamp status again in about 2 minutes to see the new expiration time."
         response_text += _format_hints("check_stamp_health", ["get_stamp_status"])
@@ -1468,6 +2321,16 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
     except ValueError as e:
+        from requests.exceptions import JSONDecodeError
+
+        if isinstance(e, JSONDecodeError):
+            # A 2xx with an unreadable body — the write probably succeeded
+            return _ambiguous_write_result(
+                "Stamp extension",
+                e,
+                "get_stamp_status",
+                _extension_hint(baseline, arguments.get("duration_hours")),
+            )
         error_msg = f"Validation error: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
@@ -1482,7 +2345,14 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
             isError=True,
         )
     except RequestException as e:
-        error_msg = f"Failed to extend stamp: {str(e)}"
+        if _is_ambiguous_write_error(e):
+            return _ambiguous_write_result(
+                "Stamp extension",
+                e,
+                "get_stamp_status",
+                _extension_hint(baseline, arguments.get("duration_hours")),
+            )
+        error_msg = _gateway_error_text(f"Failed to extend stamp: {str(e)}", e)
         logger.error(error_msg)
         return CallToolResult(
             content=[
@@ -1491,7 +2361,7 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         error_msg,
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],
@@ -1510,7 +2380,11 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
         if not stamp_id:
             raise ValueError("Stamp ID cannot be empty")
         content_type = arguments.get("content_type", "application/json")
-        sign = arguments.get("sign")
+        sign = arguments.get("sign") or None
+        if sign is not None and sign not in UPLOAD_SIGN_METHODS:
+            raise ValueError(
+                "sign must be one of: " + ", ".join(sorted(UPLOAD_SIGN_METHODS))
+            )
 
         # Validate inputs
         validate_data_size(data)
@@ -1577,7 +2451,8 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
         if notary_info and isinstance(notary_info, dict):
             signer = notary_info.get("signer") or notary_info.get("signerAddress")
             if signer:
-                response_text += f"\n\n🔐 Notary Signature:\n   Signer: {signer}"
+                # A gateway field: printed on one line and capped.
+                response_text += f"\n\n🔐 Notary Signature:\n   Signer: {_gw(signer)}"
 
         # Add validation warning if applicable
         if stamp_validation_failed:
@@ -1604,7 +2479,7 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
             isError=True,
         )
     except RequestException as e:
-        error_msg = f"Failed to upload data: {str(e)}"
+        error_msg = _gateway_error_text(f"Failed to upload data: {str(e)}", e)
         logger.error(error_msg)
         return CallToolResult(
             content=[
@@ -1613,7 +2488,7 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         error_msg,
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],
@@ -1621,8 +2496,125 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
         )
 
 
+def _download_not_found(reference: str) -> CallToolResult:
+    """
+    Explain a download 404 so the agent can tell its causes apart.
+
+    "Not found" can mean the content is not on Swarm, or that the gateway's
+    Bee node cannot reach the network. Re-uploading is wrong in the second
+    case, so the gateway's network status is checked before answering.
+    """
+    network = None
+    try:
+        gw_resp = gateway_client.health_check().get("gateway_response") or {}
+        network = _bee_network_status(gw_resp)
+    except RequestException:
+        pass
+
+    msg = f"Not found: the gateway could not retrieve `{reference}`.\n\n"
+    if network is not None and not network["ok"]:
+        msg += (
+            f"The gateway's Bee node cannot reliably reach the Swarm network "
+            f"({'; '.join(network['problems'])}), so it can only return data "
+            "stored on this node. The content may well exist on Swarm.\n"
+            "Do not re-upload it. Operator action required; retry once "
+            "health_check reports the Swarm network as connected."
+        )
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(msg, retryable=True, next_tool="health_check"),
+                )
+            ],
+            isError=True,
+        )
+
+    if network is not None:
+        msg += (
+            f"The gateway is connected to the Swarm network "
+            f"({network['summary']}), so the reference is most likely not "
+            "available on Swarm: it was never uploaded, its postage stamp "
+            "expired, or the reference is wrong.\n"
+        )
+    else:
+        msg += (
+            "Possible causes: the reference was never uploaded, its postage "
+            "stamp expired, the reference is wrong, or the gateway's Bee node "
+            "cannot reach the Swarm network (not reported by this gateway).\n"
+        )
+    msg += "Check the reference. Re-upload only if you have the original content."
+    return CallToolResult(
+        content=[TextContent(type="text", text=_format_error(msg, retryable=False))],
+        isError=True,
+    )
+
+
+# Anyone can append on-chain transformations for gas: list at most this many.
+_MAX_LISTED = 50
+# get_provenance_chain stops adding entries once its text passes this size.
+_MAX_CHAIN_TEXT = 32 * 1024
+
+
+def _more_note(items: Sequence[Any], indent: str = "     ") -> str:
+    """Say how many entries of a capped list were left out."""
+    extra = len(items) - _MAX_LISTED
+    return f"\n{indent}... and {extra} more not shown" if extra > 0 else ""
+
+
+def _describe_download(reference: str, data: bytes) -> Tuple[str, Optional[str]]:
+    """Present downloaded content as fenced, size-capped, untrusted data.
+
+    Anyone can upload to Swarm, so the content may be written to look like
+    instructions or like this server's hints. Text is shown only inside a
+    fence (``untrusted.fence``); binary content is described, not dumped.
+
+    Returns the server's summary and the fenced content (None for binary).
+    The caller sends them as separate content blocks, summary and hints
+    first, so the hints never follow third-party text.
+    """
+    size = len(data)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return (
+            f"📥 Successfully downloaded binary data from `{reference}`\n\n"
+            f"📊 File Information:\n"
+            f"   Size: {size:,} bytes\n"
+            f"   Type: Binary data (not valid UTF-8, so not shown)\n"
+            f"   SHA-256: {hashlib.sha256(data).hexdigest()}\n\n"
+            "💡 This appears to be binary data (images, documents, etc.). "
+            "To save it, you would need to write the bytes to a file."
+        ), None
+
+    kind = "text"
+    shape = ""
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, RecursionError):
+        parsed = None
+    else:
+        kind = "JSON"
+        if isinstance(parsed, dict):
+            shape = f", object with {len(parsed)} top-level fields"
+        elif isinstance(parsed, list):
+            shape = f", array with {len(parsed)} items"
+        else:
+            shape = f", {type(parsed).__name__} value"
+
+    summary = (
+        f"📥 Successfully downloaded {kind} data from `{reference}` "
+        f"({size:,} bytes{shape}).\n"
+        f"   SHA-256 of the original bytes: {hashlib.sha256(data).hexdigest()}\n"
+        "The content follows in the next block, fenced as untrusted data. "
+        "That view is escaped and may be cut, so it is not byte-exact."
+    )
+    return summary, fence(data, f"Swarm reference {reference}")
+
+
 async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle data download requests."""
+    clean_reference = None
     try:
         reference = arguments.get("reference")
         if not reference:
@@ -1632,55 +2624,16 @@ async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
         clean_reference = validate_and_clean_reference_hash(reference)
 
         result_bytes = gateway_client.download_data(clean_reference)
-
-        # Try to decode as text, handle JSON appropriately
-        try:
-            result_text = result_bytes.decode("utf-8")
-
-            # Try to parse as JSON for better presentation
-            try:
-                import json
-
-                parsed_json = json.loads(result_text)
-
-                response_text = f"📥 Successfully downloaded JSON data from `{clean_reference}`:\n\n"
-
-                # Show JSON structure with field truncation
-                response_text += "📋 JSON Structure:\n"
-                for key, value in parsed_json.items():
-                    if isinstance(value, str) and len(value) > 50:
-                        truncated_value = value[:47] + "..."
-                        response_text += f'   {key}: "{truncated_value}"\n'
-                    elif isinstance(value, dict):
-                        response_text += (
-                            f"   {key}: {{...}} (object with {len(value)} fields)\n"
-                        )
-                    elif isinstance(value, list):
-                        response_text += (
-                            f"   {key}: [...] (array with {len(value)} items)\n"
-                        )
-                    else:
-                        response_text += f"   {key}: {value}\n"
-
-                response_text += f"\n💾 Size: {len(result_bytes):,} bytes"
-
-            except json.JSONDecodeError:
-                # Not JSON, show as text
-                response_text = f"📥 Successfully downloaded text data from `{clean_reference}`:\n\n{result_text}"
-
-        except UnicodeDecodeError:
-            # If not valid UTF-8, show as binary data info
-            response_text = (
-                f"📥 Successfully downloaded binary data from `{clean_reference}`\n\n"
+        summary, fenced = _describe_download(clean_reference, result_bytes)
+        content = [
+            TextContent(
+                type="text",
+                text=summary + _format_hints("upload_data", ["list_stamps"]),
             )
-            response_text += f"📊 File Information:\n"
-            response_text += f"   Size: {len(result_bytes):,} bytes\n"
-            response_text += f"   Type: Binary data\n\n"
-            response_text += f"💡 This appears to be binary data (images, documents, etc.). To save it, you would need to write the bytes to a file."
-
-        response_text += _format_hints("upload_data", ["list_stamps"])
-
-        return CallToolResult(content=[TextContent(type="text", text=response_text)])
+        ]
+        if fenced is not None:
+            content.append(TextContent(type="text", text=fenced))
+        return CallToolResult(content=content)
 
     except ValueError as e:
         error_msg = f"Validation error: {str(e)}"
@@ -1692,6 +2645,9 @@ async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
             isError=True,
         )
     except RequestException as e:
+        response = getattr(e, "response", None)
+        if response is not None and response.status_code == 404:
+            return _download_not_found(clean_reference)
         error_msg = f"Failed to download data: {str(e)}"
         logger.error(error_msg)
         return CallToolResult(
@@ -1701,7 +2657,7 @@ async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         error_msg,
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],
@@ -1754,6 +2710,30 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         elif x402:
             response_text += "\n💰 Payment: x402 enabled\n"
 
+        # Swarm network reachability — gateway liveness does not imply the
+        # Bee node can publish uploads or retrieve data it did not store.
+        network = _bee_network_status(gw_resp) if gateway_ok else None
+        if network is None:
+            if gateway_ok:
+                response_text += "\n🐝 Swarm network: not reported by gateway\n"
+        elif network["ok"]:
+            response_text += f"\n🐝 Swarm network: connected ({network['summary']})\n"
+        else:
+            response_text += (
+                f"\n🐝 Swarm network: DEGRADED ({network['summary']})\n"
+                f"   {'; '.join(network['problems'])}\n"
+            )
+            recommendations.append(
+                "The gateway's Bee node cannot reliably reach the Swarm network: "
+                "uploads may never propagate and only data stored on this node can "
+                "be downloaded. Operator action required — retrying will not help."
+            )
+        advisories = _bee_advisories(gw_resp) if gateway_ok else []
+        if advisories:
+            # Advisory only: does not change readiness
+            advisory = one_line("; ".join(advisories), 500)
+            response_text += f"   ⚠️  Gateway advisory: {advisory}\n"
+
         # Adaptive: also check stamp availability
         stamps_info = ""
         usable_count = 0
@@ -1769,9 +2749,11 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     f"\n📋 Stamps: {usable_count} usable / {total_stamps} local\n"
                 )
 
-                if usable_count > 0:
+                if usable_count > 0 and (network is None or network["ok"]):
                     ready = True
                     next_tool = "upload_data"
+                elif usable_count > 0:
+                    next_tool = None
                 elif total_stamps > 0:
                     recommendations.append(
                         f"Found {total_stamps} stamp(s) but none are usable — poll check_stamp_health, stamps take up to 2 minutes to propagate"
@@ -1800,15 +2782,12 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
 
         # Chain anchoring status
         if settings.chain_enabled:
+            await _recheck_write_contract()
             if CHAIN_AVAILABLE and chain_client:
                 try:
                     chain_client.health_check()
                     response_text += f"\n\n⛓️  Chain: {chain_client.chain} (connected)"
-                    if chain_client.chain in ("base-sepolia", "localhost"):
-                        response_text += (
-                            "\n   ⚠️  Testnet — tokens have no value, "
-                            "state may be reset"
-                        )
+                    response_text += _chain_id_lines(chain_client._provider)
                     response_text += f"\n   Contract: {chain_client.contract_address}"
                     response_text += f"\n   Wallet: {chain_client.address}"
                     # Proactive balance check — warn if wallet can't transact
@@ -1828,18 +2807,46 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     except Exception:
                         pass  # Non-critical — don't fail health_check
                 except Exception as chain_err:
+                    from .chain.exceptions import ChainIdMismatchError
+
                     response_text += (
-                        f"\n\n⛓️  Chain: {settings.chain_name} (error: {chain_err})"
+                        f"\n\n⛓️  Chain: {settings.chain_name} "
+                        f"(error: {_gw(chain_err, 200)})"
                     )
+                    response_text += _chain_id_lines(chain_client._provider)
                     recommendations.append(
-                        "Chain anchoring enabled but RPC unreachable"
+                        "RPC is on another chain than CHAIN_NAME — fix "
+                        "CHAIN_RPC_URL / CHAIN_RPC_URLS or CHAIN_NAME"
+                        if isinstance(chain_err, ChainIdMismatchError)
+                        else "Chain anchoring enabled but RPC unreachable"
                     )
+            elif CHAIN_AVAILABLE and _chain_init_error:
+                # Wallet configured, but the contract check failed
+                response_text += (
+                    f"\n\n⛓️  Chain: {settings.chain_name} (writes disabled)\n   "
+                    + _writes_disabled_text().replace("\n", "\n   ")
+                )
+                recommendations.append(
+                    "Chain writes disabled: no DataProvenance contract at the "
+                    "configured address — fix CHAIN_CONTRACT or CHAIN_NAME"
+                )
             elif CHAIN_AVAILABLE:
                 # Dependencies present but no wallet → read-only mode
                 response_text += (
                     f"\n\n⛓️  Chain: {settings.chain_name} "
                     f"(read-only, no wallet — set PROVENANCE_WALLET_KEY for write tools)"
                 )
+                try:
+                    reader = await asyncio.to_thread(_chain_reader)
+                    response_text += _chain_id_lines(reader._provider)
+                except Exception as chain_err:
+                    response_text += f"\n   Chain error: {chain_err}"
+                    configured = _effective_chain_id(settings.chain_name)
+                    if configured is not None:
+                        response_text += (
+                            f"\n   Chain ID: {configured} "
+                            "(configured, not verified against the RPC)"
+                        )
             else:
                 response_text += "\n\n⛓️  Chain: enabled but dependencies not available"
                 recommendations.append(
@@ -1849,7 +2856,10 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         # Gateway status
         response_text += f"\n_gateway: {gateway_url} ({'connected' if gateway_ok else 'unreachable'})"
 
-        response_text += f"\n\n_next: {next_tool}"
+        if next_tool:
+            response_text += f"\n\n_next: {next_tool}"
+        else:
+            response_text += "\n"
         response_text += f"\n_related: list_stamps, purchase_stamp, get_wallet_info"
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
@@ -1872,7 +2882,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         error_msg,
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],
@@ -1906,29 +2916,31 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
             response_text += "Errors:\n"
             for err in errors:
                 response_text += (
-                    f"   [{err.get('code', '?')}] {err.get('message', '')}\n"
+                    f"   [{one_line(err.get('code', '?'), 40)}] "
+                    f"{one_line(err.get('message', ''), 500)}\n"
                 )
                 if err.get("suggestion"):
-                    response_text += f"   → {err['suggestion']}\n"
+                    response_text += f"   → {one_line(err['suggestion'], 500)}\n"
 
         if warnings:
             response_text += "Warnings:\n"
             for warn in warnings:
                 response_text += (
-                    f"   [{warn.get('code', '?')}] {warn.get('message', '')}\n"
+                    f"   [{one_line(warn.get('code', '?'), 40)}] "
+                    f"{one_line(warn.get('message', ''), 500)}\n"
                 )
                 if warn.get("suggestion"):
-                    response_text += f"   → {warn['suggestion']}\n"
+                    response_text += f"   → {one_line(warn['suggestion'], 500)}\n"
 
         if status:
             response_text += f"\nStatus:\n"
             if status.get("utilizationPercent") is not None:
-                response_text += f"   Utilization: {status['utilizationPercent']}% ({status.get('utilizationStatus', 'unknown')})\n"
+                response_text += f"   Utilization: {status['utilizationPercent']}% ({_gw(status.get('utilizationStatus', 'unknown'))})\n"
             if status.get("batchTTL") is not None:
                 ttl = status["batchTTL"]
                 response_text += f"   TTL: {ttl:,} seconds ({ttl/86400:.1f} days)\n"
             if status.get("expectedExpiration"):
-                response_text += f"   Expires: {status['expectedExpiration']}\n"
+                response_text += f"   Expires: {_gw(status['expectedExpiration'])}\n"
 
         # Propagation timing (from gateway, when available)
         propagation_status = result.get("propagationStatus")
@@ -1941,7 +2953,7 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
             if seconds_since is not None:
                 response_text += f"   Purchased: {seconds_since}s ago\n"
             if estimated_ready:
-                response_text += f"   Estimated ready: {estimated_ready}\n"
+                response_text += f"   Estimated ready: {_gw(estimated_ready)}\n"
 
         # Contextual hints based on health
         if can_upload:
@@ -2000,7 +3012,7 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
                     text=_format_error(
                         f"Failed to check stamp health: {str(e)}",
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],
@@ -2014,8 +3026,8 @@ async def handle_get_wallet_info(arguments: Dict[str, Any]) -> CallToolResult:
         result = gateway_client.get_wallet_info()
 
         response_text = f"Wallet Information:\n"
-        response_text += f"   Address: {result.get('walletAddress', 'N/A')}\n"
-        response_text += f"   BZZ Balance: {result.get('bzzBalance', 'N/A')}\n"
+        response_text += f"   Address: {_gw(result.get('walletAddress', 'N/A'))}\n"
+        response_text += f"   BZZ Balance: {_gw(result.get('bzzBalance', 'N/A'))}\n"
         response_text += _format_hints("purchase_stamp", ["list_stamps"])
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
@@ -2028,7 +3040,7 @@ async def handle_get_wallet_info(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         f"Failed to get wallet info: {str(e)}",
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],
@@ -2051,15 +3063,18 @@ async def handle_chain_balance(arguments: Dict[str, Any]) -> CallToolResult:
             ],
             isError=True,
         )
+    await _recheck_write_contract()
     if not chain_client:
         return CallToolResult(
             content=[
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "chain_balance requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
-                        "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
-                        "work without a wallet.",
+                        _no_write_client_text(
+                            f"chain_balance requires a funded wallet. {WALLET_KEY_HINT}\n"
+                            "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
+                            "work without a wallet."
+                        ),
                         retryable=False,
                         next_tool="chain_health",
                     ),
@@ -2118,7 +3133,10 @@ async def handle_chain_health(arguments: Dict[str, Any]) -> CallToolResult:
             isError=True,
         )
 
+    await _recheck_write_contract()
     try:
+        from .chain.provider import PROBE_METHODS
+
         # Use chain_client if available, otherwise create a temporary provider
         if chain_client:
             provider = chain_client._provider
@@ -2141,17 +3159,15 @@ async def handle_chain_health(arguments: Dict[str, Any]) -> CallToolResult:
 
         response_text = f"⛓️  Chain RPC Health\n\n"
         response_text += f"   Connected: true\n"
-        response_text += f"   Chain: {provider.chain}\n"
-        if provider.chain in ("base-sepolia", "localhost"):
-            response_text += (
-                "   ⚠️  Testnet — tokens have no value, state may be reset\n"
-            )
-
-        response_text += f"   Chain ID: {provider.chain_id}\n"
+        response_text += f"   Chain: {provider.chain}"
+        response_text += _chain_id_lines(provider) + "\n"
         response_text += f"   Latest Block: {block_number:,}\n"
         response_text += f"   RPC Response: {elapsed_ms:.0f}ms\n"
+        response_text += f"   Probe: {', '.join(PROBE_METHODS)}\n"
         response_text += f"   Contract: {provider.contract_address}\n"
         response_text += f"   RPC: {_mask_rpc_url(provider.rpc_url)}"
+        if _chain_init_error:
+            response_text += "\n   " + _writes_disabled_text().replace("\n", "\n   ")
         response_text += _format_hints("chain_balance", ["health_check"])
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
@@ -2176,7 +3192,6 @@ async def handle_chain_health(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         error_msg,
                         retryable=is_connection_error,
-                        next_tool="health_check",
                     ),
                 )
             ],
@@ -2199,15 +3214,18 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
             ],
             isError=True,
         )
+    await _recheck_write_contract()
     if not chain_client:
         return CallToolResult(
             content=[
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "anchor_hash requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
-                        "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
-                        "work without a wallet.",
+                        _no_write_client_text(
+                            f"anchor_hash requires a funded wallet. {WALLET_KEY_HINT}\n"
+                            "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
+                            "work without a wallet."
+                        ),
                         retryable=False,
                         next_tool="chain_health",
                     ),
@@ -2226,10 +3244,31 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
         if len(data_type) > 64:
             raise ValueError("data_type must be 64 characters or fewer")
 
-        owner = arguments.get("owner")
-        storage_ref = arguments.get("storage_ref")
+        owner = arguments.get("owner") or None
+        storage_ref = arguments.get("storage_ref") or None
         if storage_ref:
             storage_ref = validate_and_clean_reference_hash(storage_ref)
+        if owner and storage_ref:
+            # anchor_for has no storage ref variant: it would be dropped.
+            raise ValueError(
+                "storage_ref cannot be combined with owner: registering on "
+                "behalf of another owner does not link a storage reference. "
+                "Anchor without storage_ref, then have the owner call "
+                "set_storage_ref."
+            )
+
+        gate = await _spend_confirmation(
+            "anchor_hash",
+            arguments,
+            {
+                "swarm_hash": clean_hash,
+                "data_type": data_type,
+                "owner": owner,
+                "storage_ref": storage_ref,
+            },
+        )
+        if gate:
+            return gate
 
         if owner:
             result = await asyncio.to_thread(
@@ -2320,7 +3359,8 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += f"   Swarm Hash: {e.data_hash}\n"
             response_text += f"   Owner: {e.owner}\n"
             response_text += f"   Registered: {timestamp_str}\n"
-            response_text += f"   Data Type: {e.data_type}"
+            response_text += f"   Data Type: {quote(e.data_type)}"
+            response_text += f"\n\n{QUOTED_NOTE}"
             response_text += _format_hints(
                 "download_data", ["chain_balance", "health_check"]
             )
@@ -2329,6 +3369,8 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
             )
 
         if isinstance(e, ChainTransactionError):
+            if _may_be_pending(e):
+                return _pending_tx_result(e, "verify_hash")
             if _is_insufficient_funds_error(e):
                 msg = _format_insufficient_funds_error("anchor_hash", chain_client)
             else:
@@ -2406,8 +3448,8 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
 async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle verify_hash requests — check if a Swarm hash is registered on-chain.
 
-    Read-only: works without PROVENANCE_WALLET_KEY by creating a temporary
-    provider + contract for direct contract reads (no signing needed).
+    Read-only: works without PROVENANCE_WALLET_KEY via a read-only
+    ChainClient (no signing needed), with the same RPC failover.
     """
     if not CHAIN_AVAILABLE:
         return CallToolResult(
@@ -2429,77 +3471,14 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
             raise ValueError("swarm_hash is required")
         clean_hash = validate_and_clean_reference_hash(swarm_hash)
 
-        # Use chain_client if available, otherwise create temporary provider + contract
-        if chain_client:
-            is_registered = await asyncio.to_thread(chain_client.verify, clean_hash)
-            if is_registered:
-                record = await asyncio.to_thread(chain_client.get, clean_hash)
-            else:
-                record = None
-        else:
-            from .chain.provider import ChainProvider
-            from .chain.contract import DataProvenanceContract
-            from .chain.exceptions import DataNotRegisteredError
+        from .chain.exceptions import DataNotRegisteredError
 
-            provider = ChainProvider(
-                chain=settings.chain_name,
-                rpc_url=settings.chain_rpc_url,
-                contract_address=settings.chain_contract_address,
-                explorer_url=settings.chain_explorer_url,
-                rpc_fallbacks=_parse_rpc_fallbacks(),
-            )
-            contract = DataProvenanceContract(
-                web3=provider.web3,
-                contract_address=provider.contract_address,
-            )
-            raw = await asyncio.to_thread(contract.get_data_record, clean_hash)
-            zero_address = "0x" + "0" * 40
-            if raw[1] == zero_address:
-                is_registered = False
-                record = None
-            else:
-                is_registered = True
-                from .chain.models import (
-                    ChainProvenanceRecord,
-                    ChainTransformation,
-                    DataStatusEnum,
-                )
-
-                # Handle both 8-field (v3+, with storageRef) and 7-field tuples
-                if len(raw) >= 8:
-                    storage_ref_bytes = raw[4]
-                    transformations_raw = raw[5]
-                    accessors_raw = raw[6]
-                    status_raw = raw[7]
-                else:
-                    storage_ref_bytes = None
-                    transformations_raw = raw[4]
-                    accessors_raw = raw[5]
-                    status_raw = raw[6]
-
-                parsed_storage_ref = None
-                if (
-                    storage_ref_bytes
-                    and isinstance(storage_ref_bytes, bytes)
-                    and storage_ref_bytes != b"\x00" * 32
-                ):
-                    parsed_storage_ref = storage_ref_bytes.hex()
-
-                record = ChainProvenanceRecord(
-                    data_hash=(
-                        raw[0].hex() if isinstance(raw[0], bytes) else str(raw[0])
-                    ),
-                    owner=raw[1],
-                    timestamp=raw[2],
-                    data_type=raw[3],
-                    storage_ref=parsed_storage_ref,
-                    status=DataStatusEnum(status_raw),
-                    accessors=list(accessors_raw),
-                    transformations=[
-                        ChainTransformation(description=str(t))
-                        for t in transformations_raw
-                    ],
-                )
+        try:
+            record = await asyncio.to_thread(_chain_reader().get, clean_hash)
+            is_registered = True
+        except DataNotRegisteredError:
+            record = None
+            is_registered = False
 
         if is_registered and record:
             from datetime import datetime, timezone
@@ -2516,10 +3495,11 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += f"   Swarm Hash: {clean_hash}\n"
             response_text += f"   Owner: {record.owner}\n"
             response_text += f"   Registered: {timestamp_str}\n"
-            response_text += f"   Data Type: {record.data_type}\n"
+            response_text += f"   Data Type: {quote(record.data_type)}\n"
             response_text += f"   Status: {record.status.name}"
             if record.storage_ref:
                 response_text += f"\n   Storage Ref: {record.storage_ref}"
+            response_text += f"\n\n{QUOTED_NOTE}"
             response_text += _format_hints(
                 "download_data", ["anchor_hash", "health_check"]
             )
@@ -2568,8 +3548,8 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
 async def handle_get_provenance(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle get_provenance requests — retrieve full on-chain provenance record.
 
-    Read-only: works without PROVENANCE_WALLET_KEY by creating a temporary
-    provider + contract for direct contract reads (no signing needed).
+    Read-only: works without PROVENANCE_WALLET_KEY via a read-only
+    ChainClient (no signing needed), with the same RPC failover.
     """
     if not CHAIN_AVAILABLE:
         return CallToolResult(
@@ -2591,69 +3571,7 @@ async def handle_get_provenance(arguments: Dict[str, Any]) -> CallToolResult:
             raise ValueError("swarm_hash is required")
         clean_hash = validate_and_clean_reference_hash(swarm_hash)
 
-        # Use chain_client if available, otherwise create temporary provider + contract
-        if chain_client:
-            record = await asyncio.to_thread(chain_client.get, clean_hash)
-        else:
-            from .chain.provider import ChainProvider
-            from .chain.contract import DataProvenanceContract
-            from .chain.exceptions import DataNotRegisteredError
-            from .chain.models import (
-                ChainProvenanceRecord,
-                ChainTransformation,
-                DataStatusEnum,
-            )
-
-            provider = ChainProvider(
-                chain=settings.chain_name,
-                rpc_url=settings.chain_rpc_url,
-                contract_address=settings.chain_contract_address,
-                explorer_url=settings.chain_explorer_url,
-                rpc_fallbacks=_parse_rpc_fallbacks(),
-            )
-            contract = DataProvenanceContract(
-                web3=provider.web3,
-                contract_address=provider.contract_address,
-            )
-            raw = await asyncio.to_thread(contract.get_data_record, clean_hash)
-            zero_address = "0x" + "0" * 40
-            if raw[1] == zero_address:
-                raise DataNotRegisteredError(
-                    f"Data hash {clean_hash} is not registered on-chain",
-                    data_hash=clean_hash,
-                )
-            # Handle both 8-field (v3+, with storageRef) and 7-field tuples
-            if len(raw) >= 8:
-                storage_ref_bytes = raw[4]
-                transformations_raw = raw[5]
-                accessors_raw = raw[6]
-                status_raw = raw[7]
-            else:
-                storage_ref_bytes = None
-                transformations_raw = raw[4]
-                accessors_raw = raw[5]
-                status_raw = raw[6]
-
-            parsed_storage_ref = None
-            if (
-                storage_ref_bytes
-                and isinstance(storage_ref_bytes, bytes)
-                and storage_ref_bytes != b"\x00" * 32
-            ):
-                parsed_storage_ref = storage_ref_bytes.hex()
-
-            record = ChainProvenanceRecord(
-                data_hash=(raw[0].hex() if isinstance(raw[0], bytes) else str(raw[0])),
-                owner=raw[1],
-                timestamp=raw[2],
-                data_type=raw[3],
-                storage_ref=parsed_storage_ref,
-                status=DataStatusEnum(status_raw),
-                accessors=list(accessors_raw),
-                transformations=[
-                    ChainTransformation(description=str(t)) for t in transformations_raw
-                ],
-            )
+        record = await asyncio.to_thread(_chain_reader().get, clean_hash)
 
         from datetime import datetime, timezone
 
@@ -2678,21 +3596,24 @@ async def handle_get_provenance(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"   Swarm Hash: {clean_hash}\n"
         response_text += f"   Owner: {record.owner}\n"
         response_text += f"   Registered: {timestamp_str}\n"
-        response_text += f"   Data Type: {record.data_type}\n"
+        response_text += f"   Data Type: {quote(record.data_type)}\n"
         response_text += f"   Status: {status_text}"
         if record.storage_ref:
             response_text += f"\n   Storage Ref: {record.storage_ref}"
 
         if record.transformations:
             response_text += f"\n\n   Transformations ({len(record.transformations)}):"
-            for t in record.transformations:
-                response_text += f"\n     - {t.description}"
+            for t in record.transformations[:_MAX_LISTED]:
+                response_text += f"\n     - {quote(t.description)}"
+            response_text += _more_note(record.transformations)
 
         if record.accessors:
             response_text += f"\n\n   Accessors ({len(record.accessors)}):"
-            for addr in record.accessors:
+            for addr in record.accessors[:_MAX_LISTED]:
                 response_text += f"\n     - {addr}"
+            response_text += _more_note(record.accessors)
 
+        response_text += f"\n\n{QUOTED_NOTE}"
         response_text += _format_hints("download_data", ["verify_hash", "anchor_hash"])
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
@@ -2766,15 +3687,18 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
             ],
             isError=True,
         )
+    await _recheck_write_contract()
     if not chain_client:
         return CallToolResult(
             content=[
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "record_transform requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
-                        "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
-                        "work without a wallet.",
+                        _no_write_client_text(
+                            f"record_transform requires a funded wallet. {WALLET_KEY_HINT}\n"
+                            "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
+                            "work without a wallet."
+                        ),
                         retryable=False,
                         next_tool="chain_health",
                     ),
@@ -2803,33 +3727,56 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
 
         restrict_original = arguments.get("restrict_original", False)
 
-        result = await asyncio.to_thread(
-            chain_client.transform, clean_original, clean_new, description
+        gate = await _spend_confirmation(
+            "record_transform",
+            arguments,
+            {
+                "original_hash": clean_original,
+                "new_hash": clean_new,
+                "description": description,
+                "restrict_original": bool(restrict_original),
+            },
+            tx_count=2 if restrict_original else 1,
         )
+        if gate:
+            return gate
 
-        response_text = f"⛓️  Transformation recorded on-chain\n\n"
-        response_text += f"   Original: {result.original_hash}\n"
-        response_text += f"   Transformed: {result.new_hash}\n"
-        if description:
-            response_text += f"   Description: {description}\n"
-        response_text += f"   Tx Hash: {result.tx_hash}\n"
-        response_text += f"   Block: {result.block_number:,}\n"
-        response_text += f"   Gas Used: {result.gas_used:,}"
-        if result.explorer_url:
-            response_text += f"\n   Explorer: {result.explorer_url}"
-
-        # Optionally restrict the original data after transformation
+        # With restrict_original, both transactions are reserved before the
+        # first is sent, so the session limits cannot stop it half-way.
+        hold = None
+        restrict_failed = False
         if restrict_original:
-            try:
-                await asyncio.to_thread(
-                    chain_client.set_status, clean_original, 1
-                )  # 1 = RESTRICTED
-                response_text += f"\n\n   ⚠️  Original data status set to RESTRICTED"
-            except Exception as restrict_err:
-                response_text += (
-                    f"\n\n   ⚠️  Transform succeeded but failed to restrict original: "
-                    f"{str(restrict_err)}"
-                )
+            hold = await asyncio.to_thread(chain_client.hold_transactions, 2)
+        with chain_client.using_hold(hold):
+            result = await asyncio.to_thread(
+                chain_client.transform, clean_original, clean_new, description
+            )
+
+            response_text = f"⛓️  Transformation recorded on-chain\n\n"
+            response_text += f"   Original: {result.original_hash}\n"
+            response_text += f"   Transformed: {result.new_hash}\n"
+            if description:
+                response_text += f"   Description: {description}\n"
+            response_text += f"   Tx Hash: {result.tx_hash}\n"
+            response_text += f"   Block: {result.block_number:,}\n"
+            response_text += f"   Gas Used: {result.gas_used:,}"
+            if result.explorer_url:
+                response_text += f"\n   Explorer: {result.explorer_url}"
+
+            # Optionally restrict the original data after transformation
+            if restrict_original:
+                try:
+                    await asyncio.to_thread(
+                        chain_client.set_status, clean_original, 1
+                    )  # 1 = RESTRICTED
+                    response_text += (
+                        f"\n\n   ⚠️  Original data status set to RESTRICTED"
+                    )
+                except Exception as restrict_err:
+                    restrict_failed = True
+                    response_text += _restrict_failure_text(
+                        restrict_err, result.tx_hash, clean_original
+                    )
 
         # Post-tx balance check
         try:
@@ -2845,7 +3792,10 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
             "get_provenance", ["download_data", "chain_balance"]
         )
 
-        return CallToolResult(content=[TextContent(type="text", text=response_text)])
+        return CallToolResult(
+            content=[TextContent(type="text", text=response_text)],
+            isError=restrict_failed,
+        )
 
     except ValueError as e:
         return CallToolResult(
@@ -2886,10 +3836,12 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += f"   Original: {e.original_hash}\n"
             response_text += f"   Transformed: {e.new_hash}\n"
             if e.existing_description:
-                response_text += f"   Description: {e.existing_description}\n"
+                response_text += f"   Description: {quote(e.existing_description)}\n"
             response_text += (
                 f"\n   The (original → new) link is already on-chain. No gas spent."
             )
+            if e.existing_description:
+                response_text += f"\n\n{QUOTED_NOTE}"
             response_text += _format_hints("get_provenance", ["get_provenance_chain"])
             return CallToolResult(
                 content=[TextContent(type="text", text=response_text)]
@@ -2908,6 +3860,8 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
             )
 
         if isinstance(e, ChainTransactionError):
+            if _may_be_pending(e):
+                return _pending_tx_result(e, "get_provenance_chain")
             if _is_insufficient_funds_error(e):
                 msg = _format_insufficient_funds_error("record_transform", chain_client)
             else:
@@ -3001,15 +3955,18 @@ async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolRe
             ],
             isError=True,
         )
+    await _recheck_write_contract()
     if not chain_client:
         return CallToolResult(
             content=[
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "record_merge_transform requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
-                        "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
-                        "work without a wallet.",
+                        _no_write_client_text(
+                            f"record_merge_transform requires a funded wallet. {WALLET_KEY_HINT}\n"
+                            "Read-only chain tools (verify_hash, get_provenance, get_provenance_chain, chain_health) "
+                            "work without a wallet."
+                        ),
                         retryable=False,
                         next_tool="chain_health",
                     ),
@@ -3043,6 +4000,19 @@ async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolRe
         new_data_type = arguments.get("new_data_type", "merged")
         if len(new_data_type) > 64:
             raise ValueError("new_data_type must be 64 characters or fewer")
+
+        gate = await _spend_confirmation(
+            "record_merge_transform",
+            arguments,
+            {
+                "source_hashes": clean_sources,
+                "new_hash": clean_new,
+                "description": description,
+                "new_data_type": new_data_type,
+            },
+        )
+        if gate:
+            return gate
 
         result = await asyncio.to_thread(
             chain_client.merge_transform,
@@ -3126,6 +4096,8 @@ async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolRe
             )
 
         if isinstance(e, ChainTransactionError):
+            if _may_be_pending(e):
+                return _pending_tx_result(e, "get_provenance_chain")
             if _is_insufficient_funds_error(e):
                 msg = _format_insufficient_funds_error(
                     "record_merge_transform", chain_client
@@ -3205,8 +4177,8 @@ async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolRe
 async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle get_provenance_chain requests — traverse transformation lineage.
 
-    Read-only: works without PROVENANCE_WALLET_KEY by creating a temporary
-    provider + contract for direct contract reads (no signing needed).
+    Read-only: works without PROVENANCE_WALLET_KEY via a read-only
+    ChainClient (no signing needed), with the same RPC failover.
     """
     if not CHAIN_AVAILABLE:
         return CallToolResult(
@@ -3232,170 +4204,10 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
         if not isinstance(max_depth, int) or max_depth < 1 or max_depth > 50:
             raise ValueError("max_depth must be an integer between 1 and 50")
 
-        if chain_client:
-            chain_records = await asyncio.to_thread(
-                lambda: chain_client.get_provenance_chain(
-                    clean_hash, max_depth=max_depth
-                )
-            )
-        else:
-            # Read-only fallback without wallet key
-            from .chain.provider import ChainProvider
-            from .chain.contract import DataProvenanceContract
-            from .chain.exceptions import DataNotRegisteredError
-            from .chain.models import (
-                ChainProvenanceRecord,
-                ChainTransformation,
-                DataStatusEnum,
-            )
-
-            provider = ChainProvider(
-                chain=settings.chain_name,
-                rpc_url=settings.chain_rpc_url,
-                contract_address=settings.chain_contract_address,
-                explorer_url=settings.chain_explorer_url,
-                rpc_fallbacks=_parse_rpc_fallbacks(),
-            )
-            contract = DataProvenanceContract(
-                web3=provider.web3,
-                contract_address=provider.contract_address,
-            )
-
-            def _readonly_traverse():
-                """BFS traversal in a thread to avoid blocking the event loop."""
-                import logging as _log
-
-                _logger = _log.getLogger(__name__)
-
-                # Build in-memory transformation index via cached event scan
-                from .chain.event_cache import get_cache as _get_event_cache
-
-                forward = {}  # original_hex -> [(new_hex, desc)]
-                reverse = {}  # new_hex -> [(original_hex, desc)]
-                deploy_block = provider.deploy_block
-                use_local_index = False
-
-                if deploy_block is not None:
-                    try:
-                        cache = _get_event_cache(
-                            provider.chain, provider.contract_address
-                        )
-                        current_block = provider.web3.eth.block_number
-                        forward, reverse = cache.get_maps(
-                            contract, deploy_block, current_block
-                        )
-                        use_local_index = True
-                    except Exception as e:
-                        _logger.warning(
-                            "Full event scan failed, per-node fallback: %s", e
-                        )
-
-                records = []
-                visited = set()
-                to_visit = [(clean_hash, 0)]
-                zero_address = "0x" + "0" * 40
-
-                while to_visit:
-                    current_hash, depth = to_visit.pop(0)
-                    if current_hash in visited or depth > max_depth:
-                        continue
-                    visited.add(current_hash)
-
-                    try:
-                        raw = contract.get_data_record(current_hash)
-                        if raw[1] == zero_address:
-                            continue
-                        record = ChainProvenanceRecord(
-                            data_hash=(
-                                raw[0].hex()
-                                if isinstance(raw[0], bytes)
-                                else str(raw[0])
-                            ),
-                            owner=raw[1],
-                            timestamp=raw[2],
-                            data_type=raw[3],
-                            status=DataStatusEnum(raw[6]),
-                            accessors=list(raw[5]),
-                            transformations=[
-                                ChainTransformation(description=str(t)) for t in raw[4]
-                            ],
-                        )
-
-                        if use_local_index:
-                            fwd = forward.get(current_hash, [])
-                            if fwd:
-                                record.transformations = [
-                                    ChainTransformation(
-                                        description=desc,
-                                        new_data_hash=nh,
-                                    )
-                                    for nh, desc in fwd
-                                ]
-                                for nh, _ in fwd:
-                                    if nh not in visited:
-                                        to_visit.append((nh, depth + 1))
-                            for orig_hex, _ in reverse.get(current_hash, []):
-                                if orig_hex not in visited:
-                                    to_visit.append((orig_hex, depth + 1))
-                        else:
-                            try:
-                                events = contract.get_transformations_from(current_hash)
-                                if events:
-                                    enriched = []
-                                    for orig_bytes, new_bytes, desc in events:
-                                        new_hash = (
-                                            new_bytes.hex()
-                                            if isinstance(new_bytes, bytes)
-                                            else str(new_bytes)
-                                        )
-                                        enriched.append(
-                                            ChainTransformation(
-                                                description=desc,
-                                                new_data_hash=new_hash,
-                                            )
-                                        )
-                                        if new_hash not in visited:
-                                            to_visit.append((new_hash, depth + 1))
-                                    record.transformations = enriched
-                            except Exception as e:
-                                _logger.warning(
-                                    "Event query failed for %s: %s",
-                                    current_hash,
-                                    e,
-                                )
-                                for t in record.transformations:
-                                    if (
-                                        t.new_data_hash
-                                        and t.new_data_hash not in visited
-                                    ):
-                                        to_visit.append((t.new_data_hash, depth + 1))
-
-                            try:
-                                reverse_events = contract.get_transformations_to(
-                                    current_hash
-                                )
-                                for orig_bytes, new_bytes, desc in reverse_events:
-                                    orig_hash = (
-                                        orig_bytes.hex()
-                                        if isinstance(orig_bytes, bytes)
-                                        else str(orig_bytes)
-                                    )
-                                    if orig_hash not in visited:
-                                        to_visit.append((orig_hash, depth + 1))
-                            except Exception as e:
-                                _logger.warning(
-                                    "Reverse event query failed for %s: %s",
-                                    current_hash,
-                                    e,
-                                )
-
-                        records.append(record)
-                    except Exception:
-                        continue
-
-                return records
-
-            chain_records = await asyncio.to_thread(_readonly_traverse)
+        reader = _chain_reader()
+        chain_records = await asyncio.to_thread(
+            lambda: reader.get_provenance_chain(clean_hash, max_depth=max_depth)
+        )
 
         if not chain_records:
             response_text = f"⛓️  No provenance chain found\n\n"
@@ -3414,6 +4226,13 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
         response_text += f"{'entry' if len(chain_records) == 1 else 'entries'})\n"
 
         for i, record in enumerate(chain_records):
+            if len(response_text) > _MAX_CHAIN_TEXT:
+                response_text += (
+                    f"\n\n   ... output capped: showing {i} of "
+                    f"{len(chain_records)} entries. Use get_provenance on a "
+                    "hash for its full record."
+                )
+                break
             indent = "  " * i
             prefix = "└─ " if i > 0 else ""
 
@@ -3437,13 +4256,15 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
             response_text += f"\n{indent}{prefix}{record.data_hash}\n"
             response_text += f"{indent}   Owner: {record.owner}\n"
             response_text += f"{indent}   Registered: {timestamp_str}\n"
-            response_text += f"{indent}   Type: {record.data_type}\n"
+            response_text += f"{indent}   Type: {quote(record.data_type)}\n"
             response_text += f"{indent}   Status: {status_text}"
 
             if record.transformations:
-                for t in record.transformations:
-                    response_text += f"\n{indent}   Transform: {t.description}"
+                for t in record.transformations[:_MAX_LISTED]:
+                    response_text += f"\n{indent}   Transform: {quote(t.description)}"
+                response_text += _more_note(record.transformations, indent + "   ")
 
+        response_text += f"\n\n{QUOTED_NOTE}"
         response_text += _format_hints(
             "get_provenance", ["download_data", "record_transform"]
         )
@@ -3501,15 +4322,18 @@ async def handle_set_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
             ],
             isError=True,
         )
+    await _recheck_write_contract()
     if not chain_client:
         return CallToolResult(
             content=[
                 TextContent(
                     type="text",
                     text=_format_error(
-                        "set_storage_ref requires a funded wallet. Set PROVENANCE_WALLET_KEY in your .env file.\n"
-                        "Read-only chain tools (verify_hash, get_provenance, lookup_by_storage_ref, chain_health) "
-                        "work without a wallet.",
+                        _no_write_client_text(
+                            f"set_storage_ref requires a funded wallet. {WALLET_KEY_HINT}\n"
+                            "Read-only chain tools (verify_hash, get_provenance, lookup_by_storage_ref, chain_health) "
+                            "work without a wallet."
+                        ),
                         retryable=False,
                         next_tool="chain_health",
                     ),
@@ -3528,6 +4352,14 @@ async def handle_set_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
         if not storage_ref:
             raise ValueError("storage_ref is required")
         clean_ref = validate_and_clean_reference_hash(storage_ref)
+
+        gate = await _spend_confirmation(
+            "set_storage_ref",
+            arguments,
+            {"data_hash": clean_hash, "storage_ref": clean_ref},
+        )
+        if gate:
+            return gate
 
         result = await asyncio.to_thread(
             chain_client.set_storage_ref, clean_hash, clean_ref
@@ -3611,6 +4443,8 @@ async def handle_set_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
             )
 
         if isinstance(e, ChainTransactionError):
+            if _may_be_pending(e):
+                return _pending_tx_result(e, "get_provenance")
             if _is_insufficient_funds_error(e):
                 msg = _format_insufficient_funds_error("set_storage_ref", chain_client)
             else:
@@ -3672,8 +4506,8 @@ async def handle_set_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
 async def handle_lookup_by_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle lookup_by_storage_ref requests — reverse lookup by storage reference.
 
-    Read-only: works without PROVENANCE_WALLET_KEY by creating a temporary
-    provider + contract for direct contract reads (no signing needed).
+    Read-only: works without PROVENANCE_WALLET_KEY via a read-only
+    ChainClient (no signing needed), with the same RPC failover.
     """
     if not CHAIN_AVAILABLE:
         return CallToolResult(
@@ -3695,81 +4529,15 @@ async def handle_lookup_by_storage_ref(arguments: Dict[str, Any]) -> CallToolRes
             raise ValueError("storage_ref is required")
         clean_ref = validate_and_clean_reference_hash(storage_ref)
 
-        # Use chain_client if available, otherwise create temporary provider + contract
-        if chain_client:
+        from .chain.exceptions import DataNotRegisteredError
+
+        try:
             record = await asyncio.to_thread(
-                chain_client.lookup_by_storage_ref, clean_ref
+                _chain_reader().lookup_by_storage_ref, clean_ref
             )
-        else:
-            from .chain.provider import ChainProvider
-            from .chain.contract import DataProvenanceContract
-
-            provider = ChainProvider(
-                chain=settings.chain_name,
-                rpc_url=settings.chain_rpc_url,
-                contract_address=settings.chain_contract_address,
-                explorer_url=settings.chain_explorer_url,
-                rpc_fallbacks=_parse_rpc_fallbacks(),
-            )
-            contract = DataProvenanceContract(
-                web3=provider.web3,
-                contract_address=provider.contract_address,
-            )
-            data_hash_bytes = await asyncio.to_thread(
-                contract.get_data_hash_by_storage_ref, clean_ref
-            )
-            if data_hash_bytes == b"\x00" * 32:
-                record = None
-            else:
-                # Fetch the full record
-                from .chain.models import (
-                    ChainProvenanceRecord,
-                    ChainTransformation,
-                    DataStatusEnum,
-                )
-
-                raw = await asyncio.to_thread(
-                    contract.get_data_record, data_hash_bytes.hex()
-                )
-                zero_address = "0x" + "0" * 40
-                if raw[1] == zero_address:
-                    record = None
-                else:
-                    # Handle both 8-field (v3+) and 7-field (v2) tuples
-                    if len(raw) >= 8:
-                        storage_ref_bytes = raw[4]
-                        transformations_raw = raw[5]
-                        accessors_raw = raw[6]
-                        status_raw = raw[7]
-                    else:
-                        storage_ref_bytes = None
-                        transformations_raw = raw[4]
-                        accessors_raw = raw[5]
-                        status_raw = raw[6]
-
-                    parsed_storage_ref = None
-                    if (
-                        storage_ref_bytes
-                        and isinstance(storage_ref_bytes, bytes)
-                        and storage_ref_bytes != b"\x00" * 32
-                    ):
-                        parsed_storage_ref = storage_ref_bytes.hex()
-
-                    record = ChainProvenanceRecord(
-                        data_hash=(
-                            raw[0].hex() if isinstance(raw[0], bytes) else str(raw[0])
-                        ),
-                        owner=raw[1],
-                        timestamp=raw[2],
-                        data_type=raw[3],
-                        storage_ref=parsed_storage_ref,
-                        status=DataStatusEnum(status_raw),
-                        accessors=list(accessors_raw),
-                        transformations=[
-                            ChainTransformation(description=str(t))
-                            for t in transformations_raw
-                        ],
-                    )
+        except DataNotRegisteredError:
+            # Mapping exists but points at an unregistered hash
+            record = None
 
         if record:
             from datetime import datetime, timezone
@@ -3789,8 +4557,9 @@ async def handle_lookup_by_storage_ref(arguments: Dict[str, Any]) -> CallToolRes
             response_text += f"   Data Hash: {record.data_hash}\n"
             response_text += f"   Owner: {record.owner}\n"
             response_text += f"   Registered: {timestamp_str}\n"
-            response_text += f"   Data Type: {record.data_type}\n"
+            response_text += f"   Data Type: {quote(record.data_type)}\n"
             response_text += f"   Status: {record.status.name}"
+            response_text += f"\n\n{QUOTED_NOTE}"
             response_text += _format_hints(
                 "download_data", ["get_provenance", "verify_hash"]
             )
@@ -3846,7 +4615,7 @@ async def handle_get_notary_info(arguments: Dict[str, Any]) -> CallToolResult:
 
         if enabled and available:
             response_text = f"✅ Notary service is enabled and available.\n\n"
-            response_text += f"   Address: {result.get('address', 'N/A')}\n"
+            response_text += f"   Address: {_gw(result.get('address', 'N/A'))}\n"
         elif enabled and not available:
             response_text = (
                 f"⚠️  Notary service is enabled but not currently available.\n\n"
@@ -3854,7 +4623,7 @@ async def handle_get_notary_info(arguments: Dict[str, Any]) -> CallToolResult:
         else:
             response_text = f"Notary service is not enabled on this gateway.\n\n"
 
-        response_text += f"   Status: {result.get('message', 'N/A')}\n"
+        response_text += f"   Status: {one_line(result.get('message', 'N/A'))}\n"
         response_text += _format_hints("upload_data", ["health_check"])
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
@@ -3867,7 +4636,7 @@ async def handle_get_notary_info(arguments: Dict[str, Any]) -> CallToolResult:
                     text=_format_error(
                         f"Failed to get notary info: {str(e)}",
                         retryable=_is_retryable_error(e),
-                        next_tool="health_check",
+                        next_tool=_recovery_hint(e),
                     ),
                 )
             ],
@@ -3893,6 +4662,10 @@ async def main():
             if settings.chain_enabled:
                 if chain_client:
                     logger.info("Chain: %s (wallet connected)", chain_client.chain)
+                elif CHAIN_AVAILABLE and _chain_init_error:
+                    logger.info(
+                        "Chain: writes disabled — %s", redact_urls(_chain_init_error)
+                    )
                 elif CHAIN_AVAILABLE:
                     logger.info("Chain: %s (read-only, no wallet)", settings.chain_name)
             await server.run(

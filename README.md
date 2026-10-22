@@ -71,8 +71,9 @@ pip install -e .
 
 4. Configure environment variables:
 ```bash
-cp .env.example .env
-# Edit .env to configure your gateway URL and defaults
+mkdir -p ~/.config/swarm-provenance-mcp
+cp .env.example ~/.config/swarm-provenance-mcp/.env
+# Edit that file to configure your gateway URL and defaults
 ```
 
 ### Docker
@@ -108,6 +109,12 @@ docker compose build
 docker compose run --rm swarm-provenance-mcp
 ```
 
+Compose takes its variables from `./.env` next to `docker-compose.yml` (for `${VAR}`
+substitution and as the container's `env_file`) and passes them to the server as
+environment variables. That is Compose's own file, separate from the server's env file
+described under [Configuration](#configuration): the container never sees
+`~/.config/swarm-provenance-mcp/.env` on the host.
+
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SWARM_GATEWAY_URL` | Gateway endpoint URL | `https://provenance-gateway.datafund.io` |
@@ -117,7 +124,18 @@ docker compose run --rm swarm-provenance-mcp
 
 ## Configuration
 
-Environment variables (set in `.env` file):
+Settings come from environment variables, or from an env file. The env file is
+**never** read from the working directory (whichever program launches the server
+controls that). It is read from, in order:
+
+1. the path in `SWARM_PROVENANCE_ENV_FILE`, if set. It must be an absolute path (`~/...` is fine); start-up fails if it is relative or the file does not exist;
+2. otherwise `~/.config/swarm-provenance-mcp/.env` (or `$XDG_CONFIG_HOME/swarm-provenance-mcp/.env`), if it exists.
+
+Real environment variables (for example an MCP client's `"env"` block) override the env file.
+Unknown keys in the env file are ignored. If a `.env` in the working directory is found and
+ignored, the server logs a warning at start-up.
+
+- `SWARM_PROVENANCE_ENV_FILE`: Explicit absolute path of the env file to load (see above)
 
 - `SWARM_GATEWAY_URL`: URL of the swarm_connect FastAPI gateway (default: `https://provenance-gateway.datafund.io`)
 - `DEFAULT_STAMP_DURATION_HOURS`: Default stamp duration in hours, minimum 24 (default: `25`)
@@ -131,11 +149,30 @@ Environment variables (set in `.env` file):
 - `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x prefix)
 - `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set)
 - `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs, tried in order after `CHAIN_RPC_URL`
-- `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set)
+- `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set). `CHAIN_CONTRACT_ADDRESS` is accepted too; `CHAIN_CONTRACT` wins if both are set
 - `CHAIN_EXPLORER_URL`: Custom block explorer URL (uses chain preset if not set)
 - `CHAIN_GAS_LIMIT`: Explicit gas limit for chain transactions (skips estimation if set)
+- `CHAIN_MAX_FEE_GWEI`: Fee cap per gas (`maxFeePerGas`). Fee fields are set explicitly and a write is refused when the current fee is above the cap (default: `0.5` on mainnet, `10` on testnets)
+- `CHAIN_SESSION_BUDGET_ETH`: Worst-case spend allowed per server session; each transaction reserves `gas limit x max fee` plus the L1 data fee allowance, and is charged its actual cost (L2 gas plus the receipt's `l1Fee` on Base) once mined (default: `0.002` on mainnet, `0.05` on testnets)
+- `CHAIN_L1_FEE_ALLOWANCE_ETH`: L1 data fee reserved per transaction on top of L2 gas (default: `0.000001`, about 100x the ~1e-8 ETH measured on Base mainnet on 2026-10-21; L2 gas there was 1e-6 to 3e-5 ETH per transaction)
+- `CHAIN_MAX_TX_PER_SESSION`: Chain transactions allowed per server session (default: `20` on mainnet, `500` on testnets)
+- `CHAIN_REQUIRE_CONFIRM`: Require a confirmed quote on gas-spending tools. Without `confirm: true` and a matching `quote_id` they send nothing and return a quote of the exact action (arguments, fee cap, remaining budget) with a `quote_id`: an HMAC over the tool and its validated arguments under a per-process key, single use, valid 10 minutes (default: mainnet only — any chain id other than 84532, 11155111, 31337 or 1337 counts as mainnet)
+- `MAX_STAMP_DURATION_HOURS`: Maximum `duration_hours` for `purchase_stamp` / `extend_stamp` (default: `8760`)
 
 When chain is enabled, additional tools become available: `chain_balance`, `chain_health`, `anchor_hash`, `verify_hash`, `get_provenance`, `record_transform`, `record_merge_transform`, `get_provenance_chain`, `set_storage_ref`, `lookup_by_storage_ref`. Blockchain dependencies (web3, eth-account) are included in the default install. Read-only tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `lookup_by_storage_ref`, `chain_health`) work without a wallet key; write tools (`anchor_hash`, `record_transform`, `record_merge_transform`, `set_storage_ref`) and `chain_balance` require `PROVENANCE_WALLET_KEY` with a funded wallet.
+
+### Upgrading from a `.env` in the repository
+
+Earlier versions read `.env` from the working directory, so the old setup was
+`cp .env.example .env` in the repository plus `"cwd": "/path/to/swarm_provenance_mcp"`
+in `claude_desktop_config.json`. That file is no longer read: after upgrading, the server
+starts with the defaults (no wallet, `CHAIN_ENABLED=false`) and only logs a warning.
+
+- Move the file: `mkdir -p ~/.config/swarm-provenance-mcp && mv .env ~/.config/swarm-provenance-mcp/.env`
+  (or under `$XDG_CONFIG_HOME` if you set it),
+  or keep it where it is and set `SWARM_PROVENANCE_ENV_FILE` to its absolute path in the client's `"env"` block.
+- The `"env"` block in `claude_desktop_config.json` is unaffected and still overrides the env file.
+- `"cwd"` no longer has any effect on configuration. You can remove it.
 
 ### Gateway Options
 
@@ -155,7 +192,7 @@ You can also run your own gateway instance for:
 To use a self-hosted gateway:
 1. Clone the gateway repository: `git clone https://github.com/datafund/swarm_connect`
 2. Follow the setup instructions in that repository
-3. Update your `.env` file: `SWARM_GATEWAY_URL=http://localhost:8000`
+3. Set `SWARM_GATEWAY_URL=http://localhost:8000` in your env file (`~/.config/swarm-provenance-mcp/.env`) or environment
 
 ## Usage
 
@@ -655,8 +692,9 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -e .
 
 # Configure environment variables
-cp .env.example .env
-# Edit .env file if you need to customize gateway URL or defaults
+mkdir -p ~/.config/swarm-provenance-mcp
+cp .env.example ~/.config/swarm-provenance-mcp/.env
+# Edit that file if you need to customize gateway URL or defaults
 ```
 
 3. **Configure MCP Server**: Add to Claude Desktop's configuration file:
@@ -666,9 +704,7 @@ cp .env.example .env
 {
   "mcpServers": {
     "swarm-provenance": {
-      "command": "/path/to/swarm_provenance_mcp/venv/bin/python",
-      "args": ["-m", "swarm_provenance_mcp.server"],
-      "cwd": "/path/to/swarm_provenance_mcp"
+      "command": "/path/to/swarm_provenance_mcp/run.sh"
     }
   }
 }
@@ -680,8 +716,7 @@ cp .env.example .env
   "mcpServers": {
     "swarm-provenance": {
       "command": "C:\\path\\to\\swarm_provenance_mcp\\venv\\Scripts\\python.exe",
-      "args": ["-m", "swarm_provenance_mcp.server"],
-      "cwd": "C:\\path\\to\\swarm_provenance_mcp"
+      "args": ["-m", "swarm_provenance_mcp.server"]
     }
   }
 }
@@ -689,19 +724,21 @@ cp .env.example .env
 
 *Note: Replace `/path/to/swarm_provenance_mcp` with the actual path where you cloned the repository.*
 
+The `run.sh` launcher (macOS/Linux) starts the server from the repo's venv, with the repo as working directory. The working directory does not affect configuration: settings come from the env file described above, and a `.env` in the repository is no longer read (see [Upgrading from a `.env` in the repository](#upgrading-from-a-env-in-the-repository); the server logs a warning if it finds one). If the venv stops working — typically after moving or renaming the repo directory — it rebuilds it automatically. Make it executable once with `chmod +x run.sh`.
+
+The rebuild installs all dependencies and can take a few minutes, longer than an MCP client waits for the server on startup. If the first launch after a move times out, run `./run.sh < /dev/null` once in a terminal to finish the rebuild, then restart the client. The Windows config above does not use the launcher yet; after moving the repo on Windows, recreate the venv manually.
+
 **Alternative (if package is installed)**: You can use `"command": "swarm-provenance-mcp"` instead after running `pip install -e .`
 
 #### With on-chain provenance
 
-To enable blockchain anchoring, add an `"env"` block to the config. You can use this instead of (or alongside) a `.env` file:
+To enable blockchain anchoring, add an `"env"` block to the config. You can use this instead of (or alongside) the env file at `~/.config/swarm-provenance-mcp/.env`:
 
 ```json
 {
   "mcpServers": {
     "swarm-provenance": {
-      "command": "/path/to/swarm_provenance_mcp/venv/bin/python",
-      "args": ["-m", "swarm_provenance_mcp.server"],
-      "cwd": "/path/to/swarm_provenance_mcp",
+      "command": "/path/to/swarm_provenance_mcp/run.sh",
       "env": {
         "CHAIN_ENABLED": "true",
         "PROVENANCE_WALLET_KEY": "0x...your_private_key_here..."
@@ -783,9 +820,9 @@ Claude will register the hash on the blockchain and confirm the provenance recor
 
 If Claude Desktop doesn't show the Swarm tools:
 1. Check the config file path is correct for your OS
-2. Verify the `command` path points to the Python executable inside your venv
+2. Verify the `command` path points to `run.sh` in your clone (macOS/Linux), or to the Python executable inside your venv (Windows)
 3. Check Claude Desktop logs: **Help > Show Logs** (look for MCP connection errors)
-4. Test manually: run `swarm-provenance-mcp` in your terminal — it should start without errors and wait for MCP input
+4. Test manually: run `./run.sh` (or `swarm-provenance-mcp`) in your terminal — it should start without errors and wait for MCP input. Launcher messages, including a venv rebuild, go to stderr
 
 ## Development
 
@@ -826,15 +863,36 @@ black swarm_provenance_mcp/
 ruff check swarm_provenance_mcp/
 ```
 
+### Editor settings
+
+The repository commits no editor hooks, MCP servers or auto-approve settings. Shared editor settings take effect on every contributor's machine, so keep your own in per-developer configuration:
+
+- `.claude/settings.local.json` for project hooks and permissions. It is gitignored, and so is any `.claude/*.local.json`.
+- `~/.claude/settings.json` for settings that apply to all your projects.
+- `claude mcp add --scope local` or `--scope user` for MCP servers, instead of a committed `.mcp.json`.
+
+These files count as committed editor settings: `.claude/**/*.json` except `*.local.json`, `.mcp.json`, `.cursor/mcp.json` and `.cursor/hooks.json`. They must not contain:
+
+- A `hooks`, `mcpServers`, `statusLine` or `apiKeyHelper` key. Each one runs a command or connects to an MCP server.
+- A non-empty `permissions.allow`.
+- An `enableAllProjectMcpServers` or `enabledMcpjsonServers` key.
+- A `permissions.defaultMode` other than `"default"`.
+
+`tests/test_editor_settings.py` enforces these rules.
+
 ## Dependencies
 
 - **Core Dependencies**:
-  - `mcp>=1.0.0`: Model Context Protocol framework
-  - `requests>=2.31.0`: HTTP client for gateway communication
-  - `pydantic>=2.0.0`: Data validation and settings
-  - `python-dotenv>=1.0.0`: Environment configuration
-  - `web3>=6.0.0`: Ethereum blockchain interaction for on-chain provenance
-  - `eth-account>=0.10.0`: Wallet and transaction signing for chain anchoring
+  - `mcp>=1.26,<2`: Model Context Protocol framework (the server is written for mcp 1.x)
+  - `requests>=2.31.0,<3`: HTTP client for gateway communication
+  - `pydantic>=2.0.0,<3` and `pydantic-settings>=2.0,<3`: Data validation and settings
+  - `python-dotenv>=1.0.0,<2`: Environment configuration
+  - `web3>=7,<8`: Ethereum blockchain interaction for on-chain provenance
+  - `eth-account>=0.13,<0.14`: Wallet and transaction signing for chain anchoring
+  - `eth-utils>=5,<6`: Hashing helpers (keccak) used directly by the chain module
+
+  Upper bounds are deliberate. Raise one only together with a passing test run
+  against the new version.
 
 - **Development Dependencies**:
   - `pytest`: Testing framework
@@ -864,7 +922,7 @@ This MCP server is designed to work with AI agents that support the Model Contex
 2. **Authentication errors**: Check that the gateway doesn't require authentication
 3. **Invalid stamp IDs**: Verify stamp IDs are valid batch IDs from the Swarm network
 4. **Timeout errors**: Increase timeout values if operations are taking too long
-5. **Chain: "wallet key not configured"**: Set `PROVENANCE_WALLET_KEY` in `.env` for write operations (`anchor_hash`, `record_transform`, `set_storage_ref`). Read-only tools work without it.
+5. **Chain: "wallet key not configured"**: Set `PROVENANCE_WALLET_KEY` in the MCP client's `"env"` block or in the env file (`~/.config/swarm-provenance-mcp/.env`, see [Configuration](#configuration)) for write operations (`anchor_hash`, `record_transform`, `set_storage_ref`). Read-only tools work without it.
 6. **Chain: "insufficient funds"**: Fund your wallet with testnet ETH (Base Sepolia faucet) or bridge ETH to Base mainnet. Run `chain_balance` for guidance.
 7. **Chain: "already registered"**: The hash is already anchored on-chain. Use `get_provenance` to view the existing record.
 8. **Chain: "transformation already recorded"**: The `(original → new)` link already exists on-chain. No gas spent — use `get_provenance_chain` to verify the lineage.

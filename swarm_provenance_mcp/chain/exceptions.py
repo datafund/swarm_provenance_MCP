@@ -17,6 +17,18 @@ class ChainConfigurationError(ChainError):
     pass
 
 
+class ChainIdMismatchError(ChainConfigurationError):
+    """The RPC endpoint reports a different chain id than the configured network.
+
+    Not retryable: the configuration (CHAIN_NAME / CHAIN_RPC_URL) is wrong, or
+    the endpoint is misrouted. Nothing is signed while it persists.
+    """
+
+    def __init__(self, message: str, rpc_url: str = None):
+        super().__init__(message)
+        self.rpc_url = rpc_url
+
+
 class ChainConnectionError(ChainError):
     """Failed to connect to RPC endpoint."""
 
@@ -26,11 +38,32 @@ class ChainConnectionError(ChainError):
 
 
 class ChainTransactionError(ChainError):
-    """Transaction reverted, ran out of gas, or otherwise failed."""
+    """Transaction reverted, ran out of gas, or otherwise failed.
 
-    def __init__(self, message: str, tx_hash: str = None):
+    ``broadcast`` is True once ``send_raw_transaction`` has been attempted:
+    the transaction may be in the mempool, so the operation must not be
+    re-run automatically.
+    """
+
+    def __init__(self, message: str, tx_hash: str = None, *, broadcast: bool = False):
         super().__init__(message)
         self.tx_hash = tx_hash
+        self.broadcast = broadcast
+
+    def __str__(self) -> str:
+        # Keep the hash in every message, so a caller that only formats
+        # str(e) still tells the user which transaction to look up.
+        message = super().__str__()
+        if self.tx_hash and self.tx_hash not in message:
+            return f"{message} (tx {self.tx_hash})"
+        return message
+
+
+class ChainSpendLimitError(ChainError):
+    """A transaction was refused before signing: fee above the cap, or the
+    session spend budget or transaction count would be exceeded."""
+
+    pass
 
 
 class ChainValidationError(ChainError):

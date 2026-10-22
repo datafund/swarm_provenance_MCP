@@ -4,7 +4,8 @@ Run: CHAIN_ENABLED=true python user-tests/test_full_provenance_workflow.py
   or: CHAIN_ENABLED=true python -m user-tests.test_full_provenance_workflow
 
 Requires: pip install -e .
-          .env with SWARM_GATEWAY_URL (defaults to production gateway)
+          SWARM_GATEWAY_URL in the environment or ~/.config/swarm-provenance-mcp/.env
+          (defaults to production gateway; a .env in the repo is not read)
           Optionally: CHAIN_ENABLED=true, PROVENANCE_WALLET_KEY=0x...
 """
 

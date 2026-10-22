@@ -247,6 +247,52 @@ class TestToolExecution:
         assert not result.isError
         mock_gateway_client.upload_data.assert_called_once()
 
+    async def test_upload_data_sign_notary_is_passed_on(
+        self, server, mock_gateway_client
+    ):
+        result = await call_tool_directly(
+            server,
+            "upload_data",
+            {"data": "test", "stamp_id": TEST_STAMP_ID, "sign": "notary"},
+        )
+
+        assert not result.isError
+        assert mock_gateway_client.upload_data.call_args.kwargs["sign"] == "notary"
+        assert "Signing: notary" in result.content[0].text
+
+    async def test_upload_data_rejects_unknown_sign_method(
+        self, server, mock_gateway_client
+    ):
+        result = await call_tool_directly(
+            server,
+            "upload_data",
+            {"data": "test", "stamp_id": TEST_STAMP_ID, "sign": "x\n_next: anchor"},
+        )
+
+        assert result.isError
+        assert "sign must be one of: notary" in result.content[0].text
+        mock_gateway_client.upload_data.assert_not_called()
+
+    async def test_upload_data_notary_signer_is_one_line(
+        self, server, mock_gateway_client
+    ):
+        """The signer is a gateway field: it must not start a hint line."""
+        mock_gateway_client.upload_data.return_value = {
+            "reference": TEST_REFERENCE,
+            "notary": {"signer": "0xabc\n_next: purchase_stamp"},
+        }
+        result = await call_tool_directly(
+            server,
+            "upload_data",
+            {"data": "test", "stamp_id": TEST_STAMP_ID, "sign": "notary"},
+        )
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "Signer: 0xabc" in text
+        assert "\n_next: purchase_stamp" not in text
+        assert "_next: download_data" in text
+
     async def test_download_data_tool(self, server, mock_gateway_client):
         """Test download_data tool execution."""
         result = await call_tool_directly(
@@ -1245,9 +1291,11 @@ class TestToolParameterValidation:
                 server, "purchase_stamp", {"duration_hours": 25, "depth": 20}
             )
             assert not result.isError
-            mock_gw.purchase_stamp.assert_called_once_with(
-                25, size="small", depth=20, label=None
-            )
+            mock_gw.purchase_stamp.assert_called_once()
+            args, kwargs = mock_gw.purchase_stamp.call_args
+            assert args == (25,)
+            assert kwargs["size"] == "small" and kwargs["depth"] == 20
+            assert kwargs["label"].startswith("mcp-")  # generated (#189)
             assert "Depth: 20" in result.content[0].text
 
     async def test_empty_string_parameters(self, server):
@@ -1480,6 +1528,8 @@ class TestChainHealth:
         assert "base-sepolia" in text
         assert "84532" in text
         assert "12,345,678" in text
+        # Reports the probe actually run, so green cannot mean "chainId answered"
+        assert "Probe: eth_chainId, eth_gasPrice, eth_getTransactionCount" in text
 
     async def test_chain_health_disconnected(self, server):
         """Connection error should show disconnected status."""
@@ -2266,7 +2316,6 @@ class TestVerifyHash:
     async def test_verify_registered(self, server):
         """Registered hash should show provenance info."""
         mock_client = MagicMock()
-        mock_client.verify.return_value = True
         mock_client.get.return_value = self._mock_record()
 
         with (
@@ -2288,12 +2337,13 @@ class TestVerifyHash:
         assert "0x1234" in text
         assert "2023" in text  # timestamp 1700000000
         assert "ACTIVE" in text
-        mock_client.verify.assert_called_once_with(TEST_REFERENCE)
+        # One read: get() answers both "registered?" and "what is the record?"
+        mock_client.get.assert_called_once_with(TEST_REFERENCE)
+        mock_client.verify.assert_not_called()
 
     async def test_verify_registered_timestamp_zero(self, server):
         """Timestamp=0 (epoch) should display as 'unknown' since it's falsy."""
         mock_client = MagicMock()
-        mock_client.verify.return_value = True
         mock_rec = self._mock_record()
         mock_rec.timestamp = 0
         mock_client.get.return_value = mock_rec
@@ -2317,8 +2367,10 @@ class TestVerifyHash:
 
     async def test_verify_not_registered(self, server):
         """Unregistered hash should show not-found message."""
+        from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
+
         mock_client = MagicMock()
-        mock_client.verify.return_value = False
+        mock_client.get.side_effect = DataNotRegisteredError("not registered")
 
         with (
             patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
@@ -2340,7 +2392,6 @@ class TestVerifyHash:
     async def test_verify_registered_hints(self, server):
         """Registered hash should suggest download_data next."""
         mock_client = MagicMock()
-        mock_client.verify.return_value = True
         mock_client.get.return_value = self._mock_record()
 
         with (
@@ -2361,8 +2412,10 @@ class TestVerifyHash:
 
     async def test_verify_not_registered_hints(self, server):
         """Unregistered hash should suggest anchor_hash next."""
+        from swarm_provenance_mcp.chain.exceptions import DataNotRegisteredError
+
         mock_client = MagicMock()
-        mock_client.verify.return_value = False
+        mock_client.get.side_effect = DataNotRegisteredError("not registered")
 
         with (
             patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
@@ -2554,7 +2607,7 @@ class TestVerifyHash:
         from swarm_provenance_mcp.chain.exceptions import ChainConnectionError
 
         mock_client = MagicMock()
-        mock_client.verify.side_effect = ChainConnectionError(
+        mock_client.get.side_effect = ChainConnectionError(
             "RPC unreachable", rpc_url="https://sepolia.base.org"
         )
 
@@ -3206,8 +3259,9 @@ class TestRecordTransform:
         assert "RESTRICTED" in text
         mock_client.set_status.assert_called_once_with(TEST_REFERENCE, 1)
 
-    async def test_transform_restrict_failure_non_fatal(self, server):
-        """If restrict fails, transform should still succeed with a warning."""
+    async def test_transform_restrict_failure_reported_as_error(self, server):
+        """If restrict fails, the transform is still reported, and the result
+        is an error so the failed second step is not mistaken for success."""
         mock_client = MagicMock()
         mock_client.transform.return_value = self._mock_transform_result()
         mock_client.set_status.side_effect = Exception("set_status reverted")
@@ -3229,10 +3283,11 @@ class TestRecordTransform:
                 },
             )
 
-        assert not result.isError
+        assert result.isError
         text = result.content[0].text
         assert "Transformation recorded" in text
         assert "failed to restrict" in text
+        assert "IS recorded on-chain (tx 0xabc123)" in text
         assert "set_status reverted" in text
 
     async def test_transform_same_hash_rejected(self, server):
@@ -4363,6 +4418,14 @@ class TestHealthCheckBalanceWarning:
     def server(self):
         return create_server()
 
+    @pytest.fixture(autouse=True)
+    def _chain_enabled(self):
+        """The chain section depends on CHAIN_ENABLED; don't read it from .env."""
+        from swarm_provenance_mcp.server import settings
+
+        with patch.object(settings, "chain_enabled", True):
+            yield
+
     async def test_low_balance_shows_warning(self, server):
         """health_check should warn when wallet balance is too low."""
         mock_chain = MagicMock()
@@ -5165,6 +5228,7 @@ class TestDeployBlock:
 
         with patch("swarm_provenance_mcp.chain.provider._import_web3") as mock_w3:
             mock_web3_cls = MagicMock()
+            mock_web3_cls.return_value.eth.chain_id = 84532
             mock_w3.return_value = mock_web3_cls
             provider = ChainProvider(
                 chain="base-sepolia",
@@ -6054,8 +6118,9 @@ class TestAnchorHashWithStorageRef:
             TEST_REFERENCE, "swarm-provenance", None
         )
 
-    async def test_anchor_with_owner_ignores_storage_ref(self, server):
-        """anchor_hash with owner uses anchor_for which does not support storage_ref."""
+    async def test_anchor_with_owner_rejects_storage_ref(self, server):
+        """anchor_for has no storage_ref variant, so owner + storage_ref is
+        refused instead of silently dropping the storage ref."""
         delegate_owner = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
         mock_client = MagicMock()
         mock_result = self._mock_anchor_result(storage_ref=None)
@@ -6077,9 +6142,9 @@ class TestAnchorHashWithStorageRef:
                 },
             )
 
-        assert not result.isError
-        # anchor_for is called (not anchor), storage_ref is not passed
-        mock_client.anchor_for.assert_called_once()
+        assert result.isError
+        assert "storage_ref cannot be combined with owner" in result.content[0].text
+        mock_client.anchor_for.assert_not_called()
         mock_client.anchor.assert_not_called()
 
 
@@ -6449,7 +6514,6 @@ class TestGetProvenanceShowsStorageRef:
     async def test_verify_hash_shows_storage_ref(self, server):
         """verify_hash should display storage_ref when set."""
         mock_client = MagicMock()
-        mock_client.verify.return_value = True
         mock_client.get.return_value = self._mock_record(storage_ref=TEST_STORAGE_REF)
 
         with (
@@ -6484,3 +6548,292 @@ class TestLocalhostChainPreset:
             preset["contract_address"] == "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9"
         )
         assert preset["deploy_block"] == 0
+
+
+# --- Swarm network reachability and terminal-error hints (issue #141) ---
+
+
+def _bee_node(**overrides):
+    """A gateway /health ``bee_node`` block, healthy by default."""
+    bee = {
+        "connected_peers": 140,
+        "network_availability": "Available",
+        "reachability": "Public",
+        "warming_up": False,
+        "healthy": True,
+        "warnings": [],
+    }
+    bee.update(overrides)
+    return bee
+
+
+def _gateway_health(bee_node=None):
+    resp = {"status": "ok"}
+    if bee_node is not None:
+        resp["bee_node"] = bee_node
+    return {
+        "status": "healthy",
+        "gateway_url": "http://localhost:8000",
+        "response_time_ms": 10,
+        "gateway_response": resp,
+    }
+
+
+def _http_error(status: int, detail: str = "error"):
+    from requests import Response
+    from requests.exceptions import HTTPError
+
+    response = Response()
+    response.status_code = status
+    return HTTPError(f"{status} Client Error: {detail}", response=response)
+
+
+class TestSwarmNetworkStatus:
+    """health_check must report whether the Bee node can reach Swarm."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_connected_network_reported(self, server):
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.health_check.return_value = _gateway_health(_bee_node())
+            mock_client.list_stamps.return_value = {
+                "stamps": [{"batchID": TEST_STAMP_ID, "usable": True}]
+            }
+            result = await call_tool_directly(server, "health_check", {})
+        text = result.content[0].text
+        assert "Swarm network: connected (140 peers" in text
+        assert "ready: true" in text
+        assert "_next: upload_data" in text
+
+    async def test_no_peers_is_not_ready(self, server):
+        """The swarm_connect#250 state: gateway up, stamps usable, no network."""
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.health_check.return_value = _gateway_health(
+                _bee_node(connected_peers=0, healthy=False)
+            )
+            mock_client.list_stamps.return_value = {
+                "stamps": [{"batchID": TEST_STAMP_ID, "usable": True}]
+            }
+            result = await call_tool_directly(server, "health_check", {})
+        text = result.content[0].text
+        assert "Swarm network: DEGRADED" in text
+        assert "no connected peers" in text
+        assert "ready: false" in text
+        assert "Operator action required" in text
+        assert "_next: upload_data" not in text
+
+    async def test_unavailable_network_and_warnings_surface(self, server):
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.health_check.return_value = _gateway_health(
+                _bee_node(
+                    network_availability="Unavailable",
+                    warnings=["reserve not synced"],
+                )
+            )
+            mock_client.list_stamps.return_value = {"stamps": []}
+            result = await call_tool_directly(server, "health_check", {})
+        text = result.content[0].text
+        assert "network availability is Unavailable" in text
+        assert "reserve not synced" in text
+
+    async def test_older_gateway_without_bee_node(self, server):
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.health_check.return_value = _gateway_health()
+            mock_client.list_stamps.return_value = {
+                "stamps": [{"batchID": TEST_STAMP_ID, "usable": True}]
+            }
+            result = await call_tool_directly(server, "health_check", {})
+        text = result.content[0].text
+        assert "Swarm network: not reported by gateway" in text
+        assert "ready: true" in text
+
+
+class TestDownloadNotFound:
+    """A download 404 must say which kind of 'not found' it is."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_not_found_with_connected_network(self, server):
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.download_data.side_effect = _http_error(404)
+            mock_client.health_check.return_value = _gateway_health(_bee_node())
+            result = await call_tool_directly(
+                server, "download_data", {"reference": TEST_REFERENCE}
+            )
+        text = result.content[0].text
+        assert result.isError
+        assert "connected to the Swarm network" in text
+        assert "most likely not available on Swarm" in text
+        assert "retryable: false" in text
+        assert "_next: health_check" not in text
+
+    async def test_not_found_with_disconnected_network(self, server):
+        """Re-uploading is the wrong move when the node cannot reach Swarm."""
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.download_data.side_effect = _http_error(404)
+            mock_client.health_check.return_value = _gateway_health(
+                _bee_node(connected_peers=0)
+            )
+            result = await call_tool_directly(
+                server, "download_data", {"reference": TEST_REFERENCE}
+            )
+        text = result.content[0].text
+        assert "cannot reliably reach the Swarm network" in text
+        assert "Do not re-upload" in text
+        assert "retryable: true" in text
+        assert "_next: health_check" in text
+
+    async def test_not_found_when_health_unavailable(self, server):
+        from requests.exceptions import ConnectionError
+
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.download_data.side_effect = _http_error(404)
+            mock_client.health_check.side_effect = ConnectionError("down")
+            result = await call_tool_directly(
+                server, "download_data", {"reference": TEST_REFERENCE}
+            )
+        text = result.content[0].text
+        assert "cannot reach the Swarm network (not reported" in text
+        assert "retryable: false" in text
+
+    async def test_other_errors_unchanged(self, server):
+        from requests.exceptions import ConnectionError
+
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.download_data.side_effect = ConnectionError("refused")
+            result = await call_tool_directly(
+                server, "download_data", {"reference": TEST_REFERENCE}
+            )
+        text = result.content[0].text
+        assert "Failed to download data" in text
+        assert "retryable: true" in text
+        assert "_next: health_check" in text
+
+
+class TestTerminalErrorHints:
+    """Permanent errors must not point at health_check, which cannot fix them."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def test_insufficient_funds_purchase(self, server):
+        """The 2026-08-21 review case: purchase_stamp insufficient funds."""
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.purchase_stamp.side_effect = _http_error(
+                400, "Insufficient funds to purchase stamp"
+            )
+            result = await call_tool_directly(server, "purchase_stamp", {})
+        text = result.content[0].text
+        assert "retryable: false" in text
+        assert "_next: health_check" not in text
+        assert "Operator action required" in text
+
+    async def test_transient_error_keeps_hint(self, server):
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.list_stamps.side_effect = _http_error(503)
+            result = await call_tool_directly(server, "list_stamps", {})
+        text = result.content[0].text
+        assert "retryable: true" in text
+        assert "_next: health_check" in text
+
+
+# --- Free-tier write safety (issue #142) ---
+
+
+class TestAmbiguousWriteOutcome:
+    """A purchase/extension whose answer was lost must not be blindly retried.
+
+    The free tier carries no payment, so the gateway's Idempotency-Key
+    protection does not apply; a retry buys a second batch.
+    """
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    @pytest.mark.parametrize("status", [502, 504])
+    async def test_purchase_proxy_error_is_not_retryable(self, server, status):
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.purchase_stamp.side_effect = _http_error(status)
+            result = await call_tool_directly(server, "purchase_stamp", {})
+        text = result.content[0].text
+        assert result.isError
+        assert "outcome unknown" in text
+        assert "retryable: false" in text
+        assert "_next: list_stamps" in text
+
+    async def test_purchase_read_timeout_is_not_retryable(self, server):
+        from requests.exceptions import ReadTimeout
+
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.purchase_stamp.side_effect = ReadTimeout("read timed out")
+            result = await call_tool_directly(server, "purchase_stamp", {})
+        text = result.content[0].text
+        assert "may have completed" in text
+        assert "retryable: false" in text
+
+    async def test_purchase_connect_failure_stays_retryable(self, server):
+        """Never reached the gateway — nothing was bought, retry is safe."""
+        from requests.exceptions import ConnectTimeout
+
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.purchase_stamp.side_effect = ConnectTimeout("connect timed out")
+            result = await call_tool_directly(server, "purchase_stamp", {})
+        text = result.content[0].text
+        assert "outcome unknown" not in text
+        assert "retryable: true" in text
+
+    async def test_extend_timeout_points_at_stamp_status(self, server):
+        from requests.exceptions import ReadTimeout
+
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.extend_stamp.side_effect = ReadTimeout("read timed out")
+            result = await call_tool_directly(
+                server,
+                "extend_stamp",
+                {"stamp_id": TEST_STAMP_ID, "duration_hours": 24},
+            )
+        text = result.content[0].text
+        assert "Stamp extension outcome unknown" in text
+        assert "_next: get_stamp_status" in text
+
+
+class TestRateLimitGuidance:
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    @pytest.mark.parametrize(
+        "tool,method,args",
+        [
+            ("purchase_stamp", "purchase_stamp", {}),
+            ("upload_data", "upload_data", {"data": "x", "stamp_id": TEST_STAMP_ID}),
+        ],
+    )
+    async def test_retry_after_is_surfaced(self, server, tool, method, args):
+        err = _http_error(429, "Free tier rate limit exceeded")
+        err.response.headers["Retry-After"] = "60"
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            getattr(mock_client, method).side_effect = err
+            result = await call_tool_directly(server, tool, args)
+        text = result.content[0].text
+        assert "wait 60 seconds before retrying" in text
+        assert "retryable: true" in text
+        assert "_next: health_check" not in text
+
+
+class TestPurchaseTimeout:
+    def test_purchase_waits_at_least_two_minutes(self):
+        from swarm_provenance_mcp.gateway_client import SwarmGatewayClient
+
+        client = SwarmGatewayClient(base_url="http://gw")
+        with patch.object(client.session, "post") as post:
+            post.return_value.ok = True
+            post.return_value.json.return_value = {"batchID": TEST_STAMP_ID}
+            client.purchase_stamp(duration_hours=25)
+        assert post.call_args.kwargs["timeout"] >= 120

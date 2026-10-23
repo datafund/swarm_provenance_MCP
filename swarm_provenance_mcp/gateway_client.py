@@ -1,5 +1,7 @@
 """Client for communicating with the swarm_connect FastAPI gateway."""
 
+import base64
+import binascii
 import json
 from typing import Dict, List, Any, Optional
 import requests
@@ -40,6 +42,114 @@ def _json(response) -> Any:
         raise requests.exceptions.InvalidJSONError(
             "Gateway response is nested too deeply to process", response=response
         ) from None
+
+
+# Longest PAYMENT-REQUIRED header the client decodes, in characters.
+MAX_PAYMENT_HEADER_CHARS = 8192
+# Longest snippet of a non-JSON 402 body kept in ``payment_info["raw"]``.
+MAX_RAW_402_CHARS = 300
+
+
+class PaymentRequiredError(requests.HTTPError):
+    """The gateway answered HTTP 402 Payment Required (x402).
+
+    A subclass of ``requests.HTTPError``, so code that handles any gateway
+    error keeps working. ``payment_info`` is a normalised dict from
+    ``parse_payment_required()``.
+    """
+
+    def __init__(self, message: str, payment_info: Dict[str, Any], response=None):
+        super().__init__(message, response=response)
+        self.payment_info = payment_info
+
+
+def _payment_header(response) -> Optional[Dict[str, Any]]:
+    """The decoded PAYMENT-REQUIRED header (base64 JSON), if any.
+
+    The gateway sends the payment request in the body (x402 v1). x402 v2
+    moves it to this header, so it is read as a fallback. Anything that does
+    not decode to a JSON object is ignored.
+    """
+    value = response.headers.get("PAYMENT-REQUIRED") if response is not None else None
+    if not value or len(value) > MAX_PAYMENT_HEADER_CHARS:
+        return None
+    try:
+        decoded = json.loads(base64.b64decode(value.strip(), validate=True))
+        if not isinstance(decoded, dict):
+            return None
+        return _clean_strings(decoded)
+    except (binascii.Error, ValueError, RecursionError):
+        return None
+
+
+def parse_payment_required(response) -> Dict[str, Any]:
+    """Normalise a 402 response into a payment_info dict. Never raises.
+
+    The gateway sends several shapes:
+
+    - the x402 v1 body at the top level (``x402Version``, ``error``,
+      ``accepts``, optional ``freeTier``), with ``code``/``message`` and a
+      deprecated copy under ``detail``;
+    - older gateways: the same body only under ``detail``;
+    - gateway-specific bodies without ``accepts``, such as
+      ``{"code": "PAYMENT_SETTLEMENT_FAILED", "message": ...}``;
+    - an empty or non-JSON body (a proxy page, for example).
+
+    Returns a dict with ``x402_version``, ``error``, ``code``, ``accepts``
+    (a list of dicts), ``free_tier`` (dict or None) and ``raw`` (a capped
+    snippet of a non-JSON body, else "").
+    """
+    info: Dict[str, Any] = {
+        "x402_version": None,
+        "error": "",
+        "code": "",
+        "accepts": [],
+        "free_tier": None,
+        "raw": "",
+    }
+    body: Any = None
+    try:
+        body = _json(response)
+    except (ValueError, requests.exceptions.InvalidJSONError):
+        # Empty or not JSON (a proxy page, for example): keep the start.
+        info["raw"] = flatten(getattr(response, "text", "") or "", MAX_RAW_402_CHARS)
+
+    sources: List[Dict[str, Any]] = []
+    if isinstance(body, dict):
+        sources.append(body)
+        if isinstance(body.get("detail"), dict):
+            sources.append(body["detail"])
+    elif isinstance(body, str):
+        info["error"] = body
+    header = _payment_header(response)
+    if header is not None:
+        sources.append(header)
+
+    for src in sources:
+        _merge_payment_source(info, src)
+    return info
+
+
+def _merge_payment_source(info: Dict[str, Any], src: Dict[str, Any]) -> None:
+    """Fill the fields of ``info`` still empty from one part of a 402.
+
+    Parts are merged in order (top level, ``detail``, PAYMENT-REQUIRED
+    header), so the first part that has a field wins.
+    """
+    accepts = src.get("accepts")
+    if not info["accepts"] and isinstance(accepts, list):
+        info["accepts"] = [a for a in accepts if isinstance(a, dict)]
+    version = src.get("x402Version")
+    if info["x402_version"] is None and isinstance(version, (int, str)):
+        info["x402_version"] = version
+    if not info["code"] and isinstance(src.get("code"), str):
+        info["code"] = src["code"]
+    if not info["error"]:
+        texts = [src.get(k) for k in ("error", "message", "detail")]
+        info["error"] = next((t for t in texts if isinstance(t, str) and t), "")
+    free = src.get("freeTier")
+    if info["free_tier"] is None and isinstance(free, dict):
+        info["free_tier"] = free
 
 
 class SwarmGatewayClient:
@@ -92,6 +202,11 @@ class SwarmGatewayClient:
         except requests.HTTPError as e:
             # The reason phrase comes from the status line: cap it as well.
             message = one_line(str(e), 2 * MAX_ERROR_DETAIL_CHARS)
+            if response.status_code == 402:
+                info = parse_payment_required(response)
+                if info["error"]:
+                    message += f" — {one_line(info['error'], MAX_ERROR_DETAIL_CHARS)}"
+                raise PaymentRequiredError(message, info, response=response) from e
             if detail:
                 message += f" — {detail}"
             raise requests.HTTPError(message, response=response) from e

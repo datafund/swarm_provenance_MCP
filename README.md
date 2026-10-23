@@ -601,13 +601,15 @@ These behaviours apply when `CHAIN_ENABLED=true` unless noted.
 
 #### Confirmed quotes for spending tools
 
-`anchor_hash`, `record_transform`, `record_merge_transform` and `set_storage_ref` accept `confirm` and `quote_id`. A confirmed quote is required on mainnet (any chain ID other than 84532, 11155111, 31337 or 1337), or on any chain when `CHAIN_REQUIRE_CONFIRM=true`. `CHAIN_REQUIRE_CONFIRM=false` turns it off. On the testnet default it is off, and `confirm` and `quote_id` are ignored.
+`anchor_hash`, `record_transform`, `record_merge_transform` and `set_storage_ref` accept `confirm` and `quote_id`. A confirmed quote is required on mainnet (any chain ID other than 84532, 11155111, 31337 or 1337), or on any chain when `CHAIN_REQUIRE_CONFIRM=true`. `CHAIN_REQUIRE_CONFIRM=false` turns it off. On the testnet default it is off. When confirmation is off, there is no quote step: `confirm` and `quote_id` are ignored and an ordinary call sends the transaction directly.
+
+When confirmation is required:
 
 1. Call the tool with its normal arguments. The server sends no transaction and returns a quote: the action, the number of transactions, the fee cap, the current fee, the remaining session budget, and a `quote_id`.
 2. Get the user's approval.
 3. Call the tool again with the same arguments, `confirm: true`, and the `quote_id`.
 
-A `quote_id` is valid for 10 minutes, works once, and works only for the tool and arguments it was issued for. Hash and address values are compared without regard to letter case. It is valid only in the server process that issued it, so a restart invalidates it. If `confirm` is `true` but the `quote_id` is missing, expired, used or for different arguments, the server sends nothing and returns a new quote.
+A `quote_id` is valid for 10 minutes, works once, and works only for the tool and arguments it was issued for. Hash and address values are compared without regard to letter case. It is valid only in the server process that issued it, so a restart invalidates it. If `confirm` is `true` but the `quote_id` is missing, expired, used or for different arguments, the server sends nothing and returns a new quote. This no-send behavior applies only when confirmation is required.
 
 #### Untrusted content
 
@@ -615,7 +617,7 @@ Text that anyone can write is treated as data, not instructions: `download_data`
 
 #### RPC address redaction
 
-An RPC URL can carry an API key in its path or query. Chain tool results show the configured RPC URLs as scheme, host and port only, and server logs show the host only. Other URLs, such as faucet, explorer and gateway links, are not changed.
+An RPC URL can carry an API key in its path or query. Chain tool results show the configured RPC URLs as scheme, host and port only. In server logs, RPC URLs in error text are cut the same way: credentials, path and query are removed and scheme, host and port are kept. Connection labels in log messages show the host only. Other URLs, such as faucet, explorer and gateway links, are not changed.
 
 #### Chain ID pinning
 
@@ -623,7 +625,7 @@ For `CHAIN_NAME=base-sepolia` and `CHAIN_NAME=base`, the chain ID is fixed by th
 
 #### Contract check
 
-Before the first write, the server checks that `CHAIN_CONTRACT` (or the preset address) holds DataProvenance contract code. If every endpoint that answers reports no code, the write tools are disabled and report the reason, `health_check` and `chain_health` report it too, and the server checks again before each write. Read-only tools are not affected. If no RPC answers in time, the check runs again before the first transaction.
+Before the first write, the server checks that `CHAIN_CONTRACT` (or the preset address) holds DataProvenance contract code. If every endpoint that answers reports no code, the write tools are disabled and report the reason, `health_check` and `chain_health` report it too, and the server checks again before each write. Read-only tools are not disabled by this write check and can still be called. They use the same configured contract, so they can return their own RPC or contract-read errors. If no RPC answers in time, the check runs again before the first transaction.
 
 ### MCP Prompts
 

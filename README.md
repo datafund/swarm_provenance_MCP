@@ -147,8 +147,8 @@ ignored, the server logs a warning at start-up.
 - `CHAIN_ENABLED`: Enable on-chain provenance anchoring (default: `false`)
 - `CHAIN_NAME`: Blockchain network — `base-sepolia` (testnet), `base` (mainnet), or `localhost` (local hardhat, chain 31337) (default: `base-sepolia`)
 - `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x prefix)
-- `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set)
-- `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs, tried in order after `CHAIN_RPC_URL`
+- `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set). For `base-sepolia` and `base` the endpoint must report the preset's chain ID, or the server refuses it; see [Safety behaviour](#safety-behaviour)
+- `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs, tried in order after `CHAIN_RPC_URL`. The same chain ID check applies to each one; see [Safety behaviour](#safety-behaviour)
 - `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set). `CHAIN_CONTRACT_ADDRESS` is accepted too; `CHAIN_CONTRACT` wins if both are set
 - `CHAIN_EXPLORER_URL`: Custom block explorer URL (uses chain preset if not set)
 - `CHAIN_GAS_LIMIT`: Explicit gas limit for chain transactions (skips estimation if set)
@@ -156,7 +156,7 @@ ignored, the server logs a warning at start-up.
 - `CHAIN_SESSION_BUDGET_ETH`: Worst-case spend allowed per server session; each transaction reserves `gas limit x max fee` plus the L1 data fee allowance, and is charged its actual cost (L2 gas plus the receipt's `l1Fee` on Base) once mined (default: `0.002` on mainnet, `0.05` on testnets)
 - `CHAIN_L1_FEE_ALLOWANCE_ETH`: L1 data fee reserved per transaction on top of L2 gas (default: `0.000001`, about 100x the ~1e-8 ETH measured on Base mainnet on 2026-10-21; L2 gas there was 1e-6 to 3e-5 ETH per transaction)
 - `CHAIN_MAX_TX_PER_SESSION`: Chain transactions allowed per server session (default: `20` on mainnet, `500` on testnets)
-- `CHAIN_REQUIRE_CONFIRM`: Require a confirmed quote on gas-spending tools. Without `confirm: true` and a matching `quote_id` they send nothing and return a quote of the exact action (arguments, fee cap, remaining budget) with a `quote_id`: an HMAC over the tool and its validated arguments under a per-process key, single use, valid 10 minutes (default: mainnet only — any chain id other than 84532, 11155111, 31337 or 1337 counts as mainnet)
+- `CHAIN_REQUIRE_CONFIRM`: Require a confirmed quote on gas-spending tools. Without `confirm: true` and a matching `quote_id` they send nothing and return a quote of the exact action (arguments, fee cap, remaining budget) with a `quote_id`: an HMAC over the tool and its validated arguments under a per-process key, single use, valid 10 minutes (default: mainnet only — any chain id other than 84532, 11155111, 31337 or 1337 counts as mainnet). See [Safety behaviour](#safety-behaviour)
 - `MAX_STAMP_DURATION_HOURS`: Maximum `duration_hours` for `purchase_stamp` / `extend_stamp` (default: `8760`)
 
 When chain is enabled, additional tools become available: `chain_balance`, `chain_health`, `anchor_hash`, `verify_hash`, `get_provenance`, `record_transform`, `record_merge_transform`, `get_provenance_chain`, `set_storage_ref`, `lookup_by_storage_ref`. Blockchain dependencies (web3, eth-account) are included in the default install. Read-only tools (`verify_hash`, `get_provenance`, `get_provenance_chain`, `lookup_by_storage_ref`, `chain_health`) work without a wallet key; write tools (`anchor_hash`, `record_transform`, `record_merge_transform`, `set_storage_ref`) and `chain_balance` require `PROVENANCE_WALLET_KEY` with a funded wallet.
@@ -210,8 +210,8 @@ Purchase a new postage stamp.
 **Parameters:**
 - `duration_hours` (int): Duration in hours, minimum 24 (optional, uses default if not provided)
 - `size` (string): Stamp size — `"small"`, `"medium"`, or `"large"` (optional, uses default if not provided)
-- `depth` (int): Explicit depth override, bypasses size (optional, advanced use only)
-- `label` (string): Optional label for the stamp
+- `depth` (int): Explicit depth override, 17–22, bypasses size (optional, advanced use only)
+- `label` (string): Optional label for the stamp, at most 100 characters. If you omit it, the server generates a label of the form `mcp-<hex>` so you can find the batch in `list_stamps` if the response is lost
 
 **Example:**
 ```json
@@ -279,6 +279,7 @@ Upload data to the Swarm network with stamp validation.
 - `data` (string): Data content to upload (max 4096 bytes)
 - `stamp_id` (string): Postage stamp ID to use for upload
 - `content_type` (string): MIME type of the content (optional, default: "application/json")
+- `sign` (string): Signing method (optional). The only accepted value is `"notary"`, which sends `sign=notary` to the gateway so it signs the data at upload time. Call `get_notary_info` first to check that signing is available. Omit it for an unsigned upload. Any other value returns a validation error
 
 **Example:**
 ```json
@@ -297,6 +298,12 @@ Download data from the Swarm network using a reference hash.
 
 **Parameters:**
 - `reference` (string): Swarm reference hash of the data to download
+
+**Result:** For text and JSON content, the result has two content blocks. Read both:
+1. A summary with the size, the SHA-256 of the original bytes, and the `_next` hints.
+2. The content, fenced as untrusted data. Control and bidirectional characters are escaped and the content is cut at about 16 KB, so this view is not byte-exact.
+
+A client that reads only the first block gets the summary, not the payload. Binary (non-UTF-8) content returns a single block that gives the size and SHA-256 and does not include the bytes. See [Safety behaviour](#safety-behaviour).
 
 **Example:**
 ```json
@@ -351,7 +358,7 @@ Check whether the notary signing service is enabled and available on the gateway
 ```
 
 #### `health_check`
-Check gateway and Swarm network connectivity status. Returns an adaptive status including stamp availability, a `ready` flag indicating whether uploads can proceed, and recommendations for next steps.
+Check gateway and Swarm network connectivity status. Returns an adaptive status including stamp availability, a `ready` flag indicating whether uploads can proceed, and recommendations for next steps. `ready` is `false` when the gateway's Bee node reports no network (for example no connected peers), even if usable stamps exist. The output includes a `Swarm network:` line with the Bee node state.
 
 **Parameters:** None
 
@@ -396,7 +403,9 @@ Register a Swarm reference hash on the blockchain, creating an immutable provena
 - `swarm_hash` (string, required): 64-character hex Swarm reference hash to anchor
 - `data_type` (string): Data type/category (default: `swarm-provenance`, max 64 chars)
 - `owner` (string): Ethereum address to register as owner (defaults to wallet address; requires delegate authorization for other addresses)
-- `storage_ref` (string): Optional 64-character hex storage reference to link bidirectionally. Enables reverse lookup via `lookup_by_storage_ref`
+- `storage_ref` (string): Optional 64-character hex storage reference to link bidirectionally. Enables reverse lookup via `lookup_by_storage_ref`. Cannot be combined with `owner`
+- `confirm` (boolean): Set to `true`, together with `quote_id`, to send the transaction. See [Safety behaviour](#safety-behaviour)
+- `quote_id` (string): The `quote_id` from the quote for exactly these arguments (single use, valid for 10 minutes)
 
 **Example:**
 ```json
@@ -448,7 +457,9 @@ Record a data transformation on-chain, linking the original data to its transfor
 - `original_hash` (string, required): 64-character hex Swarm reference of the original data (must be already anchored)
 - `new_hash` (string, required): 64-character hex Swarm reference of the transformed data
 - `description` (string): Description of the transformation (max 256 chars, e.g., "Anonymized PII")
-- `restrict_original` (boolean): If true, set the original data status to RESTRICTED after recording the transformation (default: false)
+- `restrict_original` (boolean): If true, set the original data status to RESTRICTED after recording the transformation (default: false). This sends two transactions, and a quote covers both
+- `confirm` (boolean): Set to `true`, together with `quote_id`, to send the transaction. See [Safety behaviour](#safety-behaviour)
+- `quote_id` (string): The `quote_id` from the quote for exactly these arguments (single use, valid for 10 minutes)
 
 **Example:**
 ```json
@@ -471,6 +482,8 @@ Record an N-to-1 merge transformation on-chain, combining multiple source hashes
 - `new_hash` (string, required): 64-character hex Swarm reference of the merged result
 - `description` (string): Description of the merge transformation (max 256 chars)
 - `new_data_type` (string): Data type for the merged result (default: `"merged"`, max 64 chars)
+- `confirm` (boolean): Set to `true`, together with `quote_id`, to send the transaction. See [Safety behaviour](#safety-behaviour)
+- `quote_id` (string): The `quote_id` from the quote for exactly these arguments (single use, valid for 10 minutes)
 
 **Example:**
 ```json
@@ -489,7 +502,7 @@ Record an N-to-1 merge transformation on-chain, combining multiple source hashes
 ```
 
 #### `get_provenance_chain` *(optional — requires `CHAIN_ENABLED=true`)*
-Follow the transformation lineage for a Swarm hash. On v2 contracts, uses state reads for fast traversal; on v1 contracts, walks through event logs. Shows how data evolved — from original to each derived version. Read-only — no gas or wallet key required.
+Follow the transformation lineage for a Swarm hash. On v2 contracts, uses state reads for fast traversal; on v1 contracts, walks through event logs. Shows how data evolved — from original to each derived version. Read-only — no gas or wallet key required. If every configured RPC endpoint is unavailable or rate-limits the event-log queries that v1 traversal needs, the tool returns a retryable error instead of a partial lineage.
 
 **Parameters:**
 - `swarm_hash` (string, required): 64-character hex Swarm reference hash to trace lineage for
@@ -512,6 +525,8 @@ Attach a Swarm storage reference to an existing on-chain record. Set-once: canno
 **Parameters:**
 - `data_hash` (string, required): 64-character hex data hash of the existing on-chain record
 - `storage_ref` (string, required): 64-character hex storage reference to link (e.g. Swarm reference)
+- `confirm` (boolean): Set to `true`, together with `quote_id`, to send the transaction. See [Safety behaviour](#safety-behaviour)
+- `quote_id` (string): The `quote_id` from the quote for exactly these arguments (single use, valid for 10 minutes)
 
 **Example:**
 ```json
@@ -577,6 +592,40 @@ _recommendations:                # Actionable suggestions (only when issues exis
   - No stamps found — purchase one before uploading
 _gateway: <url> (connected|unreachable)
 ```
+
+The output also has a `Swarm network:` line: `connected (...)`, `DEGRADED (...)`, or `not reported by gateway`. When it is `DEGRADED`, `ready` is `false` even if stamps are usable, because uploads may not propagate.
+
+### Safety behaviour
+
+These behaviours apply when `CHAIN_ENABLED=true` unless noted.
+
+#### Confirmed quotes for spending tools
+
+`anchor_hash`, `record_transform`, `record_merge_transform` and `set_storage_ref` accept `confirm` and `quote_id`. A confirmed quote is required on mainnet (any chain ID other than 84532, 11155111, 31337 or 1337), or on any chain when `CHAIN_REQUIRE_CONFIRM=true`. `CHAIN_REQUIRE_CONFIRM=false` turns it off. On the testnet default it is off. When confirmation is off, there is no quote step: `confirm` and `quote_id` are ignored and an ordinary call sends the transaction directly.
+
+When confirmation is required:
+
+1. Call the tool with its normal arguments. The server sends no transaction and returns a quote: the action, the number of transactions, the fee cap, the current fee, the remaining session budget, and a `quote_id`.
+2. Get the user's approval.
+3. Call the tool again with the same arguments, `confirm: true`, and the `quote_id`.
+
+A `quote_id` is valid for 10 minutes, works once, and works only for the tool and arguments it was issued for. Hash and address values are compared without regard to letter case. It is valid only in the server process that issued it, so a restart invalidates it. If `confirm` is `true` but the `quote_id` is missing, expired, used or for different arguments, the server sends nothing and returns a new quote. This no-send behavior applies only when confirmation is required.
+
+#### Untrusted content
+
+Text that anyone can write is treated as data, not instructions: `download_data` content, stamp labels, and on-chain data types and transformation descriptions. Multi-line content, such as a download, is placed in a fenced block with a warning, escaped, and capped at 16 KB. Single-line fields are quoted and capped at 200 characters. Lines in this content that look like server hints are marked as quoted. On-chain lists (transformations, accessors) show at most 50 entries.
+
+#### RPC address redaction
+
+An RPC URL can carry an API key in its path or query. Chain tool results show the configured RPC URLs as scheme, host and port only. In server logs, RPC URLs in error text are cut the same way: credentials, path and query are removed and scheme, host and port are kept. Connection labels in log messages show the host only. Other URLs, such as faucet, explorer and gateway links, are not changed.
+
+#### Chain ID pinning
+
+For `CHAIN_NAME=base-sepolia` and `CHAIN_NAME=base`, the chain ID is fixed by the preset and never taken from the RPC. At start-up the server checks the primary RPC. If it reports another chain, the server refuses to start. Your MCP client may then show only a generic message such as "server disconnected"; the reason is in the server's stderr log. Each endpoint, including each `CHAIN_RPC_URLS` fallback, is also checked before its first read, and a write checks the chain ID again before signing. If every fallback is on the wrong chain, the tool returns a chain ID mismatch error. Only `CHAIN_NAME=localhost` with a custom RPC detects the chain ID from the RPC. Fix `CHAIN_RPC_URL`, `CHAIN_RPC_URLS` or `CHAIN_NAME` so they match.
+
+#### Contract check
+
+Before the first write, the server checks that `CHAIN_CONTRACT` (or the preset address) holds DataProvenance contract code. If every endpoint that answers reports no code, the write tools are disabled and report the reason, `health_check` and `chain_health` report it too, and the server checks again before each write. Read-only tools are not disabled by this write check and can still be called. They use the same configured contract, so they can return their own RPC or contract-read errors. If no RPC answers in time, the check runs again before the first transaction.
 
 ### MCP Prompts
 

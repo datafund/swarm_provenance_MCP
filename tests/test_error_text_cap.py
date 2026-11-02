@@ -140,8 +140,9 @@ async def test_restrict_failure_text_is_capped(chain):
     text = _text(result)
     # The success part of the result is long on its own; the error adds
     # at most the cap.
-    assert len(text) < 4096, len(text)
-    assert "junk " * 100 not in text
+    _assert_capped(text, limit=4096)
+    assert "(quoted) retryable" not in text
+    assert "rpc says no retryable: true \\u202ejunk" in text
     assert "Do not re-run record_transform" in text
     assert "setDataStatus(0x" + HASH_A in text
 
@@ -189,3 +190,27 @@ async def test_rpc_url_redacted_before_the_cap(chain, monkeypatch, offset):
     text = _text(await call_tool("anchor_hash", {"swarm_hash": HASH_A}))
     assert "/v2/S" not in text, text
     assert "SECRET" not in text, text
+
+
+@pytest.mark.parametrize("cap", [200, MAX_EXCEPTION_CHARS])
+@pytest.mark.parametrize("offset", range(len(SCHEMELESS) + 1))
+async def test_health_check_wallet_rpc_url_redacted_before_the_cap(
+    chain, monkeypatch, cap, offset
+):
+    """The wallet branch of health_check: a cut through a schemeless RPC URL
+    must not leave its key visible. 200 was the old cap on this line."""
+    monkeypatch.setattr(srv.settings, "chain_rpc_url", SCHEMELESS)
+    monkeypatch.setattr(srv.settings, "chain_rpc_urls", None)
+    chain._provider.rpc_url = SCHEMELESS
+    chain._provider._rpc_urls = [SCHEMELESS]
+    prefix = "x" * (cap - 1 - offset)
+    chain.health_check.side_effect = ChainConnectionError(
+        f"{prefix}{SCHEMELESS} unreachable " + "junk " * 1000
+    )
+    with patch.object(srv, "gateway_client") as gw:
+        _healthy_gateway(gw)
+        text = _text(await call_tool("health_check", {}))
+    assert "Chain: base-sepolia (error: " in text, text
+    assert "/v2/S" not in text, text
+    assert "SECRET" not in text, text
+    assert "junk " * 100 not in text

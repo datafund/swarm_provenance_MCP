@@ -621,6 +621,17 @@ def _format_error(
     return lines
 
 
+def _mask_rpc_text(value: Any, urls: List[str], *, all_urls: bool = False) -> str:
+    """``str(value)`` with the RPC URLs in ``urls`` cut to scheme, host and port.
+
+    Literal URLs are masked first: one without a scheme matches no URL
+    pattern. With ``all_urls``, every URL is cut, not only those on an RPC
+    host (used for logs).
+    """
+    hosts = None if all_urls else {rpc_host(u) for u in urls} - {""}
+    return redact_urls(mask_literal_urls(value, urls), hosts)
+
+
 def _exc_text(e: Any) -> str:
     """Exception text for a tool result: RPC URLs masked, one line, capped.
 
@@ -628,10 +639,7 @@ def _exc_text(e: Any) -> str:
     masked before the cap, so a cut cannot leave part of a key that the
     later redaction of the whole result no longer recognizes.
     """
-    urls = _rpc_urls()
-    hosts = {rpc_host(u) for u in urls} - {""}
-    text = redact_urls(mask_literal_urls(e, urls), hosts) if urls else str(e)
-    return one_line(text, MAX_EXCEPTION_CHARS)
+    return one_line(_mask_rpc_text(e, _rpc_urls()), MAX_EXCEPTION_CHARS)
 
 
 def _may_be_pending(e: Exception) -> bool:
@@ -1193,11 +1201,9 @@ def _redact_rpc_urls(result: CallToolResult) -> CallToolResult:
     urls = _rpc_urls()
     if not urls or not isinstance(result, CallToolResult):
         return result
-    hosts = {rpc_host(u) for u in urls} - {""}
     for item in result.content:
         if isinstance(item, TextContent):
-            # Literal URLs first: one without a scheme matches no URL pattern.
-            item.text = redact_urls(mask_literal_urls(item.text, urls), hosts)
+            item.text = _mask_rpc_text(item.text, urls)
     return result
 
 
@@ -1899,8 +1905,8 @@ def create_server() -> Server:
             logger.error(
                 "Error in tool %s: %s\n%s",
                 name,
-                redact_urls(mask_literal_urls(e, urls)),
-                redact_urls(mask_literal_urls(trace, urls)),
+                _mask_rpc_text(e, urls, all_urls=True),
+                _mask_rpc_text(trace, urls, all_urls=True),
             )
             retryable = _is_retryable_error(e)
             return CallToolResult(
@@ -2993,7 +2999,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
 
                     response_text += (
                         f"\n\n⛓️  Chain: {settings.chain_name} "
-                        f"(error: {_gw(chain_err, 200)})"
+                        f"(error: {_exc_text(chain_err)})"
                     )
                     response_text += _chain_id_lines(chain_client._provider)
                     recommendations.append(

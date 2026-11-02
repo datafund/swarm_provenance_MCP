@@ -4,5 +4,7 @@ version: 2
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
+    # Feature work merges into development; main is updated by release PRs.
+    target-branch: "development"
     schedule:
       interval: "weekly"

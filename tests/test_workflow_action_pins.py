@@ -128,6 +128,9 @@ def test_dependabot_covers_github_actions():
     assert actions, "dependabot.yml has no github-actions update entry"
     block = actions[0]
     assert re.search(r"""^\s*directory:\s*["']?/["']?\s*$""", block, re.M), "github-actions entry needs directory `/`"
+    assert re.search(r"""^\s*target-branch:\s*["']?development["']?\s*$""", block, re.M), (
+        "github-actions entry needs `target-branch: development`"
+    )
     assert re.search(r"""^\s*interval:\s*["']?(daily|weekly|monthly)["']?\s*$""", block, re.M), (
         "github-actions entry needs a schedule interval"
     )

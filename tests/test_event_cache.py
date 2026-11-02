@@ -417,8 +417,8 @@ class TestDataMergedEventScanning:
         assert ("ee" * 32, "Merged after transform") in forward["aa" * 32]
         assert ("ee" * 32, "Merged after transform") in forward["dd" * 32]
 
-    def test_merge_scan_failure_is_silently_skipped(self):
-        """If merge event scan fails (v1 contract), it should not crash."""
+    def test_merge_scan_failure_fails_build(self):
+        """A failed merge scan fails the build instead of skipping merges (#160)."""
         parent = bytes.fromhex("aa" * 32)
         child = bytes.fromhex("bb" * 32)
 
@@ -429,13 +429,13 @@ class TestDataMergedEventScanning:
         contract.get_all_merge_events.side_effect = Exception("No DataMerged event")
 
         cache = TransformationEventCache()
-        forward, reverse = cache.get_maps(contract, deploy_block=0, current_block=100)
+        with pytest.raises(Exception, match="No DataMerged event"):
+            cache.get_maps(contract, deploy_block=0, current_block=100)
 
-        # Transform entries still work
-        assert "aa" * 32 in forward
-        assert "bb" * 32 in reverse
-        # Cache progressed normally
-        assert cache._last_scanned_block == 100
+        # Nothing was indexed and the cache did not advance
+        assert cache._forward == {}
+        assert cache._reverse == {}
+        assert cache._last_scanned_block is None
 
     def test_incremental_merge_scan(self):
         """Incremental scan should pick up new merge events."""

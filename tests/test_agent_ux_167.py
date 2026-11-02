@@ -379,6 +379,18 @@ class TestGatewayUrlValidation:
 
         assert Settings(swarm_gateway_url=url).swarm_gateway_url == url
 
+    @pytest.mark.parametrize(
+        "raw", [" https://gw.example", "https://gw.example ", "\thttps://gw.example\n"]
+    )
+    def test_surrounding_whitespace_is_stripped(self, raw, monkeypatch):
+        from swarm_provenance_mcp import gateway_client as gc
+        from swarm_provenance_mcp.config import Settings
+
+        s = Settings(swarm_gateway_url=raw)
+        assert s.swarm_gateway_url == "https://gw.example"
+        monkeypatch.setattr(gc, "settings", s)
+        assert gc.SwarmGatewayClient().base_url == "https://gw.example"
+
     def test_plain_http_to_remote_host_warns(self, caplog):
         import logging
 

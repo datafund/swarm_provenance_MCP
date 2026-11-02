@@ -167,6 +167,8 @@ class Settings(BaseSettings):
     @field_validator("swarm_gateway_url")
     @classmethod
     def _check_gateway_url(cls, value: str) -> str:
+        # Stored stripped: a pasted " https://..." must not reach base_url.
+        value = value.strip()
         try:
             parts = urlsplit(value)
             host = parts.hostname

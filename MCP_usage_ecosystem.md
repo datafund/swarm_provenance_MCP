@@ -184,7 +184,7 @@ Prompts are higher-level than individual tools — they describe multi-step work
 ### **Source Documents:**
 1. Journalist uploads source documents and anchors their Swarm references on-chain
 2. Anyone can call `verify_hash` to check that a reference is registered on-chain, with its owner and time
-3. `download_data` reports content as verified only when it is at most 4096 bytes and its single-chunk Swarm address equals the reference. References from `/bzz` uploads, such as those from `upload_data`, name a manifest and are reported as not checked. Checking those needs a raw chunk endpoint on the gateway, tracked in [datafund/swarm_connect#499](https://github.com/datafund/swarm_connect/issues/499)
+3. `download_data` reports content as verified only when it is at most 4096 bytes and its single-chunk Swarm address equals the reference. References from `/bzz` uploads name a manifest; references from `upload_data` most likely do too, so they are usually reported as not checked. Checking those needs a raw chunk endpoint on the gateway, tracked in [datafund/swarm_connect#499](https://github.com/datafund/swarm_connect/issues/499)
 4. Fact-checkers compare the downloaded documents with the on-chain record
 
 ### **Development Pipeline:**

@@ -47,6 +47,16 @@ MESSAGES = [
 ]
 
 
+def _skills_text(reply):
+    """Text of the first content in a resources/read reply, or "" when the
+    reply does not have that shape."""
+    result = reply.get("result") if isinstance(reply, dict) else None
+    contents = result.get("contents") if isinstance(result, dict) else None
+    first = contents[0] if isinstance(contents, list) and contents else None
+    text = first.get("text") if isinstance(first, dict) else None
+    return text if isinstance(text, str) else ""
+
+
 def _send(proc, message):
     proc.stdin.write(json.dumps(message) + "\n")
     proc.stdin.flush()
@@ -141,8 +151,7 @@ def run_smoke(cmd, timeout=120):
     missing = CORE_TOOLS - names
     if missing:
         return fail(f"tools/list is missing {sorted(missing)}")
-    contents = (skills or {}).get("result", {}).get("contents") or [{}]
-    text = contents[0].get("text") or ""
+    text = _skills_text(skills)
     if not text or text.startswith(SKILLS_FALLBACK):
         return fail("provenance://skills did not return the packaged SKILLS.md")
     finish()

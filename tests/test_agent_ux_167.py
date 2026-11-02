@@ -782,3 +782,70 @@ class TestSchemaExamplesMatchPatterns:
         for key, value in found:
             allowed = (64, 128) if key == "reference" else (64,)
             assert len(value) in allowed, (key, value)
+
+
+_FAKE_SERVER = r'''
+import json, sys
+SKILLS = json.loads(sys.argv[1])
+for line in sys.stdin:
+    msg = json.loads(line)
+    mid = msg.get("id")
+    if mid == 1:
+        out = {"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {"name": "fake"}}}
+    elif mid == 2:
+        tools = [{"name": n} for n in
+                 ("health_check", "purchase_stamp", "upload_data", "download_data")]
+        out = {"jsonrpc": "2.0", "id": 2, "result": {"tools": tools}}
+    elif mid == 3:
+        out = {"jsonrpc": "2.0", "id": 3}
+        out.update(SKILLS)
+    else:
+        continue
+    sys.stdout.write(json.dumps(out) + "\n")
+    sys.stdout.flush()
+'''
+
+_MALFORMED_SKILLS_REPLIES = [
+    {"result": "junk"},
+    {"result": {"contents": "junk"}},
+    {"result": {"contents": ["junk"]}},
+    {"result": {"contents": [{"text": 5}]}},
+    {"result": {"contents": []}},
+    {"result": None},
+    {"error": {"code": -32602, "message": "Unknown resource"}},
+]
+
+
+class TestSmokeScriptMalformedSkills:
+    def _smoke(self):
+        import sys
+
+        sys.path.insert(0, str(Path(REPO_ROOT) / "scripts"))
+        try:
+            import mcp_stdio_smoke
+        finally:
+            sys.path.pop(0)
+        return mcp_stdio_smoke
+
+    @pytest.mark.parametrize("reply", _MALFORMED_SKILLS_REPLIES)
+    def test_malformed_reply_fails_cleanly(self, reply):
+        import json
+        import sys
+
+        smoke = self._smoke()
+        ok, message = smoke.run_smoke(
+            [sys.executable, "-c", _FAKE_SERVER, json.dumps(reply)], timeout=30
+        )
+        assert ok is False
+        assert "provenance://skills" in message
+
+    def test_good_reply_passes(self):
+        import json
+        import sys
+
+        smoke = self._smoke()
+        reply = {"result": {"contents": [{"text": "# Skills\n" * 20}]}}
+        ok, message = smoke.run_smoke(
+            [sys.executable, "-c", _FAKE_SERVER, json.dumps(reply)], timeout=30
+        )
+        assert ok, message

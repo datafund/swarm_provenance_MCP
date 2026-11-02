@@ -1527,7 +1527,7 @@ def create_server() -> Server:
                     "properties": {
                         "data": {
                             "type": "string",
-                            "description": "Data content to upload as a string (max 4096 bytes). Can be JSON, text, or any string data.",
+                            "description": "Data content to upload as a string (max 4096 bytes). Can be JSON, text, or any string data. With sign=notary, see sign for the required format.",
                             "maxLength": 4096,
                         },
                         "stamp_id": {
@@ -1549,7 +1549,7 @@ def create_server() -> Server:
                                 '"signatures" is optional and must be an array. The gateway adds its signature to it. '
                                 "Plain text or JSON without a \"data\" field fails with 400 INVALID_DOCUMENT_FORMAT. "
                                 "If the notary is off, the gateway returns 400 NOTARY_NOT_ENABLED or NOTARY_NOT_CONFIGURED. "
-                                "The gateway stores the signed document as application/json, so the stored size and content type differ from your input. "
+                                "The stored document is larger than your input, and its content type is always application/json. "
                                 "Omit sign for an unsigned upload."
                             ),
                             "enum": sorted(UPLOAD_SIGN_METHODS),

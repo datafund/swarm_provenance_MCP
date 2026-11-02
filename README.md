@@ -293,7 +293,7 @@ Upload data to the Swarm network with stamp validation.
 ```
 
 **Signing with the notary:** Set `sign` to `"notary"` to have the gateway sign the data at upload time. Call `get_notary_info` first to check that signing is available. With `sign: "notary"`, `data` must be a JSON object with a top-level `data` field, for example `{"data": {...}, "signatures": []}`. The `signatures` field is optional and must be an array. The gateway adds its signature to it. The gateway returns these errors:
-- 400 `INVALID_DOCUMENT_FORMAT` when `data` is not a JSON object with a `data` field.
+- 400 `INVALID_DOCUMENT_FORMAT` when `data` is not valid UTF-8 JSON, is not a JSON object with a `data` field, or has a `signatures` field that is not an array.
 - 400 `NOTARY_NOT_ENABLED` or `NOTARY_NOT_CONFIGURED` when the notary is off.
 
 The gateway stores the signed document as `application/json`, whatever `content_type` you send. The result reports the input size as "before signing", because the stored document is larger.

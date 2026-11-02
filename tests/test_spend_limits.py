@@ -113,6 +113,47 @@ class TestDefaults:
         assert not guard.mainnet
         assert guard.max_txs == TESTNET_DEFAULTS.max_txs
 
+    @pytest.mark.parametrize("chain_id", [84532, 11155111, 31337, 1337])
+    def test_testnet_ids_get_testnet_limits(self, chain_id):
+        guard = SpendGuard(chain_id)
+        assert not guard.mainnet
+        assert guard.max_fee_wei == int(TESTNET_DEFAULTS.max_fee_gwei * GWEI)
+        assert guard.budget_wei == int(TESTNET_DEFAULTS.budget_eth * ETH)
+        assert guard.max_txs == TESTNET_DEFAULTS.max_txs
+
+    @pytest.mark.parametrize("chain_id", [BASE_MAINNET, 999_999])
+    def test_mainnet_ids_get_mainnet_limits(self, chain_id):
+        guard = SpendGuard(chain_id)
+        assert guard.mainnet
+        assert guard.max_fee_wei == int(MAINNET_DEFAULTS.max_fee_gwei * GWEI)
+        assert guard.budget_wei == int(MAINNET_DEFAULTS.budget_eth * ETH)
+        assert guard.max_txs == MAINNET_DEFAULTS.max_txs
+
+    def test_provider_testnet_set_is_exact(self):
+        from swarm_provenance_mcp.chain import provider
+
+        assert provider.TESTNET_CHAIN_IDS == frozenset({84532, 11155111, 31337, 1337})
+
+    def test_testnet_decision_follows_provider_list(self, monkeypatch):
+        # The provider list is the single source: a chain id added there must
+        # get testnet limits without any change to the spending limits.
+        from swarm_provenance_mcp.chain import provider
+
+        monkeypatch.setattr(
+            provider,
+            "TESTNET_CHAIN_IDS",
+            provider.TESTNET_CHAIN_IDS | {BASE_MAINNET},
+        )
+        guard = SpendGuard(BASE_MAINNET)
+        assert not guard.mainnet
+        assert guard.max_txs == TESTNET_DEFAULTS.max_txs
+
+    def test_spend_module_has_no_own_testnet_list(self):
+        from swarm_provenance_mcp.chain import spend
+
+        assert not hasattr(spend, "TESTNET_CHAIN_IDS")
+        assert not hasattr(spend, "is_testnet")
+
     def test_configured_values_override(self):
         guard = SpendGuard(BASE_MAINNET, max_fee_gwei=0.1, budget_eth=0.5, max_txs=3)
         assert guard.max_fee_wei == int(0.1 * GWEI)

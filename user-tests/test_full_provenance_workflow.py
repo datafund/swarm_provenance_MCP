@@ -510,7 +510,9 @@ async def step_wallet_write_workflow(results: List[StepResult], swarm_hash: str)
     text_a1, err_a1 = extract_text(result_a1)
     print_response(text_a1, err_a1)
 
-    if err_a1 and "already registered" not in text_a1.lower():
+    # Already registered by this wallet is a non-error result. An error,
+    # including "already registered by a different owner", fails the step.
+    if err_a1:
         r_anchor.duration_ms = (time.monotonic() - start) * 1000
         r_anchor.response_text = text_a1
         r_anchor.is_error = True

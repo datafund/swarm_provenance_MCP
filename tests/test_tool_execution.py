@@ -830,7 +830,7 @@ class TestStampAccessMode:
 
         text = result.content[0].text
         assert "All stamps are public (shared)" in text
-        assert "dedicated stamps" in text
+        assert "run your own Bee node or gateway" in text
 
     async def test_list_stamps_owned_no_public_hint(self, server):
         """When at least one stamp is owned, do NOT show the public-only hint."""

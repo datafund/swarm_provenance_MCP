@@ -109,7 +109,7 @@ On-chain provenance module. Dependencies (web3, eth-account) included in default
 - `purchase_stamp` - Create new postage stamps (response includes propagation timing)
 - `get_stamp_status` - Retrieve detailed stamp information (includes utilization + propagation data)
 - `list_stamps` - List local stamps with access mode (owned/shared) and propagation status
-  Stamps have `accessMode`: `"owned"` (dedicated, yours) or `"shared"` (public, any gateway user). Use owned stamps for production.
+  Stamps have `accessMode`: `"shared"` (public, any gateway user), `"owned"` (registered to the x402 wallet that paid for it) or `"pool"` (gateway inventory). This server sends no wallet, so the gateway refuses its uploads to `owned` and `pool` stamps; MCP_INSTRUCTIONS, the `stamp-management` prompt and the `list_stamps` hint say so.
 - `extend_stamp` - Extend stamp duration
 - `upload_data` - Upload data to Swarm (max 4KB)
 - `download_data` - Download data from Swarm by reference hash

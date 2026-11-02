@@ -357,9 +357,9 @@ PAYMENT MODEL:
 This server uses the free tier by default (rate limit: 3 write requests/minute, reads unlimited). Paid x402 support is not yet integrated.
 
 STAMP OWNERSHIP:
-- Free tier: purchase_stamp provides public stamps (accessMode: "shared"). Any gateway user can upload to them — utilization is unpredictable. Suitable for testing and small workloads.
-- Own wallet: stamps you purchase are exclusively yours (accessMode: "owned"). You control capacity and TTL. Use owned stamps for production workloads.
-- list_stamps shows both. Prefer owned stamps for important data; public stamps may fill up from other users' uploads.
+- purchase_stamp creates public stamps (accessMode: "shared"). Any gateway user can upload to them, so utilization is unpredictable. Suitable for testing and small workloads.
+- This server sends no wallet, so it can upload only to "shared" stamps and stamps without an access mode. The gateway refuses its uploads to "owned" stamps (registered to the wallet that paid for them) and "pool" stamps (gateway inventory).
+- list_stamps can also show "owned" and "pool" stamps. Do not pick them for upload_data. For capacity that other users cannot fill, run your own Bee node or gateway.
 
 TYPICAL WORKFLOW:
 1. health_check — verify gateway is reachable
@@ -2141,10 +2141,10 @@ def create_server() -> Server:
                             type="text",
                             text=(
                                 "Review my Swarm stamp inventory and recommend actions:\n\n"
-                                "list_stamps shows your owned stamps and public stamps. Stamps with accessMode 'owned' are yours; 'shared' are public stamps usable by any gateway user. If you only have public stamps, recommend purchasing dedicated stamps or running your own node for production use.\n\n"
+                                "list_stamps shows public stamps (accessMode 'shared'), which any gateway user can upload to, and can also show 'owned' and 'pool' stamps. This server sends no wallet, so the gateway refuses its uploads to 'owned' stamps (registered to the wallet that paid for them) and 'pool' stamps (gateway inventory). Only 'shared' stamps and stamps without an access mode are usable here. For production use with predictable capacity, recommend running your own Bee node or gateway.\n\n"
                                 "Steps:\n"
                                 "1. Call list_stamps to see all stamps\n"
-                                "2. For stamps you own, check if usable, utilization, and TTL\n"
+                                "2. For stamps this server can use, check if usable, utilization, and TTL\n"
                                 "3. Call check_stamp_health on any stamp that looks concerning\n"
                                 "4. Recommend actions:\n"
                                 "   - Stamps with high utilization → purchase a new one\n"
@@ -2539,7 +2539,7 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
 
         # Public-only hint: all stamps are shared, none owned
         if stamps and not any(s.get("accessMode") == "owned" for s in stamps):
-            response_text += "\n💡 All stamps are public (shared). For production use with predictable capacity, configure your own wallet for dedicated stamps.\n"
+            response_text += "\n💡 All stamps are public (shared): other gateway users can fill them. For production use with predictable capacity, run your own Bee node or gateway. This server sends no wallet, so it cannot upload to wallet-owned stamps.\n"
 
         # Labels of shared stamps are written by other gateway users.
         if any(isinstance(s, dict) and s.get("label") for s in stamps or []):

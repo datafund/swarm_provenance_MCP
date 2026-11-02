@@ -559,3 +559,54 @@ class TestSkillsResourcePackaged:
         methods = [(m.get("method"), m.get("params")) for m in mcp_stdio_smoke.MESSAGES]
         assert ("resources/read", {"uri": "provenance://skills"}) in methods
         assert mcp_stdio_smoke.SKILLS_FALLBACK == SKILLS_FALLBACK
+
+
+_WRONG_OWNERSHIP_ADVICE = (
+    "exclusively yours",
+    "Prefer owned stamps",
+    "Use owned stamps",
+    "Stamps with accessMode 'owned' are yours",
+    "configure your own wallet",
+    "purchasing dedicated stamps",
+)
+
+
+class TestOwnershipGuidanceMatchesReadiness:
+    """This server sends no wallet, so the gateway refuses its writes to owned
+    and pool stamps. The agent guidance must say so, not recommend them."""
+
+    def test_instructions(self):
+        from swarm_provenance_mcp.server import MCP_INSTRUCTIONS
+
+        for phrase in _WRONG_OWNERSHIP_ADVICE:
+            assert phrase not in MCP_INSTRUCTIONS
+        assert "This server sends no wallet" in MCP_INSTRUCTIONS
+        assert '"owned"' in MCP_INSTRUCTIONS and '"pool"' in MCP_INSTRUCTIONS
+        assert "refuses" in MCP_INSTRUCTIONS
+
+    async def test_stamp_management_prompt(self, server):
+        from mcp.types import GetPromptRequest
+
+        handler = server.request_handlers[GetPromptRequest]
+        result = await handler(
+            GetPromptRequest(
+                method="prompts/get", params={"name": "stamp-management"}
+            )
+        )
+        text = result.root.messages[0].content.text
+        for phrase in _WRONG_OWNERSHIP_ADVICE + ("For stamps you own",):
+            assert phrase not in text
+        assert "This server sends no wallet" in text
+
+    async def test_list_stamps_public_hint(self, server):
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.list_stamps.return_value = {
+                "stamps": [_stamp("shared")],
+                "total_count": 1,
+            }
+            result = await call_tool_directly(server, "list_stamps", {})
+        text = result.content[0].text
+        assert "All stamps are public (shared)" in text
+        for phrase in _WRONG_OWNERSHIP_ADVICE:
+            assert phrase not in text
+        assert "run your own Bee node or gateway" in text

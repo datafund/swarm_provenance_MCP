@@ -885,14 +885,27 @@ class DataProvenanceContract:
     # allows ~10k blocks).  We chunk large lookbacks into windows of
     # this size so that the default 50k lookback works reliably.
     _EVENT_CHUNK_SIZE = 10_000
+    # Smallest window a chunk is split down to after payload errors.
+    _EVENT_MIN_CHUNK_SIZE = 1
+
+    @staticmethod
+    def _is_payload_too_large(exc: Exception) -> bool:
+        """Return True for a 413 or "payload too large" RPC error."""
+        err_str = str(exc).lower()
+        return "413" in err_str or "payload" in err_str or "too large" in err_str
 
     def _get_logs_chunked(self, event, argument_filters, from_block, to_block):
         """
         Query event logs in chunks to avoid RPC payload limits.
 
         Splits the range [from_block, to_block] into windows of
-        ``_EVENT_CHUNK_SIZE`` and concatenates results.  On 413/payload
-        errors the failing chunk is halved once before giving up.
+        ``_EVENT_CHUNK_SIZE`` and concatenates results in block order.
+        When a window fails with a 413 or payload error, it is split in
+        half, and each half is split again on the same error, down to
+        ``_EVENT_MIN_CHUNK_SIZE`` blocks.  Each chunk starts again at the
+        full window size.  If a window of the minimum size still fails,
+        the original error is raised, so the scan never returns a partial
+        range.  Other errors are raised at once, without a retry.
 
         ``argument_filters`` may be ``None`` to fetch all events of the
         given type (unfiltered scan).
@@ -910,22 +923,21 @@ class DataProvenanceContract:
 
         while start <= to_block:
             end = min(start + self._EVENT_CHUNK_SIZE - 1, to_block)
-            try:
-                all_events.extend(_get(start, end))
-            except Exception as e:
-                err_str = str(e).lower()
-                if "413" in err_str or "payload" in err_str or "too large" in err_str:
-                    # Halve the chunk and retry once
-                    mid = (start + end) // 2
-                    if mid == start:
+            # Depth-first over sub-ranges, lowest blocks first, so the
+            # results stay in block order.
+            pending = [(start, end)]
+            while pending:
+                fb, tb = pending.pop()
+                try:
+                    all_events.extend(_get(fb, tb))
+                except Exception as e:
+                    if not self._is_payload_too_large(e):
+                        raise
+                    if tb - fb + 1 <= self._EVENT_MIN_CHUNK_SIZE:
                         raise  # Can't split further
-                    try:
-                        all_events.extend(_get(start, mid))
-                        all_events.extend(_get(mid + 1, end))
-                    except Exception:
-                        raise  # Give up on this chunk
-                else:
-                    raise
+                    mid = (fb + tb) // 2
+                    pending.append((mid + 1, tb))
+                    pending.append((fb, mid))
             start = end + 1
         return all_events
 
@@ -1048,24 +1060,27 @@ class DataProvenanceContract:
 
         Returns:
             List of event objects with args: newDataHash, sourceDataHashes,
-            transformation, newDataType.  Returns empty list if the
-            contract does not emit DataMerged events.
+            transformation, newDataType.  Returns an empty list only when
+            the contract ABI has no DataMerged event.  A v1 contract
+            simply has no DataMerged logs, so the scan returns no events.
+
+        Raises:
+            Exception: Any scan error, including a transport error or a
+                413 that persists at the minimum chunk size.  A failed
+                scan is not treated as "no merges".
         """
-        latest = to_block if to_block is not None else self._web3.eth.block_number
-        try:
-            return self._get_logs_chunked(
-                self._contract.events.DataMerged,
-                None,
-                from_block,
-                latest,
-            )
-        except Exception as e:
-            # An unavailable endpoint is not "no merges": let it propagate so
-            # the caller fails over and the event cache is not advanced.
-            if is_transport_error(e):
-                raise
-            # Contract may not have DataMerged event (v1)
+        if not any(
+            entry.get("type") == "event" and entry.get("name") == "DataMerged"
+            for entry in self._abi
+        ):
             return []
+        latest = to_block if to_block is not None else self._web3.eth.block_number
+        return self._get_logs_chunked(
+            self._contract.events.DataMerged,
+            None,
+            from_block,
+            latest,
+        )
 
     # --- Deployment and receipt checks ---
 

@@ -1,0 +1,10 @@
+# Keeps the commit-SHA pins in .github/workflows/ up to date.
+# Dependabot updates the SHA and the trailing version comment together.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    # Feature work merges into development; main is updated by release PRs.
+    target-branch: "development"
+    schedule:
+      interval: "weekly"

@@ -58,8 +58,9 @@ class TransformationEventCache:
 
         Raises:
             Exception: Propagated from contract.get_all_transformations()
-                on scan failure. Caller should catch and fall back to
-                per-node event queries.
+                or contract.get_all_merge_events() on scan failure. The
+                cache is left unchanged. Caller should catch and fall back
+                to per-node event queries.
         """
         with self._lock:
             if self._last_scanned_block is None:
@@ -77,23 +78,12 @@ class TransformationEventCache:
                 from_block=from_block,
                 to_block=current_block,
             )
-            try:
-                # DataMerged exists on v2+ contracts only.
-                merge_events = contract.get_all_merge_events(
-                    from_block=from_block,
-                    to_block=current_block,
-                )
-            except Exception as e:
-                # An unavailable endpoint must not advance _last_scanned_block
-                # past merges; a v1 contract without the event is skipped.
-                from .provider import is_transport_error
-
-                if is_transport_error(e):
-                    raise
-                from ..redact import redact_urls
-
-                logger.debug("DataMerged event scan skipped: %s", redact_urls(e))
-                merge_events = []
+            # Any merge-scan failure fails the build: skipping it would
+            # advance _last_scanned_block past merges that were never read.
+            merge_events = contract.get_all_merge_events(
+                from_block=from_block,
+                to_block=current_block,
+            )
 
             for orig_bytes, new_bytes, desc in events:
                 orig_hex = (

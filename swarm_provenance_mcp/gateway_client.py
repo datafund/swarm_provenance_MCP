@@ -8,6 +8,7 @@ import requests
 from requests.exceptions import RequestException
 
 from .config import settings
+from .redact import url_without_userinfo
 from .untrusted import MAX_ERROR_DETAIL_CHARS, flatten, one_line
 
 # Longest gateway string value passed on to the server, in characters.
@@ -403,7 +404,8 @@ class SwarmGatewayClient:
         health_data = _json(response) if response.content else {}
         return {
             "status": "healthy",
-            "gateway_url": self.base_url,
+            # Printed by health_check: no user:password from the URL.
+            "gateway_url": url_without_userinfo(self.base_url),
             "response_time_ms": response.elapsed.total_seconds() * 1000,
             "gateway_response": health_data,
         }

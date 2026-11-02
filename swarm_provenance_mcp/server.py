@@ -33,7 +33,7 @@ from requests.exceptions import RequestException
 
 from .config import WALLET_KEY_HINT, is_plain_http_remote, settings
 from .gateway_client import PaymentRequiredError, SwarmGatewayClient
-from .redact import mask_literal_urls, redact_urls, rpc_host
+from .redact import mask_literal_urls, redact_urls, rpc_host, url_without_userinfo
 from .untrusted import (
     QUOTED_NOTE,
     defang_hint_lines,
@@ -3279,7 +3279,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
     except RequestException as e:
-        gateway_url = settings.swarm_gateway_url
+        gateway_url = url_without_userinfo(settings.swarm_gateway_url)
         error_msg = f"❌ Connection failed!\n\n"
         error_msg += f"Error: {str(e)}\n"
         error_msg += f"Gateway: {gateway_url}\n\n"
@@ -5072,7 +5072,9 @@ async def main():
             logger.info(
                 f"Starting {settings.mcp_server_name} v{settings.mcp_server_version}"
             )
-            logger.info(f"Gateway URL: {settings.swarm_gateway_url}")
+            logger.info(
+                "Gateway URL: %s", url_without_userinfo(settings.swarm_gateway_url)
+            )
             if settings.chain_enabled:
                 if chain_client:
                     logger.info("Chain: %s (wallet connected)", chain_client.chain)

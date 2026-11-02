@@ -1147,3 +1147,68 @@ class TestNotFoundAndUnreadableStamps:
         nxt, text = await self._health(server, self._stamp("not_found", **extra))
         assert nxt == ["_next: purchase_stamp"], age
         assert "cannot become usable" in text
+
+
+_CRED_URL = "https://user:hunter2@gw.example:8443/base?key=abc#frag"
+
+
+class TestGatewayUrlCredentialsNotShown:
+    def test_display_helper(self):
+        from swarm_provenance_mcp.redact import url_without_userinfo
+
+        assert url_without_userinfo(_CRED_URL) == "https://gw.example:8443/base"
+        assert url_without_userinfo("http://[::1]:9/") == "http://[::1]:9/"
+        assert url_without_userinfo("https://gw.example") == "https://gw.example"
+        assert url_without_userinfo("not a url") == "<gateway>"
+
+    async def test_startup_log_has_no_credentials(self, monkeypatch, caplog):
+        import contextlib
+        import logging
+        from unittest.mock import AsyncMock, MagicMock
+
+        from swarm_provenance_mcp import server as srv
+
+        @contextlib.asynccontextmanager
+        async def fake_stdio():
+            yield (None, None)
+
+        fake_server = MagicMock()
+        fake_server.run = AsyncMock()
+        monkeypatch.setattr(srv, "stdio_server", fake_stdio)
+        monkeypatch.setattr(srv, "create_server", lambda: fake_server)
+        monkeypatch.setattr(srv.settings, "swarm_gateway_url", _CRED_URL)
+        monkeypatch.setattr(srv.settings, "chain_enabled", False)
+        with caplog.at_level(logging.INFO, logger=srv.logger.name):
+            await srv.main()
+        assert "Gateway URL: https://gw.example:8443/base" in caplog.text
+        assert "hunter2" not in caplog.text
+        assert "user:" not in caplog.text
+        assert "key=abc" not in caplog.text
+
+    async def test_health_check_output_has_no_credentials(self, server, monkeypatch):
+        import requests_mock
+
+        from swarm_provenance_mcp import gateway_client as gc
+
+        client = gc.SwarmGatewayClient(base_url=_CRED_URL.split("?")[0])
+        with requests_mock.Mocker() as m, patch(
+            "swarm_provenance_mcp.server.gateway_client", client
+        ):
+            m.get(requests_mock.ANY, json={"status": "ok"})
+            result = await call_tool_directly(server, "health_check", {})
+        text = result.content[0].text
+        assert "hunter2" not in text
+        assert "gw.example:8443/base" in text
+
+    async def test_health_check_error_has_no_credentials(self, server, monkeypatch):
+        from requests.exceptions import ConnectionError as RequestsConnectionError
+
+        from swarm_provenance_mcp import server as srv
+
+        monkeypatch.setattr(srv.settings, "swarm_gateway_url", _CRED_URL)
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.health_check.side_effect = RequestsConnectionError("down")
+            result = await call_tool_directly(server, "health_check", {})
+        text = result.content[0].text
+        assert "hunter2" not in text
+        assert "gw.example:8443/base" in text

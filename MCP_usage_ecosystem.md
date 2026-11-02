@@ -62,12 +62,12 @@ await mcpClient.call('upload_data', {
 ## 🔗 Specific Use Cases for Our Swarm Provenance MCP
 
 ### **Content Creators:**
-- **Journalists** - Verify source documents and maintain attribution chains
+- **Journalists** - Record when source documents were stored and maintain attribution chains
 - **Researchers** - Track data lineage and ensure reproducibility
 - **Artists** - Prove authenticity and ownership of digital works
 
 ### **Organizations:**
-- **Legal Firms** - Maintain tamper-proof evidence chains
+- **Legal Firms** - Record on-chain when evidence was stored and how it was derived
 - **Healthcare** - Patient data with verified provenance
 - **Financial Services** - Transaction records with immutable trails
 - **Government** - Public records with transparency guarantees
@@ -167,7 +167,7 @@ The server registers prompts that agents can invoke via `prompts/list` and `prom
 
 | Prompt | Use case | Arguments |
 |--------|----------|-----------|
-| `provenance-upload` | Full upload workflow: health check → stamp → upload → verify | `data`, `content_type` |
+| `provenance-upload` | Full upload workflow: health check → stamp → upload → download to confirm | `data`, `content_type` |
 | `provenance-verify` | Download and inspect existing data by reference | `reference` |
 | `stamp-management` | Review inventory, diagnose issues, extend or purchase | none |
 
@@ -178,14 +178,14 @@ Prompts are higher-level than individual tools — they describe multi-step work
 ### **Research Workflow:**
 1. AI agent purchases stamp for data storage
 2. Uploads research dataset with metadata
-3. Shares Swarm reference for peer verification
+3. Shares the Swarm reference so peers can retrieve the dataset and look up its on-chain record
 4. Maintains immutable record of data provenance
 
-### **Content Verification:**
-1. Journalist uploads source documents
-2. AI verifies document integrity over time
-3. Provides tamper-proof evidence chains
-4. Enables transparent fact-checking processes
+### **Source Documents:**
+1. Journalist uploads source documents and anchors their Swarm references on-chain
+2. Anyone can call `verify_hash` to check that a reference is registered on-chain, with its owner and time
+3. `download_data` reports content as verified only when it is at most 4096 bytes and its single-chunk Swarm address equals the reference. References from `/bzz` uploads, such as those from `upload_data`, name a manifest and are reported as not checked. Checking those needs a raw chunk endpoint on the gateway, tracked in [datafund/swarm_connect#499](https://github.com/datafund/swarm_connect/issues/499)
+4. Fact-checkers compare the downloaded documents with the on-chain record
 
 ### **Development Pipeline:**
 1. CI/CD system stores build artifacts

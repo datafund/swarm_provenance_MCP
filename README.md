@@ -22,7 +22,7 @@ This MCP server provides tools for AI agents to interact with Swarm postage stam
 
 This MCP server is specifically designed for provenance data use cases, leveraging Swarm's decentralized network to provide:
 
-- **Immutable Records**: Once uploaded, data cannot be altered, ensuring integrity
+- **Immutable Records**: Swarm addresses content by its hash, so the data stored under a reference cannot be changed. A download is checked against its reference only as the `download_data` reference check describes
 - **Decentralized Storage**: No single point of failure or central authority
 - **Provenance Metadata**: Support for structured provenance records with creator, timestamp, and lineage information
 - **Reference Check on Download**: `download_data` recomputes the Swarm chunk address of content up to 4 KB and reports the content as verified only when that address equals the reference. References from `/bzz` uploads name a manifest and are reported as not checked; see [datafund/swarm_connect#499](https://github.com/datafund/swarm_connect/issues/499)
@@ -929,7 +929,7 @@ This MCP server is designed to work with AI agents that support the Model Contex
 3. **Optimize costs**: List stamps to find the most suitable ones for tasks
 4. **Store provenance data**: Upload data with provenance metadata to immutable decentralized storage
 5. **Retrieve records**: Download records from the Swarm network by reference. Content up to 4 KB is checked against a reference that names a single chunk; see the `download_data` reference check
-6. **Data lifecycle management**: Handle complete provenance workflows from creation to verification
+6. **Data lifecycle management**: Handle complete provenance workflows from creation to retrieval and on-chain checks
 7. **Track data lineage**: Record transformations and trace the full provenance chain of derived data
 8. **Automate workflows**: Integrate stamp management and data storage into larger AI workflows
 

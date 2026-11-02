@@ -362,7 +362,10 @@ def load_settings() -> Settings:
 
 
 # Global settings instance. A refused setting ends start-up with a short
-# message instead of a traceback.
+# message instead of a traceback. The SystemExit is meant for the server entry
+# point (importing the server is starting it). Library or test code that needs
+# to handle a refused setting should call load_settings() itself and catch
+# ConfigurationError.
 try:
     settings = load_settings()
 except ConfigurationError as e:

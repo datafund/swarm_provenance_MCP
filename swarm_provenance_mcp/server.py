@@ -1862,7 +1862,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="download_data",
-                description="Download data from the Swarm network using a reference hash, retrieved through the gateway's Bee node. The reference can come from upload_data or any other Swarm upload. Returns the decoded content for text/JSON, or size and type metadata for binary data. A not-found result says whether the gateway is connected to the Swarm network — do not re-upload when it is not.",
+                description="Download data from the Swarm network using a reference hash, retrieved through the gateway's Bee node. The reference can come from upload_data or any other Swarm upload. Returns the decoded content for text/JSON, or size and type metadata for binary data, plus a 'Reference check' line. The content is 'verified' only when it is at most 4096 bytes and its single-chunk Swarm address equals the reference. Otherwise the check says 'not checked' and why: references from upload_data most likely name a /bzz manifest, which this server cannot check; the content is larger than one chunk; or the reference is encrypted. Treat unchecked content as unverified. A not-found result says whether the gateway is connected to the Swarm network — do not re-upload when it is not.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -2244,11 +2244,11 @@ def create_server() -> Server:
             ),
             Prompt(
                 name="provenance-verify",
-                description="Verify existing provenance data by downloading and inspecting it from Swarm.",
+                description="Download existing provenance data from Swarm, inspect it, and report what the reference check covered.",
                 arguments=[
                     PromptArgument(
                         name="reference",
-                        description="64-character hex Swarm reference hash to verify",
+                        description="Swarm reference of the data to download and inspect",
                         required=True,
                     ),
                 ],
@@ -2304,7 +2304,9 @@ def create_server() -> Server:
                                 f"cannot upload to 'owned' or 'pool' stamps).\n"
                                 f"3. Poll check_stamp_health every 15 seconds until ready (up to 2 minutes)\n"
                                 f"4. Call upload_data with the data and your stamp_id\n"
-                                f"5. Call download_data with the returned reference to verify the upload\n"
+                                f"5. Call download_data with the returned reference and check that the content "
+                                f"is the data you uploaded. Its 'Reference check' line usually says 'not checked' "
+                                f"for upload_data references, because they most likely name a /bzz manifest\n"
                                 f"6. Report the reference hash — this is the permanent Swarm address"
                             ),
                         ),
@@ -2315,20 +2317,23 @@ def create_server() -> Server:
         elif name == "provenance-verify":
             reference = args.get("reference", "<reference hash>")
             return GetPromptResult(
-                description="Verify existing provenance data from Swarm",
+                description="Inspect existing provenance data from Swarm",
                 messages=[
                     PromptMessage(
                         role="user",
                         content=TextContent(
                             type="text",
                             text=(
-                                f"Verify this provenance data from Swarm:\n\n"
+                                f"Inspect this provenance data from Swarm:\n\n"
                                 f"Reference: {reference}\n\n"
                                 f"Steps:\n"
                                 f"1. Call download_data with the reference hash\n"
-                                f"2. Inspect the returned content — check structure, fields, and integrity\n"
-                                f"3. Report what was found: content type, size, key fields, "
-                                f"and whether the data appears intact"
+                                f"2. Read the 'Reference check' line. 'verified' means the bytes are "
+                                f"the single Swarm chunk the reference names. 'not checked' means "
+                                f"nothing proves the bytes belong to the reference; give the reason\n"
+                                f"3. Inspect the returned content: structure, fields, and whether it is well formed\n"
+                                f"4. Report the content type, size, key fields, and the reference check result. "
+                                f"Do not call the content cryptographically verified unless the check says 'verified'"
                             ),
                         ),
                     )

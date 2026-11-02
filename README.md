@@ -498,6 +498,15 @@ Record an N-to-1 merge transformation on-chain, combining multiple source hashes
 #### `get_provenance_chain` *(optional — requires `CHAIN_ENABLED=true`)*
 Follow the transformation lineage for a Swarm hash. On v2 contracts, uses state reads for fast traversal; on v1 contracts, walks through event logs. Shows how data evolved — from original to each derived version. Read-only — no gas or wallet key required.
 
+Each node in the output lists its parent hashes, and each transformation prints as an edge: `Edge: <parent_hash> -> <child_hash>: "<description>"`.
+
+The tool returns the nodes it could read. When the lineage is partial, the output starts with an `INCOMPLETE` banner and `_next` is `get_provenance_chain`. The banner lists:
+- each node whose record or links could not be read, with a fixed label and the exception class name;
+- each node that `max_depth` stopped at, marked "not expanded" (this is not an error);
+- a note when the v1 event index could not be built and links came from per-node event queries, which cover only the last 50,000 blocks and no merges.
+
+The banner ends with a `Retry:` line: call `get_provenance_chain` on the named hash, or with a larger `max_depth`. RPC transport errors are not reported this way: the server fails over to the next RPC endpoint, or returns a retryable error.
+
 **Parameters:**
 - `swarm_hash` (string, required): 64-character hex Swarm reference hash to trace lineage for
 - `max_depth` (integer): Maximum depth to traverse (default: 10, range: 1–50)

@@ -3583,8 +3583,8 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
                 msg += f"   Registered: {timestamp_str}\n"
                 msg += f"   Data Type: {quote(e.data_type)}\n\n"
                 msg += (
-                    "No transaction was sent. The record belongs to the record "
-                    "owner, so owner-only tools for this hash fail for the "
+                    "No transaction was sent. Another address owns this "
+                    "record, so owner-only tools for this hash fail for the "
                     "expected owner. To anchor a record you own, change the "
                     "content, upload it again, and anchor the new hash.\n\n"
                 )
@@ -3763,7 +3763,7 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += f"   Swarm Hash: {clean_hash}\n"
             response_text += f"   Owner: {_chain_address(record.owner)}\n"
             if expected_owner:
-                response_text += "   The owner matches the expected owner.\n"
+                response_text += "   Expected owner: matches\n"
             response_text += f"   Registered: {timestamp_str}\n"
             response_text += f"   Data Type: {quote(record.data_type)}\n"
             response_text += f"   Status: {record.status.name}"

@@ -6886,6 +6886,7 @@ class TestAnchorAlreadyRegisteredOwner:
         lines = _lines(text)
         assert f"Record owner: {OTHER_ADDR}" in lines
         assert f"Expected owner: {WALLET_ADDR}" in lines
+        assert "Another address owns this record" in " ".join(lines)
         assert "retryable: false" in text
         assert "_next: download_data" not in text
         assert "_next: get_provenance" in text
@@ -7037,7 +7038,7 @@ class TestVerifyHashExpectedOwner:
         assert not result.isError
         text = result.content[0].text
         assert "IS registered" in text
-        assert "matches the expected owner" in text
+        assert "Expected owner: matches" in _lines(text)
 
     async def test_without_expected_owner_unchanged(self, server):
         mock_client = MagicMock()

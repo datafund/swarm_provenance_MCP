@@ -379,3 +379,72 @@ class TestRedirectHeaders:
     def test_same_host_https_upgrade_keeps_header(self, monkeypatch):
         headers = self._get(monkeypatch, "http://gw.example", "https://gw.example")
         assert headers.get("X-Payment-Mode") == "free"
+
+
+class TestEncryptedReferences:
+    """Encrypted Swarm references are 128 hex characters (reference plus key)."""
+
+    async def _download(self, server, reference):
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.download_data.return_value = b'{"a": 1}'
+            result = await call_tool_directly(
+                server, "download_data", {"reference": reference}
+            )
+        return result, gw
+
+    @pytest.mark.parametrize("prefix", ["", "0x"])
+    async def test_128_hex_reference_is_accepted(self, server, prefix):
+        ref = "ab" * 64
+        result, gw = await self._download(server, prefix + ref)
+        assert not result.isError, result.content[0].text
+        gw.download_data.assert_called_once_with(ref)
+
+    async def test_64_hex_reference_still_accepted(self, server):
+        result, gw = await self._download(server, "c" * 64)
+        assert not result.isError
+        gw.download_data.assert_called_once_with("c" * 64)
+
+    @pytest.mark.parametrize("length", [63, 65, 96, 127, 129, 192])
+    async def test_other_lengths_are_refused(self, server, length):
+        result, gw = await self._download(server, "d" * length)
+        assert result.isError
+        assert "64 or 128" in result.content[0].text
+        gw.download_data.assert_not_called()
+
+    async def test_non_hex_128_is_refused(self, server):
+        result, gw = await self._download(server, "g" * 128)
+        assert result.isError
+        gw.download_data.assert_not_called()
+
+    def test_schema_pattern_matches_validator(self):
+        import re
+
+        from swarm_provenance_mcp.server import (
+            validate_and_clean_swarm_reference,
+        )
+
+        server = create_server()
+        import asyncio
+
+        from mcp.types import ListToolsRequest
+
+        handler = server.request_handlers[ListToolsRequest]
+        tools = asyncio.run(handler(ListToolsRequest(method="tools/list"))).root.tools
+        prop = next(t for t in tools if t.name == "download_data").inputSchema[
+            "properties"
+        ]["reference"]
+        assert "128" in prop["description"]
+        for length in (63, 64, 65, 127, 128, 129):
+            value = "e" * length
+            try:
+                validate_and_clean_swarm_reference(value)
+                accepted = True
+            except ValueError:
+                accepted = False
+            assert bool(re.fullmatch(prop["pattern"], value)) == accepted, length
+
+    async def test_chain_tools_still_require_64(self, server):
+        from swarm_provenance_mcp.server import validate_and_clean_reference_hash
+
+        with pytest.raises(ValueError):
+            validate_and_clean_reference_hash("ab" * 64)

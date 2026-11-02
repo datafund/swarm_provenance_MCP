@@ -296,7 +296,7 @@ Upload data to the Swarm network with stamp validation.
 Download data from the Swarm network using a reference hash.
 
 **Parameters:**
-- `reference` (string): Swarm reference hash of the data to download
+- `reference` (string): Swarm reference of the data to download: 64 hexadecimal characters, or 128 for an encrypted reference. Chain tools take only 64-character hashes
 
 **Example:**
 ```json

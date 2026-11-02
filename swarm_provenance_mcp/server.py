@@ -429,6 +429,11 @@ UPLOAD_SIGN_METHODS = frozenset({"notary"})
 # Validation patterns
 STAMP_ID_PATTERN = re.compile(r"^[a-fA-F0-9]{64}$")
 REFERENCE_HASH_PATTERN = re.compile(r"^[a-fA-F0-9]{64}$")
+# A Swarm reference to download: 64 hex characters, or 128 for an encrypted
+# reference (reference plus decryption key). Chain tools take bytes32, so they
+# keep REFERENCE_HASH_PATTERN.
+SWARM_REFERENCE_SCHEMA_PATTERN = "^([a-fA-F0-9]{64}|[a-fA-F0-9]{128})$"
+SWARM_REFERENCE_PATTERN = re.compile(SWARM_REFERENCE_SCHEMA_PATTERN)
 
 
 def validate_and_clean_stamp_id(stamp_id: str) -> str:
@@ -484,6 +489,27 @@ def validate_and_clean_reference_hash(reference: str) -> str:
             f"Invalid reference hash format. Expected 64-character hexadecimal string (without 0x prefix), got: {reference}"
         )
 
+    return reference
+
+
+def validate_and_clean_swarm_reference(reference: str) -> str:
+    """Validate a Swarm reference for download_data, removing a 0x prefix.
+
+    Accepts 64 hex characters, or 128 for an encrypted reference.
+
+    Raises:
+        ValueError: If the reference format is invalid
+    """
+    if not reference or not isinstance(reference, str):
+        raise ValueError("Reference cannot be empty")
+    if reference.startswith(("0x", "0X")):
+        reference = reference[2:]
+    if not SWARM_REFERENCE_PATTERN.match(reference):
+        raise ValueError(
+            "Invalid Swarm reference format. Expected 64 or 128 hexadecimal "
+            "characters (128 for an encrypted reference), without 0x prefix; "
+            f"got {len(reference)} characters"
+        )
     return reference
 
 
@@ -1628,8 +1654,8 @@ def create_server() -> Server:
                     "properties": {
                         "reference": {
                             "type": "string",
-                            "description": "64-character hexadecimal Swarm reference hash (without 0x prefix). Example: b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789ab",
-                            "pattern": "^[a-fA-F0-9]{64}$",
+                            "description": "Swarm reference (without 0x prefix): 64 hexadecimal characters, or 128 for an encrypted reference. Example: b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789ab",
+                            "pattern": SWARM_REFERENCE_SCHEMA_PATTERN,
                         }
                     },
                     "required": ["reference"],
@@ -2867,8 +2893,8 @@ async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
         if not reference:
             raise ValueError("Reference is required")
 
-        # Validate and clean reference hash
-        clean_reference = validate_and_clean_reference_hash(reference)
+        # Validate and clean reference (64 hex, or 128 when encrypted)
+        clean_reference = validate_and_clean_swarm_reference(reference)
 
         result_bytes = gateway_client.download_data(clean_reference)
         summary, fenced = _describe_download(clean_reference, result_bytes)

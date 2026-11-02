@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import re
 import secrets
 import time
@@ -2249,6 +2250,44 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         )
 
 
+def _format_stamp_utilization(details: Dict[str, Any]) -> str:
+    """Stamp utilization as a percentage.
+
+    Bee's ``utilization`` is the number of filled slots in the fullest
+    bucket, not a percentage. Each bucket holds 2^(depth - bucketDepth) slots.
+    """
+
+    def _is_int(v: Any) -> bool:
+        return isinstance(v, int) and not isinstance(v, bool)
+
+    percent = details.get("utilizationPercent")
+    if not (
+        isinstance(percent, (int, float))
+        and not isinstance(percent, bool)
+        and math.isfinite(percent)
+    ):
+        percent = None
+
+    count = details.get("utilization")
+    depth = details.get("depth")
+    bucket_depth = details.get("bucketDepth")
+    slots = None
+    if _is_int(depth) and _is_int(bucket_depth) and 0 <= bucket_depth < depth <= 255:
+        slots = 2 ** (depth - bucket_depth)
+
+    if _is_int(count) and slots is not None:
+        if percent is None:
+            percent = count / slots * 100
+        return f"{percent:.1f}% ({count} of {slots} slots in the fullest bucket)"
+    if percent is not None:
+        return f"{percent:.1f}%"
+    if _is_int(count):
+        return f"not available ({count} filled slots in the fullest bucket)"
+    if count is None:
+        return "N/A"
+    return _gw(count)
+
+
 async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle stamp status requests."""
     try:
@@ -2289,11 +2328,7 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += " ✅ (Ready for uploads)"
         response_text += "\n"
 
-        utilization = result.get("utilization", "N/A")
-        if utilization != "N/A" and isinstance(utilization, (int, float)):
-            response_text += f"Utilization: {utilization}%\n"
-        else:
-            response_text += f"Utilization: {utilization}\n"
+        response_text += f"Utilization: {_format_stamp_utilization(result)}\n"
 
         response_text += f"Immutable: {result.get('immutableFlag', 'N/A')}\n"
         response_text += f"Local: {result.get('local', 'N/A')}\n"

@@ -745,6 +745,86 @@ class TestPropagationFields:
         assert "ready immediately" in text
 
 
+class TestStampStatusUtilization:
+    """get_stamp_status must not print Bee's raw slot count as a percentage (#229)."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    async def _status_text(self, server, details):
+        with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
+            mock_client.get_stamp_details.return_value = details
+            result = await call_tool_directly(
+                server, "get_stamp_status", {"stamp_id": TEST_STAMP_ID}
+            )
+        assert not result.isError
+        return result.content[0].text
+
+    async def test_utilization_computed_from_raw_count(self, server):
+        """utilization 1 at depth 17, bucket depth 16 is 1 of 2 slots: 50%."""
+        text = await self._status_text(
+            server, {"depth": 17, "bucketDepth": 16, "utilization": 1}
+        )
+        assert "Utilization: 50.0% (1 of 2 slots in the fullest bucket)" in text
+        assert "Utilization: 1%" not in text
+
+    async def test_utilization_prefers_gateway_percent(self, server):
+        """The gateway's utilizationPercent is shown, as in the observed response."""
+        text = await self._status_text(
+            server,
+            {
+                "depth": 17,
+                "bucketDepth": 16,
+                "utilization": 1,
+                "utilizationPercent": 50.0,
+            },
+        )
+        assert "Utilization: 50.0% (1 of 2 slots in the fullest bucket)" in text
+        assert "Utilization: 1%" not in text
+
+    async def test_nearly_full_bucket(self, server):
+        """15 of 16 slots must read as nearly full, not 15%."""
+        text = await self._status_text(
+            server, {"depth": 20, "bucketDepth": 16, "utilization": 15}
+        )
+        assert "Utilization: 93.8% (15 of 16 slots in the fullest bucket)" in text
+        assert "15%" not in text
+
+    async def test_raw_count_without_capacity_is_not_a_percent(self, server):
+        """Without a valid depth and bucket depth, the count is not shown as a percent."""
+        for details in (
+            {"utilization": 3},
+            {"utilization": 3, "depth": 16, "bucketDepth": 16},
+            {"utilization": 3, "depth": "17", "bucketDepth": 16},
+        ):
+            text = await self._status_text(server, details)
+            assert "3%" not in text
+            assert (
+                "Utilization: not available (3 filled slots in the fullest bucket)"
+                in text
+            )
+
+    async def test_invalid_gateway_percent_falls_back(self, server):
+        """A non-finite or boolean utilizationPercent is ignored."""
+        for bad in (float("nan"), float("inf"), True):
+            text = await self._status_text(
+                server,
+                {
+                    "depth": 17,
+                    "bucketDepth": 16,
+                    "utilization": 1,
+                    "utilizationPercent": bad,
+                },
+            )
+            assert "Utilization: 50.0% (1 of 2 slots in the fullest bucket)" in text
+
+    async def test_missing_utilization(self, server):
+        """No utilization data still prints N/A."""
+        text = await self._status_text(server, {"depth": 17, "bucketDepth": 16})
+        assert "Utilization: N/A" in text
+
+
 class TestStampAccessMode:
     """Test that list_stamps surfaces accessMode and propagationStatus from gateway."""
 

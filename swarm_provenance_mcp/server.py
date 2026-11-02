@@ -2290,7 +2290,8 @@ def _format_stamp_utilization(details: Dict[str, Any]) -> str:
 
     detail = None
     if raw is not None:
-        shown = count if count is not None else _gw(raw, 40)
+        # Not validated against the bucket size, so cap it like any gateway value.
+        shown = _gw(count if count is not None else raw, 40)
         detail = f"filled slots in the fullest bucket: {shown}"
     if percent is not None:
         return f"{percent:.1f}% ({detail})" if detail else f"{percent:.1f}%"

@@ -851,6 +851,20 @@ class TestStampStatusUtilization:
                 in text
             )
 
+    async def test_huge_count_is_capped(self, server):
+        """A huge whole-number count is printed short and with its label."""
+        for raw in (1e300, 10**500):
+            text = await self._status_text(
+                server, {"depth": 17, "bucketDepth": 16, "utilization": raw}
+            )
+            line = next(
+                ln for ln in text.splitlines() if ln.startswith("Utilization:")
+            )
+            assert len(line) < 120
+            assert line.startswith(
+                "Utilization: not available (filled slots in the fullest bucket: "
+            )
+
     async def test_out_of_range_count_with_gateway_percent(self, server):
         """The gateway percent is still shown when the count is out of range."""
         text = await self._status_text(

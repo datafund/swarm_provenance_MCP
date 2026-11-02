@@ -35,7 +35,7 @@ This MCP server is specifically designed for provenance data use cases, leveragi
 - **Extend Stamps**: Extend the duration of existing stamps
 - **Data Upload**: Upload data to Swarm network with stamp validation
 - **Data Download**: Download data from Swarm network by reference
-- **Provenance Storage**: Store data with provenance metadata for immutable, verifiable records
+- **Provenance Storage**: Store data with provenance metadata as immutable records whose on-chain registration you can check with `verify_hash`
 - **Health Monitoring**: Check gateway and Swarm network connectivity
 - **Chain Diagnostics** (optional): Check on-chain wallet balance and RPC connectivity for provenance anchoring
 - **On-Chain Anchoring** (optional): Register Swarm hashes on-chain for immutable provenance records

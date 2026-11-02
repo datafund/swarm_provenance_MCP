@@ -100,6 +100,8 @@ class TestToolOutput:
         assert first.startswith("INCOMPLETE")
         assert B in text.split("Provenance Chain")[0]
         assert label in text
+        assert f"   Read error: {label}" in text.splitlines()
+        assert "Read failed:" not in text
         assert _next(text) == ["_next: get_provenance_chain"]
         assert _retry(text) == f"Retry: call get_provenance_chain with swarm_hash {B}"
 

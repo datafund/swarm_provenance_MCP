@@ -5001,7 +5001,7 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
 
             read_error = getattr(record, "read_error", None)
             if isinstance(read_error, str):
-                response_text += f"\n   Read failed: {_gw(read_error, 120)}"
+                response_text += f"\n   Read error: {_gw(read_error, 120)}"
             if getattr(record, "expanded", True) is False:
                 response_text += "\n   Not expanded: max_depth reached"
 

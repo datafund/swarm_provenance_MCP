@@ -393,6 +393,56 @@ UPLOAD_SIGN_METHODS = frozenset({"notary"})
 # Validation patterns
 STAMP_ID_PATTERN = re.compile(r"^[a-fA-F0-9]{64}$")
 REFERENCE_HASH_PATTERN = re.compile(r"^[a-fA-F0-9]{64}$")
+ADDRESS_PATTERN = re.compile(r"0x[a-fA-F0-9]{40}")
+
+# Latest Unix timestamp printed as a date (9999-12-31 23:59:59 UTC).
+MAX_PRINTED_TIMESTAMP = 253402300799
+
+
+def validate_address_argument(value: Any, name: str) -> str:
+    """Validate an Ethereum address tool argument (0x plus 40 hex digits)."""
+    if not isinstance(value, str) or not ADDRESS_PATTERN.fullmatch(value):
+        raise ValueError(f"{name} must be 0x followed by 40 hexadecimal characters")
+    return value
+
+
+def _is_address(value: Any) -> bool:
+    """Whether a chain-supplied value is a well-formed address string."""
+    return isinstance(value, str) and ADDRESS_PATTERN.fullmatch(value) is not None
+
+
+def _chain_address(value: Any) -> str:
+    """A chain-supplied address for printing: as is when well formed,
+    otherwise flattened to one capped line."""
+    return value if _is_address(value) else _gw(value, 64)
+
+
+def _owner_matches(record_owner: Any, expected: Any) -> bool:
+    """Whether two addresses are the same, ignoring case. A value that is
+    not a well-formed address never matches."""
+    return (
+        _is_address(record_owner)
+        and _is_address(expected)
+        and record_owner.lower() == expected.lower()
+    )
+
+
+def _format_chain_timestamp(value: Any) -> str:
+    """A chain-supplied Unix timestamp as a UTC date, or "unknown" when it is
+    not a positive integer in the printable range."""
+    from datetime import datetime, timezone
+
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not 0 < value <= MAX_PRINTED_TIMESTAMP
+    ):
+        return "unknown"
+    try:
+        dt = datetime.fromtimestamp(value, tz=timezone.utc)
+    except (ValueError, OSError, OverflowError):
+        return "unknown"
+    return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def validate_and_clean_stamp_id(stamp_id: str) -> str:
@@ -1651,7 +1701,7 @@ def create_server() -> Server:
                     ),
                     Tool(
                         name="verify_hash",
-                        description="Check whether a Swarm reference hash is registered on the blockchain. Returns verified status with basic provenance info (owner, timestamp, data type) if found. Read-only — no gas or wallet key required.",
+                        description="Check whether a Swarm reference hash is registered on the blockchain. Returns verified status with basic provenance info (owner, timestamp, data type) if found. Pass expected_owner to fail when the record belongs to another address. Read-only — no gas or wallet key required.",
                         inputSchema={
                             "type": "object",
                             "properties": {
@@ -1659,6 +1709,11 @@ def create_server() -> Server:
                                     "type": "string",
                                     "description": "64-character hexadecimal Swarm reference hash to verify (without 0x prefix)",
                                     "pattern": "^[a-fA-F0-9]{64}$",
+                                },
+                                "expected_owner": {
+                                    "type": "string",
+                                    "description": "Optional Ethereum address the record must belong to. If the hash is registered to a different owner, the result is an error that shows both addresses.",
+                                    "pattern": "^0x[a-fA-F0-9]{40}$",
                                 },
                             },
                             "required": ["swarm_hash"],
@@ -3413,6 +3468,8 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
             raise ValueError("data_type must be 64 characters or fewer")
 
         owner = arguments.get("owner") or None
+        if owner is not None:
+            owner = validate_address_argument(owner, "owner")
         storage_ref = arguments.get("storage_ref") or None
         if storage_ref:
             storage_ref = validate_and_clean_reference_hash(storage_ref)
@@ -3511,21 +3568,44 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
             )
 
         if isinstance(e, DataAlreadyRegisteredError):
-            # Intentionally NOT isError — idempotent anchoring: if the hash is
-            # already on-chain the agent should see the existing record and proceed.
-            from datetime import datetime, timezone
+            # Registration is first-come and a Swarm reference is a content
+            # address, so someone else may own the record (#164). Only a record
+            # owned by the expected owner counts as success (idempotent
+            # anchoring); any other owner is an error.
+            expected_owner = owner or chain_client.address
+            timestamp_str = _format_chain_timestamp(e.timestamp)
 
-            timestamp_str = "unknown"
-            if e.timestamp:
-                try:
-                    dt = datetime.fromtimestamp(e.timestamp, tz=timezone.utc)
-                    timestamp_str = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-                except (ValueError, OSError):
-                    timestamp_str = str(e.timestamp)
+            if not _owner_matches(e.owner, expected_owner):
+                msg = "Hash already registered on-chain by a different owner\n\n"
+                msg += f"   Swarm Hash: {clean_hash}\n"
+                msg += f"   Record owner: {_chain_address(e.owner)}\n"
+                msg += f"   Expected owner: {_chain_address(expected_owner)}\n"
+                msg += f"   Registered: {timestamp_str}\n"
+                msg += f"   Data Type: {quote(e.data_type)}\n\n"
+                msg += (
+                    "No transaction was sent. The record belongs to the record "
+                    "owner, so owner-only tools for this hash fail for the "
+                    "expected owner. To anchor a record you own, change the "
+                    "content, upload it again, and anchor the new hash.\n\n"
+                )
+                msg += QUOTED_NOTE
+                return CallToolResult(
+                    content=[
+                        TextContent(
+                            type="text",
+                            text=_format_error(
+                                msg, retryable=False, next_tool="get_provenance"
+                            ),
+                        )
+                    ],
+                    isError=True,
+                )
 
+            # Not isError: the hash is already on-chain with the expected
+            # owner, so the agent sees the existing record and proceeds.
             response_text = f"⛓️  Hash already registered on-chain\n\n"
-            response_text += f"   Swarm Hash: {e.data_hash}\n"
-            response_text += f"   Owner: {e.owner}\n"
+            response_text += f"   Swarm Hash: {clean_hash}\n"
+            response_text += f"   Owner: {_chain_address(e.owner)}\n"
             response_text += f"   Registered: {timestamp_str}\n"
             response_text += f"   Data Type: {quote(e.data_type)}"
             response_text += f"\n\n{QUOTED_NOTE}"
@@ -3639,6 +3719,14 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
             raise ValueError("swarm_hash is required")
         clean_hash = validate_and_clean_reference_hash(swarm_hash)
 
+        expected_owner = arguments.get("expected_owner")
+        if expected_owner is not None and expected_owner != "":
+            expected_owner = validate_address_argument(
+                expected_owner, "expected_owner"
+            )
+        else:
+            expected_owner = None
+
         from .chain.exceptions import DataNotRegisteredError
 
         try:
@@ -3649,19 +3737,33 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
             is_registered = False
 
         if is_registered and record:
-            from datetime import datetime, timezone
+            timestamp_str = _format_chain_timestamp(record.timestamp)
 
-            timestamp_str = "unknown"
-            if record.timestamp:
-                try:
-                    dt = datetime.fromtimestamp(record.timestamp, tz=timezone.utc)
-                    timestamp_str = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-                except (ValueError, OSError):
-                    timestamp_str = str(record.timestamp)
+            if expected_owner and not _owner_matches(record.owner, expected_owner):
+                msg = "Owner mismatch: the hash is registered to a different owner\n\n"
+                msg += f"   Swarm Hash: {clean_hash}\n"
+                msg += f"   Record owner: {_chain_address(record.owner)}\n"
+                msg += f"   Expected owner: {expected_owner}\n"
+                msg += f"   Registered: {timestamp_str}\n"
+                msg += f"   Data Type: {quote(record.data_type)}\n\n"
+                msg += QUOTED_NOTE
+                return CallToolResult(
+                    content=[
+                        TextContent(
+                            type="text",
+                            text=_format_error(
+                                msg, retryable=False, next_tool="get_provenance"
+                            ),
+                        )
+                    ],
+                    isError=True,
+                )
 
             response_text = f"⛓️  Verified — hash IS registered on-chain\n\n"
             response_text += f"   Swarm Hash: {clean_hash}\n"
-            response_text += f"   Owner: {record.owner}\n"
+            response_text += f"   Owner: {_chain_address(record.owner)}\n"
+            if expected_owner:
+                response_text += "   The owner matches the expected owner.\n"
             response_text += f"   Registered: {timestamp_str}\n"
             response_text += f"   Data Type: {quote(record.data_type)}\n"
             response_text += f"   Status: {record.status.name}"

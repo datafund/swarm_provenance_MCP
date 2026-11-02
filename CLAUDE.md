@@ -111,7 +111,7 @@ On-chain provenance module. Dependencies (web3, eth-account) included in default
 - `list_stamps` - List local stamps with access mode (owned/shared) and propagation status
   Stamps have `accessMode`: `"owned"` (dedicated, yours) or `"shared"` (public, any gateway user). Use owned stamps for production.
 - `extend_stamp` - Extend stamp duration
-- `upload_data` - Upload data to Swarm (max 4KB)
+- `upload_data` - Upload data to Swarm (max 4KB). Optional `sign: "notary"` makes the gateway sign the data; check `get_notary_info` first. With notary, `data` must be a JSON object with a top-level `data` field (`{"data": {...}, "signatures": []}`), or the gateway returns 400 `INVALID_DOCUMENT_FORMAT`; a disabled notary returns 400 `NOTARY_NOT_ENABLED` or `NOTARY_NOT_CONFIGURED`. The signed document is stored as `application/json`, so the result labels the size "before signing"
 - `download_data` - Download data from Swarm by reference hash
 - `check_stamp_health` - Diagnose stamp upload readiness with errors/warnings and propagation timing
 - `get_wallet_info` - Node wallet address and BZZ balance (debug, may be removed)

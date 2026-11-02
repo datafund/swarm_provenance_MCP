@@ -1009,7 +1009,8 @@ class TestAdaptiveHealthCheck:
             assert "_recommendations:" in text
 
     async def test_healthy_no_usable_stamps(self, server):
-        """Healthy gateway + stamps but none usable → ready: false, recommends purchase."""
+        """Healthy gateway + a stamp not usable yet (no lasting reason given)
+        → ready: false, poll check_stamp_health instead of buying another."""
         with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.health_check.return_value = {
                 "status": "healthy",
@@ -1023,7 +1024,7 @@ class TestAdaptiveHealthCheck:
             result = await call_tool_directly(server, "health_check", {})
             text = result.content[0].text
             assert "ready: false" in text
-            assert "_next: purchase_stamp" in text
+            assert "_next: check_stamp_health" in text
 
     async def test_unhealthy_gateway(self, server):
         """Unhealthy gateway → ready: false with gateway recommendation."""

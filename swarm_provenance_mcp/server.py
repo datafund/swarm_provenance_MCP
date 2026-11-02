@@ -935,14 +935,23 @@ def _label(label: Any) -> str:
 _WRITABLE_ACCESS_MODES = ("shared", None)
 
 
-def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, int]:
+# unusableReason values (gateway) after which waiting does not help.
+_SPENT_REASONS = ("expired", "expiring_soon", "full", "invalid_depth")
+
+
+def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
     """Usable stamps in a list_stamps answer, split by whether this server can
-    write to them, plus ``pending`` (writable stamps not usable yet) and
-    ``blocked`` (every stamp this server cannot write to, by kind). Entries
-    that are not objects are not counted."""
-    counts = {"writable": 0, "pending": 0, "pool": 0, "owned": 0, "other": 0}
-    # Every stamp this server cannot write to, usable or not, by kind.
-    blocked = {"pool": 0, "owned": 0, "other": 0}
+    write to them, plus ``pending`` (writable stamps not usable yet, which may
+    still be propagating; ``pending_ids`` holds their valid batch IDs) and
+    ``blocked`` (every stamp this server cannot use, by kind; ``spent`` is a
+    writable stamp the gateway reports as expired, full or about to expire).
+    Entries that are not objects are not counted."""
+    counts: Dict[str, Any] = {
+        "writable": 0, "pending": 0, "pool": 0, "owned": 0, "other": 0
+    }
+    counts["pending_ids"] = []
+    # Every stamp this server cannot use, usable or not, by kind.
+    blocked = {"pool": 0, "owned": 0, "other": 0, "spent": 0}
     counts["blocked"] = blocked
     for stamp in stamps:
         if not isinstance(stamp, dict):
@@ -954,10 +963,18 @@ def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, int]:
         if not writable:
             blocked[mode if mode in ("pool", "owned") else "other"] += 1
         if stamp.get("usable") is not True:
-            # A writable stamp that is not usable yet may still be
-            # propagating: wait for it rather than buy another.
-            if writable:
-                counts["pending"] += 1
+            if not writable:
+                continue
+            reason = stamp.get("unusableReason")
+            if isinstance(reason, str) and reason in _SPENT_REASONS:
+                blocked["spent"] += 1
+                continue
+            # Not usable yet, for no lasting reason: it may still be
+            # propagating, so wait for it rather than buy another.
+            counts["pending"] += 1
+            batch_id = stamp.get("batchID")
+            if isinstance(batch_id, str) and STAMP_ID_PATTERN.match(batch_id):
+                counts["pending_ids"].append(batch_id)
             continue
         if writable:
             counts["writable"] += 1
@@ -989,8 +1006,36 @@ def _no_writable_stamp_text(blocked: Dict[str, int]) -> str:
             f"{other} stamp{'s have' if other != 1 else ' has'} an access mode "
             "this server cannot use"
         )
+    spent = blocked["spent"]
+    if spent:
+        parts.append(
+            f"{spent} stamp{'s' if spent != 1 else ''} cannot become usable "
+            "(expired, full or about to expire)"
+        )
     detail = f": {'; '.join(parts)}." if parts else "."
     return f"No stamp this server can write to{detail} Purchase a stamp with purchase_stamp"
+
+
+# Batch IDs listed in the pending-stamp recommendation, at most.
+MAX_PENDING_IDS_SHOWN = 3
+
+
+def _pending_stamp_text(count: int, batch_ids: List[str]) -> str:
+    """health_check recommendation for writable stamps that are not usable
+    yet. Pairs with _next: check_stamp_health."""
+    ids = ""
+    if batch_ids:
+        shown = ", ".join(batch_ids[:MAX_PENDING_IDS_SHOWN])
+        more = len(batch_ids) - MAX_PENDING_IDS_SHOWN
+        ids = f" (batch ID{'s' if len(batch_ids) != 1 else ''}: {shown}" + (
+            f", and {more} more)" if more > 0 else ")"
+        )
+    return (
+        f"{count} stamp{'s' if count != 1 else ''} this server can write to "
+        f"{'are' if count != 1 else 'is'} not usable yet, probably still "
+        f"propagating{ids}. Poll check_stamp_health every 10 to 15 seconds: a "
+        "new stamp takes up to 2 minutes. Do not buy another while it propagates"
+    )
 
 
 def _new_batch_hint(label: Optional[str], depth: Optional[int]) -> str:
@@ -3097,9 +3142,9 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     next_tool = None
                 elif counts["pending"]:
                     recommendations.append(
-                        f"Found {total_stamps} stamp(s) but none are usable — poll check_stamp_health, stamps take up to 2 minutes to propagate"
+                        _pending_stamp_text(counts["pending"], counts["pending_ids"])
                     )
-                    next_tool = "purchase_stamp"
+                    next_tool = "check_stamp_health"
                 elif total_stamps > 0:
                     recommendations.append(_no_writable_stamp_text(counts["blocked"]))
                     next_tool = "purchase_stamp"

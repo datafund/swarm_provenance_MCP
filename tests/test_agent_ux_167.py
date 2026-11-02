@@ -634,7 +634,91 @@ _WRONG_OWNERSHIP_ADVICE = (
     "Stamps with accessMode 'owned' are yours",
     "configure your own wallet",
     "purchasing dedicated stamps",
+    "use an owned stamp",
+    "owned (yours",
+    "dedicated",
+    "exclusive access",
+    "production-ready",
+    "purchased by your wallet",
 )
+
+
+def _wrong_advice_in(text):
+    low = text.lower()
+    return [p for p in _WRONG_OWNERSHIP_ADVICE if p.lower() in low]
+
+
+class TestNoOwnedStampAdviceAnywhere:
+    """Every agent-facing text: all prompts, every tool and parameter
+    description (chain tools included), the instructions and SKILLS.md."""
+
+    def test_all_prompts(self, server):
+        import asyncio
+
+        from mcp.types import GetPromptRequest, ListPromptsRequest
+
+        prompts = asyncio.run(
+            server.request_handlers[ListPromptsRequest](
+                ListPromptsRequest(method="prompts/list")
+            )
+        ).root.prompts
+        assert len(prompts) >= 4
+        for prompt in prompts:
+            args = {a.name: "x" for a in (prompt.arguments or [])}
+            result = asyncio.run(
+                server.request_handlers[GetPromptRequest](
+                    GetPromptRequest(
+                        method="prompts/get",
+                        params={"name": prompt.name, "arguments": args},
+                    )
+                )
+            ).root
+            texts = [prompt.description or "", result.description or ""]
+            texts += [m.content.text for m in result.messages]
+            for text in texts:
+                assert _wrong_advice_in(text) == [], (prompt.name, text)
+
+    def test_all_tool_descriptions(self, monkeypatch):
+        import asyncio
+
+        from mcp.types import ListToolsRequest
+
+        from swarm_provenance_mcp import server as srv
+
+        monkeypatch.setattr(srv, "CHAIN_AVAILABLE", True)
+        monkeypatch.setattr(srv.settings, "chain_enabled", True)
+        tools = asyncio.run(
+            srv.create_server().request_handlers[ListToolsRequest](
+                ListToolsRequest(method="tools/list")
+            )
+        ).root.tools
+        for tool in tools:
+            assert _wrong_advice_in(tool.description or "") == [], tool.name
+        for tool, path, schema in _all_tool_properties(monkeypatch):
+            assert _wrong_advice_in(schema.get("description", "")) == [], (tool, path)
+
+    def test_instructions_and_skills(self):
+        from swarm_provenance_mcp.server import MCP_INSTRUCTIONS
+
+        skills = (Path(REPO_ROOT) / "swarm_provenance_mcp" / "SKILLS.md").read_text()
+        assert _wrong_advice_in(MCP_INSTRUCTIONS) == []
+        assert _wrong_advice_in(skills) == []
+
+    def test_list_stamps_description_states_the_rule(self):
+        import asyncio
+
+        from mcp.types import ListToolsRequest
+
+        from swarm_provenance_mcp import server as srv
+
+        tools = asyncio.run(
+            srv.create_server().request_handlers[ListToolsRequest](
+                ListToolsRequest(method="tools/list")
+            )
+        ).root.tools
+        desc = next(t for t in tools if t.name == "list_stamps").description
+        assert "This server sends no wallet" in desc
+        assert "pool" in desc and "owned" in desc
 
 
 class TestOwnershipGuidanceMatchesReadiness:

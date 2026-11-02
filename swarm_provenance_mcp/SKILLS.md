@@ -272,5 +272,6 @@ Inspect provenance records without a wallet.
 | **DataProvenance contract** | Smart contract that stores provenance records and emits `DataTransformed` events |
 | **Owner** | The wallet address that anchored a hash — has exclusive rights to record transformations |
 | **RESTRICTED status** | Irreversible status set via `restrict_original=true` — signals data should not be accessed directly |
-| **Owned stamp** | A stamp purchased by your wallet — exclusive access, predictable utilization, production-ready |
-| **Public stamp** | A stamp available to all gateway users (accessMode: "shared" in API) — utilization is unpredictable, suitable for testing |
+| **Owned stamp** | A stamp registered to the x402 wallet that paid for it (accessMode: "owned" in API). This server sends no wallet, so the gateway refuses its uploads to owned stamps |
+| **Pool stamp** | Gateway inventory (accessMode: "pool" in API). The gateway refuses uploads to it until someone acquires it, so this server cannot use it |
+| **Public stamp** | A stamp available to all gateway users (accessMode: "shared" in API), and the kind this server buys and uploads to. Other users can fill it, so utilization is unpredictable. For predictable capacity, run your own Bee node or gateway |

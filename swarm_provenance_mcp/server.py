@@ -1683,7 +1683,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="list_stamps",
-                description="List postage stamps available on the gateway. Each stamp includes access mode: owned (yours, dedicated) or shared (public, any gateway user). Also shows usability status and expiration.",
+                description="List postage stamps available on the gateway. Each stamp includes its access mode: shared (public, any gateway user can upload to it), owned (registered to the wallet that paid for it) or pool (gateway inventory). This server sends no wallet, so the gateway refuses its uploads to owned and pool stamps: use a shared stamp. Also shows usability status and expiration.",
                 inputSchema={"type": "object", "properties": {}, "required": []},
             ),
             Tool(
@@ -2170,8 +2170,9 @@ def create_server() -> Server:
                                 f"Content-Type: {content_type}\n\n"
                                 f"Follow these steps:\n"
                                 f"1. Call health_check to verify the gateway is reachable\n"
-                                f"2. Call purchase_stamp (size 'small' for small data) to get your own stamp, "
-                                f"or use an owned stamp from list_stamps.\n"
+                                f"2. Call purchase_stamp (size 'small' for small data) to get a stamp, "
+                                f"or reuse a usable 'shared' stamp from list_stamps (this server "
+                                f"cannot upload to 'owned' or 'pool' stamps).\n"
                                 f"3. Poll check_stamp_health every 15 seconds until ready (up to 2 minutes)\n"
                                 f"4. Call upload_data with the data and your stamp_id\n"
                                 f"5. Call download_data with the returned reference to verify the upload\n"
@@ -2242,7 +2243,8 @@ def create_server() -> Server:
                 f"1. Call health_check — verify gateway and chain connectivity\n"
                 f"2. Call chain_balance — confirm wallet has ETH for gas\n"
                 f"3. Call purchase_stamp (size 'small' for small data) to get a stamp, "
-                f"or use an owned stamp from list_stamps.\n"
+                f"or reuse a usable 'shared' stamp from list_stamps (this server "
+                f"cannot upload to 'owned' or 'pool' stamps).\n"
                 f"4. Poll check_stamp_health every 15 seconds until can_upload is true (up to 2 minutes)\n"
                 f"5. Call upload_data with the data and your stamp_id — save the reference hash\n"
                 f"6. Call anchor_hash with the reference hash to register it on-chain. "

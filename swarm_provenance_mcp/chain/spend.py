@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from .exceptions import ChainSpendLimitError
-from .provider import is_transport_error
+from .provider import is_testnet_chain_id, is_transport_error
 
 GWEI = 10**9
 ETH = 10**18
@@ -43,16 +43,6 @@ DEFAULT_L1_FEE_ALLOWANCE_ETH = 0.000001
 # context variable so it follows the handler into asyncio.to_thread workers.
 ACTIVE_HOLD: contextvars.ContextVar = contextvars.ContextVar("spend_hold", default=None)
 
-# Chain ids treated as testnets; everything else gets the mainnet defaults.
-TESTNET_CHAIN_IDS = frozenset(
-    {
-        84532,  # Base Sepolia
-        11155111,  # Ethereum Sepolia
-        31337,  # Hardhat / Anvil
-        1337,  # Ganache / local dev
-    }
-)
-
 
 @dataclass(frozen=True)
 class SpendDefaults:
@@ -66,10 +56,6 @@ class SpendDefaults:
 # of transactions per session.
 MAINNET_DEFAULTS = SpendDefaults(max_fee_gwei=0.5, budget_eth=0.002, max_txs=20)
 TESTNET_DEFAULTS = SpendDefaults(max_fee_gwei=10.0, budget_eth=0.05, max_txs=500)
-
-
-def is_testnet(chain_id: int) -> bool:
-    return chain_id in TESTNET_CHAIN_IDS
 
 
 def _gwei(wei: int) -> str:
@@ -100,7 +86,8 @@ class SpendGuard:
         max_txs: Optional[int] = None,
         l1_fee_allowance_eth: Optional[float] = None,
     ):
-        self.mainnet = not is_testnet(chain_id)
+        # Testnet chain ids come from provider.py, the single source.
+        self.mainnet = not is_testnet_chain_id(chain_id)
         defaults = MAINNET_DEFAULTS if self.mainnet else TESTNET_DEFAULTS
         self.max_fee_wei = int(
             (defaults.max_fee_gwei if max_fee_gwei is None else max_fee_gwei) * GWEI

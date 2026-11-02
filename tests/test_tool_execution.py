@@ -4107,7 +4107,7 @@ class TestGetProvenanceChain:
         )
 
     async def test_chain_multi_entry(self, server):
-        """Multi-entry chain should show tree with indentation."""
+        """Multi-entry chain should show each edge as parent -> child hash."""
         mock_t = MagicMock()
         mock_t.description = "Anonymized PII"
         mock_t.new_data_hash = TEST_NEW_HASH
@@ -4137,7 +4137,7 @@ class TestGetProvenanceChain:
         assert not result.isError
         text = result.content[0].text
         assert "Provenance Chain (2 entries)" in text
-        assert "└─" in text  # second entry has tree prefix
+        assert f"Edge: {TEST_REFERENCE} -> {TEST_NEW_HASH}" in text
         assert "Anonymized PII" in text
         assert "0xabcd" in text
 

@@ -642,6 +642,15 @@ def _exc_text(e: Any) -> str:
     return one_line(_mask_rpc_text(e, _rpc_urls()), MAX_EXCEPTION_CHARS)
 
 
+def _exc_tx_hash(e: Any) -> str:
+    """The transaction hash a chain exception carries, one line and capped.
+
+    It can come from the RPC's answer to ``send_raw_transaction``. A real
+    hash is 66 characters.
+    """
+    return one_line(getattr(e, "tx_hash", None) or "", 80)
+
+
 def _may_be_pending(e: Exception) -> bool:
     """Whether a failed write may still land: it was broadcast and then the
     endpoint dropped out or the receipt wait timed out."""
@@ -666,7 +675,7 @@ def _pending_tx_result(e: Exception, check_tool: str) -> CallToolResult:
         f"receipt did not arrive in time ({_exc_text(e)}).\n"
     )
     if getattr(e, "tx_hash", None):
-        msg += f"   Tx Hash: {e.tx_hash}\n"
+        msg += f"   Tx Hash: {_exc_tx_hash(e)}\n"
     msg += (
         "\nIt may be pending or already mined. Do not send it again: check "
         f"with {check_tool} first, and retry only if the change is not there."
@@ -699,7 +708,7 @@ def _restrict_failure_text(e: Exception, transform_tx: str, original: str) -> st
         "Do not re-run record_transform: only the status change "
     )
     if _may_be_pending(e):
-        tx = getattr(e, "tx_hash", None) or "unknown"
+        tx = _exc_tx_hash(e) or "unknown"
         return (
             "\n\n   ⚠️  Restricting the original was sent, outcome unknown: it "
             f"may still be pending (tx {tx}).\n" + recorded + "is unconfirmed.\n"
@@ -1432,7 +1441,7 @@ async def _spend_confirmation(
         f"   Fee cap: {quote['max_fee_gwei']:g} gwei per gas\n"
     )
     if "fee_error" in quote:
-        text += f"   Current fee: {quote['fee_error']}\n"
+        text += f"   Current fee: {_exc_text(quote['fee_error'])}\n"
     else:
         text += f"   Max fee per gas now: {quote['max_fee_per_gas_gwei']:.6g} gwei\n"
     if "max_cost_per_tx_eth" in quote:
@@ -3564,7 +3573,7 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
             else:
                 msg = f"Transaction failed: {_exc_text(e)}"
                 if e.tx_hash:
-                    msg += f"\n   Tx Hash: {e.tx_hash}"
+                    msg += f"\n   Tx Hash: {_exc_tx_hash(e)}"
             return CallToolResult(
                 content=[
                     TextContent(
@@ -4055,7 +4064,7 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
             else:
                 msg = f"Transaction failed: {_exc_text(e)}"
                 if e.tx_hash:
-                    msg += f"\n   Tx Hash: {e.tx_hash}"
+                    msg += f"\n   Tx Hash: {_exc_tx_hash(e)}"
             return CallToolResult(
                 content=[
                     TextContent(
@@ -4293,7 +4302,7 @@ async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolRe
             else:
                 msg = f"Transaction failed: {_exc_text(e)}"
                 if e.tx_hash:
-                    msg += f"\n   Tx Hash: {e.tx_hash}"
+                    msg += f"\n   Tx Hash: {_exc_tx_hash(e)}"
             return CallToolResult(
                 content=[
                     TextContent(
@@ -4638,7 +4647,7 @@ async def handle_set_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
             else:
                 msg = f"Transaction failed: {_exc_text(e)}"
                 if e.tx_hash:
-                    msg += f"\n   Tx Hash: {e.tx_hash}"
+                    msg += f"\n   Tx Hash: {_exc_tx_hash(e)}"
             return CallToolResult(
                 content=[
                     TextContent(

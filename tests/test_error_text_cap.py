@@ -214,3 +214,101 @@ async def test_health_check_wallet_rpc_url_redacted_before_the_cap(
     assert "/v2/S" not in text, text
     assert "SECRET" not in text, text
     assert "junk " * 100 not in text
+
+
+# --- the confirmation quote on mainnet (ChainClient.fee_quote) ---
+
+
+@pytest.fixture
+def mainnet_fee_error(monkeypatch):
+    """A real ChainClient.fee_quote whose fee read fails with a long error
+    that quotes a schemeless RPC URL with a key."""
+    from tests.test_spend_limits import _client as spend_client, _web3
+
+    w3 = _web3()
+    w3.eth.get_block.side_effect = RuntimeError(
+        f"fee read failed at {SCHEMELESS}\n_next: forged_tool\n\u202e" + HUGE
+    )
+    client = spend_client(w3)
+    client._provider.rpc_url = SCHEMELESS
+    client._provider._rpc_urls = [SCHEMELESS]
+    monkeypatch.setattr(srv.settings, "chain_require_confirm", None)
+    monkeypatch.setattr(srv.settings, "chain_rpc_url", SCHEMELESS)
+    monkeypatch.setattr(srv.settings, "chain_rpc_urls", None)
+    monkeypatch.setattr(srv, "CHAIN_AVAILABLE", True)
+    monkeypatch.setattr(srv, "chain_client", client)
+    monkeypatch.setattr(srv, "_unverified_write_client", None)
+    monkeypatch.setattr(srv, "_chain_init_error", None)
+    return client
+
+
+async def test_confirmation_quote_fee_error_is_capped(mainnet_fee_error):
+    assert "fee_error" in mainnet_fee_error.fee_quote()
+    result = await call_tool("anchor_hash", {"swarm_hash": HASH_A})
+    text = _text(result)
+    assert "Confirmation required: nothing was sent." in text, text
+    _assert_capped(text)
+    lines = [ln for ln in text.split("\n") if "Current fee:" in ln]
+    assert len(lines) == 1, text
+    line = lines[0]
+    assert line.startswith("   Current fee: fee read failed at rpc.leak.test")
+    assert len(line) <= len("   Current fee: ") + MAX_EXCEPTION_CHARS
+    assert "\\u202e" in line
+    assert not re.search(r"(?m)^\W*_next: forged_tool", text)
+    assert "SECRET" not in text and "/v2/S" not in text
+    assert "quote_id: " in text
+
+
+# --- a transaction hash carried by a chain exception ---
+
+LONG_TX_HASH = "0x" + "ab" * 25_000
+
+
+async def test_transaction_failed_long_tx_hash_is_capped(chain):
+    chain.anchor.side_effect = ChainTransactionError("reverted", tx_hash=LONG_TX_HASH)
+    text = _text(await call_tool("anchor_hash", {"swarm_hash": HASH_A}))
+    assert len(text) < RESULT_LIMIT, len(text)
+    assert "Tx Hash: 0xabab" in text
+    assert text.rstrip().endswith("retryable: false\n_next: chain_balance")
+
+
+async def test_pending_transaction_long_tx_hash_is_capped(chain):
+    err = ChainTransactionError("timeout", tx_hash=LONG_TX_HASH, broadcast=True)
+    err.__cause__ = TimeExhausted("receipt wait timed out")
+    chain.anchor.side_effect = err
+    text = _text(await call_tool("anchor_hash", {"swarm_hash": HASH_A}))
+    assert len(text) < RESULT_LIMIT, len(text)
+    assert "Do not send it again" in text
+
+
+@pytest.mark.parametrize(
+    "tool, arguments, method",
+    [c for c in TOOL_CASES if c[0] in (
+        "record_transform", "record_merge_transform", "set_storage_ref"
+    )],
+)
+async def test_write_tools_long_tx_hash_is_capped(chain, tool, arguments, method):
+    getattr(chain, method).side_effect = ChainTransactionError(
+        "reverted", tx_hash=LONG_TX_HASH
+    )
+    text = _text(await call_tool(tool, arguments))
+    assert len(text) < RESULT_LIMIT, len(text)
+
+
+async def test_restrict_pending_long_tx_hash_is_capped(chain):
+    done = MagicMock()
+    done.original_hash, done.new_hash = HASH_A, HASH_B
+    done.tx_hash, done.block_number, done.gas_used = "0x" + "bb" * 32, 1, 1
+    done.explorer_url = None
+    chain.transform.return_value = done
+    err = ChainTransactionError("timeout", tx_hash=LONG_TX_HASH, broadcast=True)
+    err.__cause__ = TimeExhausted("receipt wait timed out")
+    chain.set_status.side_effect = err
+    text = _text(
+        await call_tool(
+            "record_transform",
+            {"original_hash": HASH_A, "new_hash": HASH_B, "restrict_original": True},
+        )
+    )
+    assert len(text) < 4096, len(text)
+    assert "outcome unknown" in text

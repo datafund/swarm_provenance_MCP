@@ -801,9 +801,84 @@ class TestStampStatusUtilization:
             text = await self._status_text(server, details)
             assert "3%" not in text
             assert (
-                "Utilization: not available (3 filled slots in the fullest bucket)"
+                "Utilization: not available (filled slots in the fullest bucket: 3)"
                 in text
             )
+
+    async def test_singular_count_is_grammatical(self, server):
+        """A count of 1 without capacity does not read as '1 filled slots'."""
+        text = await self._status_text(server, {"utilization": 1})
+        assert "1 filled slots" not in text
+        assert (
+            "Utilization: not available (filled slots in the fullest bucket: 1)"
+            in text
+        )
+
+    async def test_integral_float_count_is_a_count(self, server):
+        """A JSON float such as 1.0 is treated as the count 1."""
+        text = await self._status_text(
+            server, {"depth": 17, "bucketDepth": 16, "utilization": 1.0}
+        )
+        assert "Utilization: 50.0% (1 of 2 slots in the fullest bucket)" in text
+        text = await self._status_text(server, {"utilization": 1.0})
+        assert (
+            "Utilization: not available (filled slots in the fullest bucket: 1)"
+            in text
+        )
+
+    async def test_non_integral_or_non_numeric_count_keeps_label(self, server):
+        """A count that is not a whole number is never printed bare."""
+        for raw, shown in ((0.5, "0.5"), ("lots", "lots"), (float("nan"), "nan")):
+            text = await self._status_text(
+                server, {"depth": 17, "bucketDepth": 16, "utilization": raw}
+            )
+            assert (
+                f"Utilization: not available (filled slots in the fullest bucket: {shown})"
+                in text
+            )
+            assert f"Utilization: {shown}\n" not in text
+
+    async def test_out_of_range_count_gives_no_percent(self, server):
+        """A negative count or one above the bucket size is not turned into a percent."""
+        for count in (-1, 5):
+            text = await self._status_text(
+                server, {"depth": 17, "bucketDepth": 16, "utilization": count}
+            )
+            assert "-50.0%" not in text
+            assert "250.0%" not in text
+            assert (
+                f"Utilization: not available (filled slots in the fullest bucket: {count})"
+                in text
+            )
+
+    async def test_out_of_range_count_with_gateway_percent(self, server):
+        """The gateway percent is still shown when the count is out of range."""
+        text = await self._status_text(
+            server,
+            {
+                "depth": 17,
+                "bucketDepth": 16,
+                "utilization": 5,
+                "utilizationPercent": 50.0,
+            },
+        )
+        assert (
+            "Utilization: 50.0% (filled slots in the fullest bucket: 5)" in text
+        )
+        assert "250.0%" not in text
+
+    async def test_gateway_percent_wins_on_disagreement(self, server):
+        """utilizationPercent is shown even if the slot count implies another value."""
+        text = await self._status_text(
+            server,
+            {
+                "depth": 17,
+                "bucketDepth": 16,
+                "utilization": 1,
+                "utilizationPercent": 75.0,
+            },
+        )
+        assert "Utilization: 75.0% (1 of 2 slots in the fullest bucket)" in text
 
     async def test_invalid_gateway_percent_falls_back(self, server):
         """A non-finite or boolean utilizationPercent is ignored."""

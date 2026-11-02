@@ -2268,24 +2268,34 @@ def _format_stamp_utilization(details: Dict[str, Any]) -> str:
     ):
         percent = None
 
-    count = details.get("utilization")
+    raw = details.get("utilization")
+    count = None
+    if _is_int(raw):
+        count = raw
+    elif isinstance(raw, float) and math.isfinite(raw) and raw.is_integer():
+        count = int(raw)
+
     depth = details.get("depth")
     bucket_depth = details.get("bucketDepth")
     slots = None
     if _is_int(depth) and _is_int(bucket_depth) and 0 <= bucket_depth < depth <= 255:
         slots = 2 ** (depth - bucket_depth)
 
-    if _is_int(count) and slots is not None:
+    if count is not None and slots is not None and 0 <= count <= slots:
+        # The gateway's utilizationPercent wins when it disagrees with the count.
         if percent is None:
             percent = count / slots * 100
         return f"{percent:.1f}% ({count} of {slots} slots in the fullest bucket)"
+
+    detail = None
+    if raw is not None:
+        shown = count if count is not None else _gw(raw, 40)
+        detail = f"filled slots in the fullest bucket: {shown}"
     if percent is not None:
-        return f"{percent:.1f}%"
-    if _is_int(count):
-        return f"not available ({count} filled slots in the fullest bucket)"
-    if count is None:
-        return "N/A"
-    return _gw(count)
+        return f"{percent:.1f}% ({detail})" if detail else f"{percent:.1f}%"
+    if detail:
+        return f"not available ({detail})"
+    return "N/A"
 
 
 async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:

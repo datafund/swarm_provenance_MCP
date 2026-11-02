@@ -294,10 +294,11 @@ class TestScalabilityLimits:
     def test_sustained_operation_stability(self):
         """Test that sustained operations remain stable.
 
-        Compares the median of the first 10 operations with the median of the
-        last 10, once. A median ignores single slow outliers from scheduler
-        noise, and one check avoids the false positives of re-checking after
-        every operation.
+        Discards the first 2 operations as warm-up, because the first
+        asyncio.run call is cold. Then compares the median of the first 10
+        measured operations with the median of the last 10, once. A median
+        ignores single slow outliers from scheduler noise, and one check avoids
+        the false positives of re-checking after every operation.
         """
         from swarm_provenance_mcp.server import handle_health_check
 
@@ -305,14 +306,16 @@ class TestScalabilityLimits:
             mock_client.health_check.return_value = {"status": "healthy"}
 
             # Run many operations to test for memory leaks or performance degradation
+            warmup = 2
             times = []
-            for i in range(50):
+            for i in range(warmup + 50):
                 start = time.time()
 
                 # Run async operation
                 asyncio.run(handle_health_check({}))
 
-                times.append(time.time() - start)
+                if i >= warmup:
+                    times.append(time.time() - start)
 
             # Performance shouldn't degrade more than 50%
             early_median = statistics.median(times[:10])

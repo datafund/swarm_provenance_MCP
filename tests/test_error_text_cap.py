@@ -312,3 +312,133 @@ async def test_restrict_pending_long_tx_hash_is_capped(chain):
     )
     assert len(text) < 4096, len(text)
     assert "outcome unknown" in text
+
+
+# --- identifiers and guidance that sit inside capped exception text ---
+
+TX_HASH = "0x" + "cd" * 32
+
+
+async def test_restrict_failure_not_pending_prints_tx_hash_in_full(chain):
+    """A broadcast status change that failed without a timeout: the tx hash
+    that ChainTransactionError appends to its text is cut by the cap, so it
+    is printed on its own line."""
+    done = MagicMock()
+    done.original_hash, done.new_hash = HASH_A, HASH_B
+    done.tx_hash, done.block_number, done.gas_used = "0x" + "bb" * 32, 1, 1
+    done.explorer_url = None
+    chain.transform.return_value = done
+    chain.set_status.side_effect = ChainTransactionError(
+        HUGE, tx_hash=TX_HASH, broadcast=True
+    )
+    text = _text(
+        await call_tool(
+            "record_transform",
+            {"original_hash": HASH_A, "new_hash": HASH_B, "restrict_original": True},
+        )
+    )
+    assert "Transform succeeded but failed to restrict original" in text
+    assert f"   Tx Hash: {TX_HASH}\n" in text, text
+    _assert_capped(text, limit=4096)
+
+
+async def test_restrict_failure_without_tx_hash_has_no_tx_line(chain):
+    done = MagicMock()
+    done.original_hash, done.new_hash = HASH_A, HASH_B
+    done.tx_hash, done.block_number, done.gas_used = "0x" + "bb" * 32, 1, 1
+    done.explorer_url = None
+    chain.transform.return_value = done
+    chain.set_status.side_effect = ChainError("refused")
+    text = _text(
+        await call_tool(
+            "record_transform",
+            {"original_hash": HASH_A, "new_hash": HASH_B, "restrict_original": True},
+        )
+    )
+    assert "failed to restrict original: refused" in text
+    # Only the transform's own Tx Hash line, none for the status change.
+    assert text.count("Tx Hash:") == 1, text
+
+
+async def test_generic_handler_prints_tx_hash_in_full(chain, monkeypatch):
+    async def broken(arguments):
+        raise ChainTransactionError(HUGE, tx_hash=TX_HASH, broadcast=True)
+
+    monkeypatch.setattr(srv, "handle_anchor_hash", broken)
+    text = _text(await call_tool("anchor_hash", {"swarm_hash": HASH_A}))
+    assert text.startswith("Error executing anchor_hash: rpc says no")
+    assert f"\n   Tx Hash: {TX_HASH}\n" in text, text
+    _assert_capped(text)
+
+
+# Server-written chain errors carry guidance inside their text. With the most
+# extreme values their variable parts can take, they must still fit the cap.
+
+
+def _fee_cap_error():
+    from swarm_provenance_mcp.chain.spend import SpendGuard
+    from tests.test_spend_limits import BASE_MAINNET, _web3
+
+    # Largest fees that still format (the next power overflows a float), and
+    # a tip far above the base fee, which adds the extra endpoint warning.
+    w3 = _web3(base_fee_wei=10**306)
+    w3.eth.fee_history.return_value = {"reward": [[10**308 - 1]] * 5}
+    with pytest.raises(ChainError) as info:
+        SpendGuard(BASE_MAINNET).fee_fields(w3)
+    return info.value
+
+
+def _tx_limit_error():
+    from swarm_provenance_mcp.chain.spend import SpendGuard
+    from tests.test_spend_limits import BASE_MAINNET
+
+    guard = SpendGuard(BASE_MAINNET, max_txs=10**9)
+    with pytest.raises(ChainError) as info:
+        guard._check(10**9 + 1, 0)
+    return info.value
+
+
+def _budget_error():
+    from swarm_provenance_mcp.chain.spend import SpendGuard
+    from tests.test_spend_limits import BASE_MAINNET
+
+    # Far beyond any real budget; larger values overflow the float maths.
+    guard = SpendGuard(BASE_MAINNET, budget_eth=1e15)
+    with pytest.raises(ChainError) as info:
+        guard._check(1, 10**60)
+    return info.value
+
+
+def _chain_id_mismatch_error():
+    from types import SimpleNamespace
+
+    from swarm_provenance_mcp.chain.provider import ChainProvider
+
+    fake = SimpleNamespace(
+        chain="base-sepolia",
+        chain_id=84532,
+        rpc_url="https://base-sepolia.g.alchemy.com/v2/key",
+        _verified=set(),
+    )
+    w3 = MagicMock()
+    w3.eth.chain_id = 2**256 - 1  # the largest value eth_chainId can carry
+    with pytest.raises(ChainError) as info:
+        ChainProvider.check_chain_id(fake, w3)
+    return info.value
+
+
+@pytest.mark.parametrize(
+    "make, ending",
+    [
+        (_fee_cap_error, "check the endpoint."),
+        (_tx_limit_error, "raise the limit to continue."),
+        (_budget_error, "Not sent."),
+        (_chain_id_mismatch_error, "or CHAIN_NAME."),
+    ],
+    ids=["fee-cap", "tx-limit", "budget", "chain-id-mismatch"],
+)
+def test_server_written_chain_errors_fit_the_cap(chain, make, ending):
+    error = make()
+    text = srv._exc_text(error)
+    assert text.endswith(ending), text
+    assert not text.endswith("…")

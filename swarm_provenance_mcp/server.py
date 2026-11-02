@@ -651,6 +651,16 @@ def _exc_tx_hash(e: Any) -> str:
     return one_line(getattr(e, "tx_hash", None) or "", 80)
 
 
+def _exc_tx_line(e: Any) -> str:
+    """A "Tx Hash:" line for a chain exception that carries one, else "".
+
+    ChainTransactionError appends the hash to its text, but the cap in
+    ``_exc_text`` can cut it off, so it is printed on its own line.
+    """
+    tx = _exc_tx_hash(e)
+    return f"\n   Tx Hash: {tx}" if tx else ""
+
+
 def _may_be_pending(e: Exception) -> bool:
     """Whether a failed write may still land: it was broadcast and then the
     endpoint dropped out or the receipt wait timed out."""
@@ -718,7 +728,9 @@ def _restrict_failure_text(e: Exception, transform_tx: str, original: str) -> st
             + "\nretryable: false"
         )
     return (
-        f"\n\n   ⚠️  Transform succeeded but failed to restrict original: {_exc_text(e)}\n"
+        f"\n\n   ⚠️  Transform succeeded but failed to restrict original: {_exc_text(e)}"
+        + _exc_tx_line(e)
+        + "\n"
         + recorded
         + "failed.\n"
         + restrict_call
@@ -1923,7 +1935,8 @@ def create_server() -> Server:
                     TextContent(
                         type="text",
                         text=_format_error(
-                            f"Error executing {name}: {_exc_text(e)}",
+                            f"Error executing {name}: {_exc_text(e)}"
+                            + _exc_tx_line(e),
                             retryable=retryable,
                             next_tool=_recovery_hint(e),
                         ),

@@ -62,11 +62,11 @@ jobs:
 
     - name: Run performance baseline tests
       run: |
-        pytest tests/test_performance_regression.py -v --tb=short -m "not slow"
+        pytest tests/test_performance_regression.py -v --tb=short -m "not slow" --run-performance
 
     - name: Run sustained load tests
       run: |
-        pytest tests/test_performance_regression.py -v --tb=short -m "slow"
+        pytest tests/test_performance_regression.py -v --tb=short -m "slow" --run-performance
       continue-on-error: true
 
   compatibility-tests:

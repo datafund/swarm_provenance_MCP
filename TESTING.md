@@ -25,6 +25,11 @@ Monitor system performance and resource usage:
 - Concurrency handling
 - Resource leak detection
 
+Tests that assert on wall-clock time carry the `performance` marker. The
+`--run-performance` flag is required to run them. Without it, pytest skips them
+and still reports success, because machine load makes them fail at random.
+The resource leak checks in this module run without the flag.
+
 ### 4. **Security Tests** (`test_security_safety.py`)
 Prevent security vulnerabilities and ensure safe data handling:
 - Input validation and sanitization
@@ -62,8 +67,9 @@ python run_regression_tests.py --full
 # Schema compliance
 pytest tests/test_schema_compliance.py -v
 
-# Performance (fast tests only)
-pytest tests/test_performance_regression.py -m "not slow" -v
+# Performance (fast tests only; --run-performance is required, or the
+# timing tests are skipped)
+pytest tests/test_performance_regression.py -m "not slow" --run-performance -v
 
 # Security tests
 pytest tests/test_security_safety.py -v
@@ -88,7 +94,8 @@ Tests run automatically on:
 `tests/conftest.py` sets `SWARM_GATEWAY_URL` to `SWARM_TEST_GATEWAY_URL`, or to a
 closed local port if that is unset, before the package is imported. A shell
 `SWARM_GATEWAY_URL` or `.env` value does not leak into tests. Tests marked
-`integration` are skipped unless `--run-integration` is passed. Any request to
+`integration` are skipped unless `--run-integration` is passed, and tests marked
+`performance` are skipped unless `--run-performance` is passed. Any request to
 the production gateway host fails the test that sent it.
 
 To check that a fresh install starts:
@@ -113,8 +120,8 @@ SWARM_TEST_GATEWAY_URL=http://localhost:8000 pytest -m integration --run-integra
 # Security tests only
 pytest -m security
 
-# Performance tests only
-pytest -m performance
+# Performance tests only (--run-performance is required, or they are skipped)
+pytest -m performance --run-performance
 ```
 
 ## Expected Baselines

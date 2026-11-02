@@ -1170,18 +1170,19 @@ def _format_free_tier(free_tier: Any) -> str:
 
 
 def _free_tier_option() -> str:
-    """The free-tier next step, which depends on this server's PAYMENT_MODE."""
-    mode = (settings.payment_mode or "").strip().lower()
-    if mode in ("free", "free-tier"):
+    """The free-tier next step, which depends on this server's PAYMENT_MODE.
+
+    Settings only accept "free" or "" (normalised), so those are the cases.
+    """
+    if settings.payment_mode == "free":
         return (
             "Ask the gateway operator whether the free tier covers this "
             "operation: this server already requests the free tier "
             "(PAYMENT_MODE=free), and the gateway still asks for payment."
         )
-    current = _gw(settings.payment_mode or "empty", 40)
     return (
         "Use the gateway's free tier, if it offers one: this server is not "
-        f"requesting it (PAYMENT_MODE is {current}). Set PAYMENT_MODE=free "
+        "requesting it (PAYMENT_MODE is empty). Set PAYMENT_MODE=free "
         "and restart this server."
     )
 

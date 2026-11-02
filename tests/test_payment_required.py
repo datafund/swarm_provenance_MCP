@@ -302,9 +302,11 @@ class TestFormatPaymentRequired:
         assert "Set PAYMENT_MODE=free" not in text
 
     def test_free_mode_off_suggests_it(self):
-        with patch.object(server_module.settings, "payment_mode", "paid"):
+        # "" is the only other value Settings accept (#167).
+        with patch.object(server_module.settings, "payment_mode", ""):
             text = format_payment_required(_info(), "x")
         assert "Set PAYMENT_MODE=free" in text
+        assert "PAYMENT_MODE is empty" in text
 
     def test_free_tier_info_shown(self):
         free = {

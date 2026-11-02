@@ -4782,6 +4782,132 @@ class TestHealthCheckBalanceWarning:
         assert "operational" in text.lower() or "Gateway" in text
 
 
+class TestHealthCheckChainRecommendations:
+    """Chain-side recommendations must reach the _recommendations block (#212)."""
+
+    @pytest.fixture
+    def server(self):
+        return create_server()
+
+    @pytest.fixture(autouse=True)
+    def _chain_enabled(self):
+        """The chain section depends on CHAIN_ENABLED; don't read it from .env."""
+        from swarm_provenance_mcp.server import settings
+
+        with (
+            patch.object(settings, "chain_enabled", True),
+            patch("swarm_provenance_mcp.server._unverified_write_client", None),
+        ):
+            yield
+
+    @staticmethod
+    def _chain_mock(balance_wei=10**18):
+        mock_chain = MagicMock()
+        mock_chain.chain = "base-sepolia"
+        mock_chain.contract_address = "0xCONTRACT"
+        mock_chain.address = "0xWALLET"
+        mock_chain._provider.chain_id = 84532
+        mock_chain._provider.is_testnet = True
+        mock_balance = MagicMock()
+        mock_balance.address = "0xWALLET"
+        mock_balance.balance_wei = balance_wei
+        mock_balance.chain = "base-sepolia"
+        mock_chain.balance.return_value = mock_balance
+        return mock_chain
+
+    async def _run(self, server, *, chain_client=None, chain_available=True,
+                   init_error=None, stamps=None):
+        if stamps is None:
+            stamps = [{"batchID": TEST_STAMP_ID, "usable": True}]
+        with (
+            patch("swarm_provenance_mcp.server.gateway_client") as mock_gw,
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", chain_available),
+            patch("swarm_provenance_mcp.server.chain_client", chain_client),
+            patch("swarm_provenance_mcp.server._chain_init_error", init_error),
+        ):
+            mock_gw.health_check.return_value = {
+                "status": "healthy",
+                "gateway_url": "http://localhost",
+                "response_time_ms": 10,
+            }
+            mock_gw.list_stamps.return_value = {
+                "stamps": stamps,
+                "total_count": len(stamps),
+            }
+            result = await call_tool_directly(server, "health_check", {})
+        assert not result.isError
+        return result.content[0].text
+
+    @staticmethod
+    def _recommendations(text):
+        """The bullet lines of the single _recommendations block."""
+        assert text.count("_recommendations:") == 1, text
+        block = text.split("_recommendations:", 1)[1]
+        lines = []
+        for line in block.split("\n")[1:]:
+            if not line.startswith("  - "):
+                break
+            lines.append(line[4:])
+        return lines
+
+    async def test_low_balance_recommendation_is_listed(self, server):
+        text = await self._run(server, chain_client=self._chain_mock(balance_wei=0))
+        recs = self._recommendations(text)
+        assert any(r.startswith("Wallet balance too low") for r in recs), text
+
+    async def test_rpc_unreachable_recommendation_is_listed(self, server):
+        mock_chain = self._chain_mock()
+        mock_chain.health_check.side_effect = Exception("connection refused")
+        text = await self._run(server, chain_client=mock_chain)
+        assert "Chain anchoring enabled but RPC unreachable" in self._recommendations(
+            text
+        )
+
+    async def test_chain_id_mismatch_recommendation_is_listed(self, server):
+        from swarm_provenance_mcp.chain.exceptions import ChainIdMismatchError
+
+        mock_chain = self._chain_mock()
+        mock_chain.health_check.side_effect = ChainIdMismatchError("mismatch")
+        text = await self._run(server, chain_client=mock_chain)
+        recs = self._recommendations(text)
+        assert any(
+            r.startswith("RPC is on another chain than CHAIN_NAME") for r in recs
+        ), text
+
+    async def test_writes_disabled_recommendation_is_listed(self, server):
+        text = await self._run(
+            server, chain_client=None, init_error="No contract code at 0xCONTRACT."
+        )
+        recs = self._recommendations(text)
+        assert any(r.startswith("Chain writes disabled") for r in recs), text
+
+    async def test_missing_dependencies_recommendation_is_listed(self, server):
+        text = await self._run(server, chain_available=False)
+        recs = self._recommendations(text)
+        assert any(r.startswith("Reinstall with: pip install -e .") for r in recs), text
+
+    async def test_gateway_and_chain_recommendations_share_one_block(self, server):
+        mock_chain = self._chain_mock()
+        mock_chain.health_check.side_effect = Exception("connection refused")
+        text = await self._run(server, chain_client=mock_chain, stamps=[])
+        recs = self._recommendations(text)
+        assert "No stamps found — purchase one before uploading" in recs
+        assert "Chain anchoring enabled but RPC unreachable" in recs
+        # Layout is unchanged: ready, recommendations, chain block, gateway.
+        assert (
+            text.index("ready: false")
+            < text.index("_recommendations:")
+            < text.index("⛓️  Chain:")
+            < text.index("_gateway:")
+        )
+
+    async def test_no_recommendations_block_when_all_healthy(self, server):
+        text = await self._run(server, chain_client=self._chain_mock())
+        assert "_recommendations:" not in text
+        assert "ready: true" in text
+        assert text.index("ready: true") < text.index("⛓️  Chain:")
+
+
 class TestAnchorAlreadyRegisteredRevert:
     """Test anchor() catching 'already registered' reverts from stale RPC."""
 

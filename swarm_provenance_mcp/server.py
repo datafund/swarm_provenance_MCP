@@ -3017,24 +3017,18 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
 
         response_text += stamps_info
 
-        # Summary
-        response_text += f"\nready: {str(ready).lower()}"
-
-        if recommendations:
-            response_text += "\n_recommendations:"
-            for rec in recommendations:
-                response_text += f"\n  - {rec}"
-
-        # Chain anchoring status
+        # Chain anchoring status. Built before the summary so that its
+        # recommendations reach the _recommendations list (#212).
+        chain_text = ""
         if settings.chain_enabled:
             await _recheck_write_contract()
             if CHAIN_AVAILABLE and chain_client:
                 try:
                     chain_client.health_check()
-                    response_text += f"\n\n⛓️  Chain: {chain_client.chain} (connected)"
-                    response_text += _chain_id_lines(chain_client._provider)
-                    response_text += f"\n   Contract: {chain_client.contract_address}"
-                    response_text += f"\n   Wallet: {chain_client.address}"
+                    chain_text += f"\n\n⛓️  Chain: {chain_client.chain} (connected)"
+                    chain_text += _chain_id_lines(chain_client._provider)
+                    chain_text += f"\n   Contract: {chain_client.contract_address}"
+                    chain_text += f"\n   Wallet: {chain_client.address}"
                     # Proactive balance check — warn if wallet can't transact
                     try:
                         wallet_info = chain_client.balance()
@@ -3044,7 +3038,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                             wallet_info.chain,
                         )
                         if guidance:
-                            response_text += guidance
+                            chain_text += guidance
                             recommendations.append(
                                 "Wallet balance too low for write operations — "
                                 "fund it before using anchor_hash or record_transform"
@@ -3054,11 +3048,11 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 except Exception as chain_err:
                     from .chain.exceptions import ChainIdMismatchError
 
-                    response_text += (
+                    chain_text += (
                         f"\n\n⛓️  Chain: {settings.chain_name} "
                         f"(error: {_gw(chain_err, 200)})"
                     )
-                    response_text += _chain_id_lines(chain_client._provider)
+                    chain_text += _chain_id_lines(chain_client._provider)
                     recommendations.append(
                         "RPC is on another chain than CHAIN_NAME — fix "
                         "CHAIN_RPC_URL / CHAIN_RPC_URLS or CHAIN_NAME"
@@ -3067,7 +3061,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     )
             elif CHAIN_AVAILABLE and _chain_init_error:
                 # Wallet configured, but the contract check failed
-                response_text += (
+                chain_text += (
                     f"\n\n⛓️  Chain: {settings.chain_name} (writes disabled)\n   "
                     + _writes_disabled_text().replace("\n", "\n   ")
                 )
@@ -3077,26 +3071,36 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 )
             elif CHAIN_AVAILABLE:
                 # Dependencies present but no wallet → read-only mode
-                response_text += (
+                chain_text += (
                     f"\n\n⛓️  Chain: {settings.chain_name} "
                     f"(read-only, no wallet — set PROVENANCE_WALLET_KEY for write tools)"
                 )
                 try:
                     reader = await asyncio.to_thread(_chain_reader)
-                    response_text += _chain_id_lines(reader._provider)
+                    chain_text += _chain_id_lines(reader._provider)
                 except Exception as chain_err:
-                    response_text += f"\n   Chain error: {chain_err}"
+                    chain_text += f"\n   Chain error: {chain_err}"
                     configured = _effective_chain_id(settings.chain_name)
                     if configured is not None:
-                        response_text += (
+                        chain_text += (
                             f"\n   Chain ID: {configured} "
                             "(configured, not verified against the RPC)"
                         )
             else:
-                response_text += "\n\n⛓️  Chain: enabled but dependencies not available"
+                chain_text += "\n\n⛓️  Chain: enabled but dependencies not available"
                 recommendations.append(
                     "Reinstall with: pip install -e . (web3/eth-account should be included)"
                 )
+
+        # Summary
+        response_text += f"\nready: {str(ready).lower()}"
+
+        if recommendations:
+            response_text += "\n_recommendations:"
+            for rec in recommendations:
+                response_text += f"\n  - {rec}"
+
+        response_text += chain_text
 
         # Gateway status
         response_text += f"\n_gateway: {gateway_url} ({'connected' if gateway_ok else 'unreachable'})"

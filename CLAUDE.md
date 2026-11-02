@@ -108,8 +108,8 @@ On-chain provenance module. Dependencies (web3, eth-account) included in default
 #### Swarm Gateway Tools
 - `purchase_stamp` - Create new postage stamps (response includes propagation timing)
 - `get_stamp_status` - Retrieve detailed stamp information (includes utilization + propagation data)
-- `list_stamps` - List local stamps with access mode (owned/shared) and propagation status
-  Stamps have `accessMode`: `"owned"` (dedicated, yours) or `"shared"` (public, any gateway user). Use owned stamps for production.
+- `list_stamps` - List local stamps with access mode (shared/owned/pool) and propagation status
+  Stamps have `accessMode`: `"shared"` (public, any gateway user), `"owned"` (registered to the x402 wallet that paid for it) or `"pool"` (gateway inventory). This server sends no wallet, so the gateway refuses its uploads to `owned` and `pool` stamps; MCP_INSTRUCTIONS, the `stamp-management` prompt and the `list_stamps` hint say so.
 - `extend_stamp` - Extend stamp duration
 - `upload_data` - Upload data to Swarm (max 4KB). Optional `sign: "notary"` makes the gateway sign the data; check `get_notary_info` first. With notary, `data` must be a JSON object with a top-level `data` field (`{"data": {...}, "signatures": []}`), or the gateway returns 400 `INVALID_DOCUMENT_FORMAT`; a disabled notary returns 400 `NOTARY_NOT_ENABLED` or `NOTARY_NOT_CONFIGURED`. The signed document is stored as `application/json`, so the result labels the size "before signing"
 - `download_data` - Download data from Swarm by reference hash
@@ -151,7 +151,7 @@ Blockchain dependencies (web3, eth-account) are included in the default install.
 - **Performance Tests** (`test_performance_regression.py`): Handler response time and concurrency regression tests, plus resource-leak checks. Tests that assert on wall-clock time carry the `performance` marker and are skipped unless `--run-performance` is passed, because machine load makes them fail at random. The `performance-tests` job in `.github/workflows/regression_tests.yml` passes the flag. Mark any new wall-clock test in `test_performance_regression.py` `performance`; `tests/test_performance_marker_gating.py` enforces this for that module only, because the job runs only that module. Security and timeout guards in other modules that assert on wall-clock time with generous bounds stay unmarked and run in the default suite: the ReDoS linearity checks in `test_redact_logs.py` and `test_redact_tool_output.py`, and the startup budget check in `test_contract_verification.py`
 - **User Tests** (`user-tests/`): Live end-to-end UX audit against real gateway and blockchain (not run in CI)
 - **Production gateway guard** (`tests/conftest.py`): the test run forces `SWARM_GATEWAY_URL` to `SWARM_TEST_GATEWAY_URL` (default: a closed local port), skips `integration` tests unless `--run-integration` is passed and `performance` tests unless `--run-performance` is passed, and fails any test that sends a request to the production gateway
-- **Release gate**: `.github/workflows/tests.yml` (unit tests, fresh-install stdio smoke, image stdio smoke) runs on PRs to `main`/`development` and is called by `docker-publish.yml` before any push; `scripts/mcp_stdio_smoke.py` is the stdio `initialize` + `tools/list` check
+- **Release gate**: `.github/workflows/tests.yml` (unit tests, fresh-install stdio smoke, image stdio smoke) runs on PRs to `main`/`development` and is called by `docker-publish.yml` before any push; `scripts/mcp_stdio_smoke.py` is the stdio `initialize` + `tools/list` + `resources/read provenance://skills` check
 - **Async Support**: Uses `pytest-asyncio` for async test execution
 - **Mocking**: Uses `pytest-mock` and `unittest.mock` for external dependency mocking
 
@@ -160,15 +160,15 @@ Blockchain dependencies (web3, eth-account) are included in the default install.
 ### Environment Variables
 Read from the process environment, then an env file. The env file is never taken from the working directory: it is `SWARM_PROVENANCE_ENV_FILE` if set (must be an absolute path to an existing file), else `~/.config/swarm-provenance-mcp/.env` (or under `$XDG_CONFIG_HOME`). Unknown keys are ignored (`extra="ignore"`). pydantic-settings v2 ignores `Field(env=...)`: a variable name that differs from the field name needs `validation_alias`. `tests/test_config_loading.py` checks every documented name.
 - `SWARM_PROVENANCE_ENV_FILE`: Explicit env file path
-- `SWARM_GATEWAY_URL`: Gateway endpoint (default: `https://provenance-gateway.datafund.io`)
+- `SWARM_GATEWAY_URL`: Gateway endpoint (default: `https://provenance-gateway.datafund.io`). Validated in `Settings` and stored stripped of surrounding whitespace: `http`/`https` with a host and a valid port if one is given, else start-up fails; plain http to a non-loopback host logs a WARNING and adds a `health_check` recommendation (`is_plain_http_remote`). `gateway_client._GatewaySession` drops `ORIGIN_BOUND_HEADERS` (`X-Payment-Mode`) on a cross-origin redirect
 - `DEFAULT_STAMP_DURATION_HOURS`: Default stamp duration in hours, minimum 24 (default: `25`)
 - `DEFAULT_STAMP_SIZE`: Default stamp size — `small`, `medium`, or `large` (default: `small`)
-- `PAYMENT_MODE`: Gateway payment tier — `free` for rate-limited free tier (default: `free`)
+- `PAYMENT_MODE`: Gateway payment tier: `free` for the rate-limited free tier, or empty for no `X-Payment-Mode` header (default: `free`). Stripped and lower-cased; any other value fails at start-up
 - `MCP_SERVER_NAME`: Server identification (default: `swarm-provenance-mcp`)
 - `MCP_SERVER_VERSION`: Server version (default: `0.2.0`)
 - `CHAIN_ENABLED`: Enable on-chain provenance anchoring (default: `false`)
 - `CHAIN_NAME`: Blockchain network (`base-sepolia`, `base`, or `localhost`, default: `base-sepolia`)
-- `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x)
+- `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x). Unset or empty means read-only mode. A key that is set but invalid is not read-only mode: start-up logs an ERROR (without the key) and starts with writes disabled (`_chain_init_error = WALLET_KEY_INVALID_REASON`, fix text in `_chain_init_fix`), reported by the write tools, `chain_health` and `health_check`
 - `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set)
 - `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs, tried in order after `CHAIN_RPC_URL`
 - `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set); `CHAIN_CONTRACT_ADDRESS` also accepted, `CHAIN_CONTRACT` wins
@@ -182,7 +182,7 @@ Read from the process environment, then an env file. The env file is never taken
 - `MAX_STAMP_DURATION_HOURS`: Maximum `duration_hours` for `purchase_stamp` / `extend_stamp` (default: `8760`)
 
 ### Settings Management
-The `config.py` module uses Pydantic Settings for type-safe configuration with automatic environment variable loading and validation.
+The `config.py` module uses Pydantic Settings for type-safe configuration with automatic environment variable loading and validation. `load_settings()` turns a refused setting into `ConfigurationError`, whose message names each variable and its rule but never the value (a URL can carry credentials), and start-up ends with that one line instead of a pydantic traceback.
 
 ## Development Patterns
 
@@ -193,16 +193,16 @@ The `config.py` module uses Pydantic Settings for type-safe configuration with a
 - RPC failover: public `ChainClient` methods are wrapped in `@_rpc_failover` — on a transport error they switch to the next healthy RPC, rebind the contract, and re-run. Never re-runs once `send_raw_transaction` was attempted (`ChainTransactionError.broadcast`). With no usable fallback they raise `ChainConnectionError` (reported `retryable: true`)
 - Spending limits (`chain/spend.py`, `SpendGuard`): `ChainClient._send_transaction` sets explicit fee fields within `CHAIN_MAX_FEE_GWEI` (priority fee from `eth_feeHistory`, default 0.001 gwei, not web3's 1 gwei fallback) and reserves the worst-case cost (L2 gas plus L1 allowance) against the session budget and transaction count before signing; a node-rejected broadcast releases it. A refusal raises `ChainSpendLimitError` (never failed over, reported `retryable: false`). Multi-transaction operations (`record_transform` with `restrict_original`) hold all their slots up front via `hold_transactions()` / `using_hold()`; if the second transaction still fails the tool returns `isError: true` with the first tx hash. Gas-spending tools take `confirm` + `quote_id`; when confirmation is required (mainnet by default) the quote is bound to the exact arguments (`_spend_confirmation` in `server.py`). All tools carry MCP `ToolAnnotations` (`TOOL_ANNOTATIONS` in `server.py`); tools that spend funds are marked destructive and non-idempotent
 - Write confirmation: before the first transaction `ChainClient.verify_contract()` requires DataProvenance code at the configured address (`eth_getCode` plus function selectors; also run at start-up through each RPC with a 5 s budget per endpoint — an endpoint answering "no code" is outvoted by one on the same chain that has the code, and the client switches to it — where a failure disables the write tools, which report why in their errors, `health_check` and `chain_health`, and re-check before each write). After each write the receipt must contain the expected event from the contract address (`DataProvenanceContract.receipt_has_event()`); a status-1 receipt without it raises `ChainTransactionError` instead of reporting success. `str(ChainTransactionError)` includes its `tx_hash`
-- Log hygiene: RPC URLs can carry API keys in the path or query. Log lines show hosts only: `redact.url_host()` for URLs, `redact.redact_urls()` for exception text from web3/requests calls (it cuts every URL to scheme, host and port)
+- Log hygiene: RPC URLs can carry API keys in the path or query. Log lines show hosts only: `redact.url_host()` for URLs, `redact.redact_urls()` for exception text from web3/requests calls (it cuts every URL to scheme, host and port). The gateway URL is logged and shown in `health_check` through `redact.url_without_userinfo()` (scheme, host, port and path; no `user:password@`, query or fragment)
 - Chain-specific error handling: insufficient funds detection with faucet/bridge guidance, "already registered" revert catch, duplicate transformation detection via state read (v2) or event cache (v1), proactive balance warnings in health_check
 
 ### Agent Guidance (MCP Design Guidelines)
-- **Adaptive health_check**: Returns `ready` boolean, `_recommendations`, `_gateway`, and contextual `_next` based on stamp availability
+- **Adaptive health_check**: Returns `ready` boolean, `_recommendations`, `_gateway`, and contextual `_next` based on stamp availability. Only usable stamps this server can write to count toward `ready`: `accessMode` `shared` or absent. `pool` and `owned` stamps are refused by the gateway for this server, which sends no wallet (`_writable_stamp_counts` in `server.py`). A writable stamp that is not usable yet, with no lasting `unusableReason` (expired, expiring_soon, full, invalid_depth, unreadable; `not_found` only when `secondsSincePurchase` is a plain int from 0 to 179), counts as pending: the recommendation names it and `_next` is `check_stamp_health`, never `purchase_stamp`, so the agent does not buy a duplicate. Each stamp branch's recommendation and `_next` agree (`TestHealthCheckBranchHintsAgree`)
 - **Response hints**: All success responses append `_next: <tool>` and `_related: <tools>` guiding agents to the logical next step
 - **Structured errors**: All error responses include `retryable: true|false` and `_next` recovery hint
 - **Typo correction**: Unknown tool names get Levenshtein-based "Did you mean?" suggestions
 - **MCP Prompts**: 4 workflow prompts (`provenance-upload`, `provenance-verify`, `stamp-management`, `provenance-chain-workflow`) registered via `@server.list_prompts()` / `@server.get_prompt()`
-- **MCP Resources**: `provenance://skills` resource (SKILLS.md content) via `@server.list_resources()` / `@server.read_resource()`
+- **MCP Resources**: `provenance://skills` resource (SKILLS.md content) via `@server.list_resources()` / `@server.read_resource()`. `SKILLS.md` lives in the package (`swarm_provenance_mcp/SKILLS.md`, declared as package data) and is read with `importlib.resources`, so non-editable installs and the Docker image serve it
 - **Gateway status**: health_check reports swarm_connect gateway connectivity in `_gateway` field
 - **Insufficient funds**: `_is_insufficient_funds_error()` and `_format_insufficient_funds_error()` provide faucet/bridge URLs
 - **Payment required (HTTP 402)**: `_raise_with_detail` raises `PaymentRequiredError` (a `requests.HTTPError` subclass) with `payment_info` from `parse_payment_required()`, which reads the x402 body at the top level, under `detail`, or in a `PAYMENT-REQUIRED` header, and tolerates empty or non-JSON bodies. `purchase_stamp`, `upload_data` and `extend_stamp` return `format_payment_required()` with `retryable: false`. Amounts are atomic units; only the known USDC contracts (6 decimals) are converted. Paid x402 is not supported, so the options never offer it

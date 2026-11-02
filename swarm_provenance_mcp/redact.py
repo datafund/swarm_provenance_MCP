@@ -8,7 +8,7 @@ through ``redact_urls`` before it is logged or returned to the agent.
 
 import re
 from typing import Any, Iterable, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 # scheme://authority, then an optional path, query or fragment.
 # - The scheme is the up to 32 letters, digits, "+", "." or "-" right before
@@ -45,6 +45,23 @@ def url_host(url: Any, default: str = "<rpc>") -> str:
         return urlparse(str(url)).hostname or default
     except Exception:
         return default
+
+
+def url_without_userinfo(url: Any, default: str = "<gateway>") -> str:
+    """``scheme://host[:port]/path`` of a URL: no ``user:password@``, query or
+    fragment, which can carry credentials. ``default`` if it has no host."""
+    try:
+        parts = urlsplit(str(url).strip())
+        host = parts.hostname
+        port = parts.port
+    except (ValueError, TypeError):
+        return default
+    if not parts.scheme or not host:
+        return default
+    if ":" in host:  # IPv6
+        host = f"[{host}]"
+    netloc = f"{host}:{port}" if port is not None else host
+    return f"{parts.scheme}://{netloc}{parts.path}"
 
 
 def rpc_host(url: Any, default: str = "") -> str:

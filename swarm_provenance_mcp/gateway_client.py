@@ -8,6 +8,7 @@ import requests
 from requests.exceptions import RequestException
 
 from .config import settings
+from .redact import url_without_userinfo
 from .untrusted import MAX_ERROR_DETAIL_CHARS, flatten, one_line
 
 # Longest gateway string value passed on to the server, in characters.
@@ -152,6 +153,26 @@ def _merge_payment_source(info: Dict[str, Any], src: Dict[str, Any]) -> None:
         info["free_tier"] = free
 
 
+# Headers this client adds that must not reach another origin on a redirect.
+# requests already drops Authorization there, but not custom headers.
+ORIGIN_BOUND_HEADERS = ("X-Payment-Mode",)
+
+
+class _GatewaySession(requests.Session):
+    """Session that drops ORIGIN_BOUND_HEADERS on a cross-origin redirect.
+
+    Uses requests' own test for dropping Authorization
+    (``should_strip_auth``): another host, port or scheme counts as another
+    origin, except an http to https upgrade on the same host.
+    """
+
+    def rebuild_auth(self, prepared_request, response):
+        super().rebuild_auth(prepared_request, response)
+        if self.should_strip_auth(response.request.url, prepared_request.url):
+            for name in ORIGIN_BOUND_HEADERS:
+                prepared_request.headers.pop(name, None)
+
+
 class SwarmGatewayClient:
     """Client for interacting with the Swarm gateway API."""
 
@@ -162,7 +183,7 @@ class SwarmGatewayClient:
             base_url: Override the default gateway URL from settings
         """
         self.base_url = (base_url or settings.swarm_gateway_url).rstrip("/")
-        self.session = requests.Session()
+        self.session = _GatewaySession()
         self.session.headers.update(
             {
                 "Content-Type": "application/json",
@@ -383,7 +404,8 @@ class SwarmGatewayClient:
         health_data = _json(response) if response.content else {}
         return {
             "status": "healthy",
-            "gateway_url": self.base_url,
+            # Printed by health_check: no user:password from the URL.
+            "gateway_url": url_without_userinfo(self.base_url),
             "response_time_ms": response.elapsed.total_seconds() * 1000,
             "gateway_response": health_data,
         }

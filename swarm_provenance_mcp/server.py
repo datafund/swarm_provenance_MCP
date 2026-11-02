@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import hmac
+import importlib.resources
 import json
 import logging
 import math
@@ -10,7 +11,6 @@ import re
 import secrets
 import time
 import traceback
-from pathlib import Path
 from decimal import Decimal, localcontext
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -32,9 +32,9 @@ from mcp.types import (
 )
 from requests.exceptions import RequestException
 
-from .config import WALLET_KEY_HINT, settings
+from .config import WALLET_KEY_HINT, is_plain_http_remote, settings
 from .gateway_client import PaymentRequiredError, SwarmGatewayClient
-from .redact import mask_literal_urls, redact_urls, rpc_host
+from .redact import mask_literal_urls, redact_urls, rpc_host, url_without_userinfo
 from .untrusted import (
     MAX_EXCEPTION_CHARS,
     QUOTED_NOTE,
@@ -64,6 +64,36 @@ CHAIN_AVAILABLE = False
 # Why writes are disabled although a wallet is configured (e.g. no contract
 # code at the configured address). Reported by the write tools.
 _chain_init_error: Optional[str] = None
+
+# How to fix the cause in _chain_init_error, for the write tools' errors.
+CONTRACT_FIX = (
+    "Fix CHAIN_CONTRACT or CHAIN_NAME, then restart the server. The "
+    "address is checked again before each write."
+)
+WALLET_KEY_INVALID_REASON = (
+    "PROVENANCE_WALLET_KEY is set but is not a valid private key "
+    "(expected 64 hexadecimal characters, with or without 0x)."
+)
+WALLET_KEY_INVALID_FIX = (
+    "Fix PROVENANCE_WALLET_KEY, or remove it for read-only mode, then "
+    "restart the server. Read-only chain tools work in the meantime."
+)
+_chain_init_fix: str = CONTRACT_FIX
+
+
+def _wallet_key_is_invalid(key: Optional[str]) -> bool:
+    """Whether a configured wallet key cannot be loaded. An unset or empty
+    key is not invalid: it means read-only mode."""
+    if not key:
+        return False
+    from .chain.exceptions import ChainConfigurationError
+    from .chain.wallet import ChainWallet
+
+    try:
+        ChainWallet(private_key=key)
+    except ChainConfigurationError:
+        return True
+    return False
 
 
 def _parse_rpc_fallbacks():
@@ -191,7 +221,13 @@ if settings.chain_enabled:
         from .chain import CHAIN_AVAILABLE as _chain_avail, ChainClient
 
         CHAIN_AVAILABLE = _chain_avail
-        if CHAIN_AVAILABLE:
+        if CHAIN_AVAILABLE and _wallet_key_is_invalid(settings.provenance_wallet_key):
+            # Not read-only mode: the operator asked for writes. Neither the
+            # key nor the loader's error text (which may quote it) is logged.
+            _chain_init_error = WALLET_KEY_INVALID_REASON
+            _chain_init_fix = WALLET_KEY_INVALID_FIX
+            logger.error("Chain writes disabled: %s", WALLET_KEY_INVALID_REASON)
+        elif CHAIN_AVAILABLE:
             chain_client = ChainClient(
                 chain=settings.chain_name,
                 rpc_url=settings.chain_rpc_url,
@@ -238,11 +274,18 @@ if settings.chain_enabled:
 
 
 def _load_skills_content() -> str:
-    """Load SKILLS.md from repository root for the provenance://skills resource."""
-    skills_path = Path(__file__).parent.parent / "SKILLS.md"
+    """Load SKILLS.md for the provenance://skills resource.
+
+    The file is package data, so it is present in a non-editable install and
+    in the Docker image, not only in a source checkout.
+    """
     try:
-        return skills_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+        return (
+            importlib.resources.files("swarm_provenance_mcp")
+            .joinpath("SKILLS.md")
+            .read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, OSError):
         return "Provenance skills guide not found. See MCP_INSTRUCTIONS for basic guidance."
 
 
@@ -316,9 +359,9 @@ PAYMENT MODEL:
 This server uses the free tier by default (rate limit: 3 write requests/minute, reads unlimited). Paid x402 support is not yet integrated.
 
 STAMP OWNERSHIP:
-- Free tier: purchase_stamp provides public stamps (accessMode: "shared"). Any gateway user can upload to them — utilization is unpredictable. Suitable for testing and small workloads.
-- Own wallet: stamps you purchase are exclusively yours (accessMode: "owned"). You control capacity and TTL. Use owned stamps for production workloads.
-- list_stamps shows both. Prefer owned stamps for important data; public stamps may fill up from other users' uploads.
+- purchase_stamp creates public stamps (accessMode: "shared"). Any gateway user can upload to them, so utilization is unpredictable. Suitable for testing and small workloads.
+- This server sends no wallet, so it can upload only to "shared" stamps and stamps without an access mode. The gateway refuses its uploads to "owned" stamps (registered to the wallet that paid for them) and "pool" stamps (gateway inventory).
+- list_stamps can also show "owned" and "pool" stamps. Do not pick them for upload_data. For capacity that other users cannot fill, run your own Bee node or gateway.
 
 TYPICAL WORKFLOW:
 1. health_check — verify gateway is reachable
@@ -395,6 +438,11 @@ UPLOAD_SIGN_METHODS = frozenset({"notary"})
 # Validation patterns
 STAMP_ID_PATTERN = re.compile(r"^[a-fA-F0-9]{64}$")
 REFERENCE_HASH_PATTERN = re.compile(r"^[a-fA-F0-9]{64}$")
+# A Swarm reference to download: 64 hex characters, or 128 for an encrypted
+# reference (reference plus decryption key). Chain tools take bytes32, so they
+# keep REFERENCE_HASH_PATTERN.
+SWARM_REFERENCE_SCHEMA_PATTERN = "^([a-fA-F0-9]{64}|[a-fA-F0-9]{128})$"
+SWARM_REFERENCE_PATTERN = re.compile(SWARM_REFERENCE_SCHEMA_PATTERN)
 ADDRESS_PATTERN = re.compile(r"0x[a-fA-F0-9]{40}")
 
 # Latest Unix timestamp printed as a date (9999-12-31 23:59:59 UTC).
@@ -500,6 +548,27 @@ def validate_and_clean_reference_hash(reference: str) -> str:
             f"Invalid reference hash format. Expected 64-character hexadecimal string (without 0x prefix), got: {reference}"
         )
 
+    return reference
+
+
+def validate_and_clean_swarm_reference(reference: str) -> str:
+    """Validate a Swarm reference for download_data, removing a 0x prefix.
+
+    Accepts 64 hex characters, or 128 for an encrypted reference.
+
+    Raises:
+        ValueError: If the reference format is invalid
+    """
+    if not reference or not isinstance(reference, str):
+        raise ValueError("Reference cannot be empty")
+    if reference.startswith(("0x", "0X")):
+        reference = reference[2:]
+    if not SWARM_REFERENCE_PATTERN.match(reference):
+        raise ValueError(
+            "Invalid Swarm reference format. Expected 64 or 128 hexadecimal "
+            "characters (128 for an encrypted reference), without 0x prefix; "
+            f"got {len(reference)} characters"
+        )
     return reference
 
 
@@ -643,10 +712,19 @@ def _format_hints(next_tool: str, related: List[str]) -> str:
 
 def _writes_disabled_text() -> str:
     """Why write tools are disabled although a wallet is configured."""
+    return f"Chain writes are disabled: {_chain_init_error}\n{_chain_init_fix}"
+
+
+def _writes_disabled_recommendation() -> str:
+    """health_check recommendation for disabled writes."""
+    if _chain_init_fix == WALLET_KEY_INVALID_FIX:
+        return (
+            "Chain writes disabled: PROVENANCE_WALLET_KEY is not a valid "
+            "private key. Fix it, or remove it for read-only mode"
+        )
     return (
-        f"Chain writes are disabled: {_chain_init_error}\n"
-        "Fix CHAIN_CONTRACT or CHAIN_NAME, then restart the server. The "
-        "address is checked again before each write."
+        "Chain writes disabled: no DataProvenance contract at the "
+        "configured address — fix CHAIN_CONTRACT or CHAIN_NAME"
     )
 
 
@@ -944,6 +1022,136 @@ def _label(label: Any) -> str:
     return quote(flatten(label, MAX_GATEWAY_STRING_CHARS))
 
 
+# accessMode values of stamps this server can write to. It sends no wallet,
+# so only shared stamps qualify, plus stamps without an access mode (gateways
+# that do not report one). "pool" is gateway inventory and "owned" belongs to
+# the wallet that paid for it: the gateway refuses both.
+_WRITABLE_ACCESS_MODES = ("shared", None)
+
+
+# unusableReason values (gateway) after which waiting does not help.
+# "unreadable": the gateway could not parse the batch's TTL or depth.
+_SPENT_REASONS = ("expired", "expiring_soon", "full", "invalid_depth", "unreadable")
+# A "not_found" batch bought through the gateway less than this many seconds
+# ago (its secondsSincePurchase) may not have reached the node yet: wait for
+# it. Older, or of unknown age, it will not appear.
+NOT_FOUND_GRACE_SECONDS = 180
+
+
+def _recently_purchased(stamp: Dict[str, Any]) -> bool:
+    """Whether the gateway reports the stamp as bought less than
+    NOT_FOUND_GRACE_SECONDS ago. Only a plain non-negative int counts."""
+    age = stamp.get("secondsSincePurchase")
+    return (
+        isinstance(age, int)
+        and not isinstance(age, bool)
+        and 0 <= age < NOT_FOUND_GRACE_SECONDS
+    )
+
+
+def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
+    """Usable stamps in a list_stamps answer, split by whether this server can
+    write to them, plus ``pending`` (writable stamps not usable yet, which may
+    still be propagating; ``pending_ids`` holds their valid batch IDs) and
+    ``blocked`` (every stamp this server cannot use, by kind; ``spent`` is a
+    writable stamp the gateway reports as expired, full or about to expire).
+    Entries that are not objects are not counted."""
+    counts: Dict[str, Any] = {
+        "writable": 0, "pending": 0, "pool": 0, "owned": 0, "other": 0
+    }
+    counts["pending_ids"] = []
+    # Every stamp this server cannot use, usable or not, by kind.
+    blocked = {"pool": 0, "owned": 0, "other": 0, "spent": 0}
+    counts["blocked"] = blocked
+    for stamp in stamps:
+        if not isinstance(stamp, dict):
+            continue
+        mode = stamp.get("accessMode")
+        writable = mode is None or (
+            isinstance(mode, str) and mode in _WRITABLE_ACCESS_MODES
+        )
+        if not writable:
+            blocked[mode if mode in ("pool", "owned") else "other"] += 1
+        if stamp.get("usable") is not True:
+            if not writable:
+                continue
+            reason = stamp.get("unusableReason")
+            if isinstance(reason, str) and (
+                reason in _SPENT_REASONS
+                or (reason == "not_found" and not _recently_purchased(stamp))
+            ):
+                blocked["spent"] += 1
+                continue
+            # Not usable yet, for no lasting reason: it may still be
+            # propagating, so wait for it rather than buy another.
+            counts["pending"] += 1
+            batch_id = stamp.get("batchID")
+            if isinstance(batch_id, str) and STAMP_ID_PATTERN.match(batch_id):
+                counts["pending_ids"].append(batch_id)
+            continue
+        if writable:
+            counts["writable"] += 1
+        elif mode == "pool":
+            counts["pool"] += 1
+        elif mode == "owned":
+            counts["owned"] += 1
+        else:
+            counts["other"] += 1
+    return counts
+
+
+def _no_writable_stamp_text(blocked: Dict[str, int]) -> str:
+    """health_check recommendation when no stamp is writable, naming only the
+    kinds of stamps actually listed."""
+    parts = []
+    pool, owned, other = blocked["pool"], blocked["owned"], blocked["other"]
+    if pool:
+        parts.append(
+            f"{pool} pool stamp{'s are' if pool != 1 else ' is'} gateway inventory"
+        )
+    if owned:
+        parts.append(
+            f"{owned} owned stamp{'s belong' if owned != 1 else ' belongs'} to the "
+            f"wallet that paid for {'them' if owned != 1 else 'it'}"
+        )
+    if other:
+        parts.append(
+            f"{other} stamp{'s have' if other != 1 else ' has'} an access mode "
+            "this server cannot use"
+        )
+    spent = blocked["spent"]
+    if spent:
+        parts.append(
+            f"{spent} stamp{'s' if spent != 1 else ''} cannot become usable "
+            "(expired, full or about to expire, or not found or unreadable on "
+            "the node)"
+        )
+    detail = f": {'; '.join(parts)}." if parts else "."
+    return f"No stamp this server can write to{detail} Purchase a stamp with purchase_stamp"
+
+
+# Batch IDs listed in the pending-stamp recommendation, at most.
+MAX_PENDING_IDS_SHOWN = 3
+
+
+def _pending_stamp_text(count: int, batch_ids: List[str]) -> str:
+    """health_check recommendation for writable stamps that are not usable
+    yet. Pairs with _next: check_stamp_health."""
+    ids = ""
+    if batch_ids:
+        shown = ", ".join(batch_ids[:MAX_PENDING_IDS_SHOWN])
+        more = len(batch_ids) - MAX_PENDING_IDS_SHOWN
+        ids = f" (batch ID{'s' if len(batch_ids) != 1 else ''}: {shown}" + (
+            f", and {more} more)" if more > 0 else ")"
+        )
+    return (
+        f"{count} stamp{'s' if count != 1 else ''} this server can write to "
+        f"{'are' if count != 1 else 'is'} not usable yet, probably still "
+        f"propagating{ids}. Poll check_stamp_health every 10 to 15 seconds: a "
+        "new stamp takes up to 2 minutes. Do not buy another while it propagates"
+    )
+
+
 def _new_batch_hint(label: Optional[str], depth: Optional[int]) -> str:
     """How to spot, in list_stamps output, a batch the unanswered purchase made.
 
@@ -1076,18 +1284,19 @@ def _format_free_tier(free_tier: Any) -> str:
 
 
 def _free_tier_option() -> str:
-    """The free-tier next step, which depends on this server's PAYMENT_MODE."""
-    mode = (settings.payment_mode or "").strip().lower()
-    if mode in ("free", "free-tier"):
+    """The free-tier next step, which depends on this server's PAYMENT_MODE.
+
+    Settings only accept "free" or "" (normalised), so those are the cases.
+    """
+    if settings.payment_mode == "free":
         return (
             "Ask the gateway operator whether the free tier covers this "
             "operation: this server already requests the free tier "
             "(PAYMENT_MODE=free), and the gateway still asks for payment."
         )
-    current = _gw(settings.payment_mode or "empty", 40)
     return (
         "Use the gateway's free tier, if it offers one: this server is not "
-        f"requesting it (PAYMENT_MODE is {current}). Set PAYMENT_MODE=free "
+        "requesting it (PAYMENT_MODE is empty). Set PAYMENT_MODE=free "
         "and restart this server."
     )
 
@@ -1563,7 +1772,7 @@ def create_server() -> Server:
                         },
                         "label": {
                             "type": "string",
-                            "description": "Optional human-readable label for easier stamp identification. If omitted, a unique label (mcp-<hex>) is generated so the batch can be found in list_stamps.",
+                            "description": "Optional human-readable label for easier stamp identification. If omitted, a unique label (mcp-<hex>) is generated so the batch can be found in list_stamps. The result shows it as requested, not as stored: list_stamps shows the label the gateway stored.",
                             "maxLength": 100,
                         },
                     },
@@ -1587,7 +1796,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="list_stamps",
-                description="List postage stamps available on the gateway. Each stamp includes access mode: owned (yours, dedicated) or shared (public, any gateway user). Also shows usability status and expiration.",
+                description="List postage stamps available on the gateway. Each stamp includes its access mode: shared (public, any gateway user can upload to it), owned (registered to the wallet that paid for it) or pool (gateway inventory). This server sends no wallet, so the gateway refuses its uploads to owned and pool stamps: use a shared stamp. Also shows usability status and expiration.",
                 inputSchema={"type": "object", "properties": {}, "required": []},
             ),
             Tool(
@@ -1658,8 +1867,8 @@ def create_server() -> Server:
                     "properties": {
                         "reference": {
                             "type": "string",
-                            "description": "64-character hexadecimal Swarm reference hash (without 0x prefix). Example: b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789ab",
-                            "pattern": "^[a-fA-F0-9]{64}$",
+                            "description": "Swarm reference (without 0x prefix): 64 hexadecimal characters, or 128 for an encrypted reference. Example: b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789abc",
+                            "pattern": SWARM_REFERENCE_SCHEMA_PATTERN,
                         }
                     },
                     "required": ["reference"],
@@ -2089,8 +2298,9 @@ def create_server() -> Server:
                                 f"Content-Type: {content_type}\n\n"
                                 f"Follow these steps:\n"
                                 f"1. Call health_check to verify the gateway is reachable\n"
-                                f"2. Call purchase_stamp (size 'small' for small data) to get your own stamp, "
-                                f"or use an owned stamp from list_stamps.\n"
+                                f"2. Call purchase_stamp (size 'small' for small data) to get a stamp, "
+                                f"or reuse a usable 'shared' stamp from list_stamps (this server "
+                                f"cannot upload to 'owned' or 'pool' stamps).\n"
                                 f"3. Poll check_stamp_health every 15 seconds until ready (up to 2 minutes)\n"
                                 f"4. Call upload_data with the data and your stamp_id\n"
                                 f"5. Call download_data with the returned reference to verify the upload\n"
@@ -2134,10 +2344,10 @@ def create_server() -> Server:
                             type="text",
                             text=(
                                 "Review my Swarm stamp inventory and recommend actions:\n\n"
-                                "list_stamps shows your owned stamps and public stamps. Stamps with accessMode 'owned' are yours; 'shared' are public stamps usable by any gateway user. If you only have public stamps, recommend purchasing dedicated stamps or running your own node for production use.\n\n"
+                                "list_stamps shows public stamps (accessMode 'shared'), which any gateway user can upload to, and can also show 'owned' and 'pool' stamps. This server sends no wallet, so the gateway refuses its uploads to 'owned' stamps (registered to the wallet that paid for them) and 'pool' stamps (gateway inventory). Only 'shared' stamps and stamps without an access mode are usable here. For production use with predictable capacity, recommend running your own Bee node or gateway.\n\n"
                                 "Steps:\n"
                                 "1. Call list_stamps to see all stamps\n"
-                                "2. For stamps you own, check if usable, utilization, and TTL\n"
+                                "2. For stamps this server can use, check if usable, utilization, and TTL\n"
                                 "3. Call check_stamp_health on any stamp that looks concerning\n"
                                 "4. Recommend actions:\n"
                                 "   - Stamps with high utilization → purchase a new one\n"
@@ -2161,7 +2371,8 @@ def create_server() -> Server:
                 f"1. Call health_check — verify gateway and chain connectivity\n"
                 f"2. Call chain_balance — confirm wallet has ETH for gas\n"
                 f"3. Call purchase_stamp (size 'small' for small data) to get a stamp, "
-                f"or use an owned stamp from list_stamps.\n"
+                f"or reuse a usable 'shared' stamp from list_stamps (this server "
+                f"cannot upload to 'owned' or 'pool' stamps).\n"
                 f"4. Poll check_stamp_health every 15 seconds until can_upload is true (up to 2 minutes)\n"
                 f"5. Call upload_data with the data and your stamp_id — save the reference hash\n"
                 f"6. Call anchor_hash with the reference hash to register it on-chain. "
@@ -2286,8 +2497,16 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += f"   Depth: {depth}\n"
         else:
             response_text += f"   Size: {size}\n"
-        if label:
-            response_text += f"   Label: {_label(label)}\n"
+        # The gateway's answer does not carry the label, and older gateways
+        # dropped it without saying so: show the requested one as such.
+        stored_label = result.get("label")
+        if isinstance(stored_label, str) and stored_label:
+            response_text += f"   Label: {_label(stored_label)}\n"
+        elif label:
+            response_text += (
+                f"   Label requested: {_label(label)} (not confirmed by the "
+                "gateway; list_stamps shows the label it stored)\n"
+            )
         response_text += f"\n✅ Stamp ID: `{batch_id}`\n"
 
         propagation_status = result.get("propagationStatus")
@@ -2570,7 +2789,7 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
 
         # Public-only hint: all stamps are shared, none owned
         if stamps and not any(s.get("accessMode") == "owned" for s in stamps):
-            response_text += "\n💡 All stamps are public (shared). For production use with predictable capacity, configure your own wallet for dedicated stamps.\n"
+            response_text += "\n💡 All stamps are public (shared): other gateway users can fill them. For production use with predictable capacity, run your own Bee node or gateway. This server sends no wallet, so it cannot upload to wallet-owned stamps.\n"
 
         # Labels of shared stamps are written by other gateway users.
         if any(isinstance(s, dict) and s.get("label") for s in stamps or []):
@@ -2962,8 +3181,8 @@ async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
         if not reference:
             raise ValueError("Reference is required")
 
-        # Validate and clean reference hash
-        clean_reference = validate_and_clean_reference_hash(reference)
+        # Validate and clean reference (64 hex, or 128 when encrypted)
+        clean_reference = validate_and_clean_swarm_reference(reference)
 
         result_bytes = gateway_client.download_data(clean_reference)
         summary, fenced = _describe_download(clean_reference, result_bytes)
@@ -3042,6 +3261,14 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
             )
             next_tool = "health_check"
 
+        # Advisory only: does not change readiness
+        if is_plain_http_remote(settings.swarm_gateway_url):
+            recommendations.append(
+                "SWARM_GATEWAY_URL uses plain http to a remote host: requests and "
+                "uploads are sent unencrypted. Use https unless the gateway is on "
+                "a trusted network"
+            )
+
         # Parse payment / free-tier info from gateway response
         gw_resp = result.get("gateway_response") or {}
         x402 = gw_resp.get("x402") or {}
@@ -3084,22 +3311,44 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
             try:
                 stamps_result = gateway_client.list_stamps()
                 stamps = stamps_result.get("stamps", [])
+                if not isinstance(stamps, list):
+                    stamps = []
                 total_stamps = len(stamps)
-                usable_count = sum(1 for s in stamps if s.get("usable") is True)
+                counts = _writable_stamp_counts(stamps)
+                usable_count = counts["writable"]
 
                 stamps_info += (
-                    f"\n📋 Stamps: {usable_count} usable / {total_stamps} local\n"
+                    f"\n📋 Stamps: {usable_count} usable by this server / "
+                    f"{total_stamps} local"
                 )
+                others = []
+                if counts["pool"]:
+                    others.append(f"{counts['pool']} pool")
+                owned = counts["owned"]
+                if owned:
+                    payer = (
+                        "wallets that paid for them" if owned != 1
+                        else "wallet that paid for it"
+                    )
+                    others.append(f"{owned} owned (registered to the x402 {payer})")
+                if counts["other"]:
+                    others.append(f"{counts['other']} with another access mode")
+                if others:
+                    stamps_info += f" (usable but not by this server: {', '.join(others)})"
+                stamps_info += "\n"
 
                 if usable_count > 0 and (network is None or network["ok"]):
                     ready = True
                     next_tool = "upload_data"
                 elif usable_count > 0:
                     next_tool = None
-                elif total_stamps > 0:
+                elif counts["pending"]:
                     recommendations.append(
-                        f"Found {total_stamps} stamp(s) but none are usable — poll check_stamp_health, stamps take up to 2 minutes to propagate"
+                        _pending_stamp_text(counts["pending"], counts["pending_ids"])
                     )
+                    next_tool = "check_stamp_health"
+                elif total_stamps > 0:
+                    recommendations.append(_no_writable_stamp_text(counts["blocked"]))
                     next_tool = "purchase_stamp"
                 else:
                     recommendations.append(
@@ -3157,15 +3406,12 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                         else "Chain anchoring enabled but RPC unreachable"
                     )
             elif CHAIN_AVAILABLE and _chain_init_error:
-                # Wallet configured, but the contract check failed
+                # Wallet configured, but the key or the contract check failed
                 chain_text += (
                     f"\n\n⛓️  Chain: {settings.chain_name} (writes disabled)\n   "
                     + _writes_disabled_text().replace("\n", "\n   ")
                 )
-                recommendations.append(
-                    "Chain writes disabled: no DataProvenance contract at the "
-                    "configured address — fix CHAIN_CONTRACT or CHAIN_NAME"
-                )
+                recommendations.append(_writes_disabled_recommendation())
             elif CHAIN_AVAILABLE:
                 # Dependencies present but no wallet → read-only mode
                 chain_text += (
@@ -3211,7 +3457,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
     except RequestException as e:
-        gateway_url = settings.swarm_gateway_url
+        gateway_url = url_without_userinfo(settings.swarm_gateway_url)
         error_msg = f"❌ Connection failed!\n\n"
         error_msg += f"Error: {str(e)}\n"
         error_msg += f"Gateway: {gateway_url}\n\n"
@@ -5052,7 +5298,9 @@ async def main():
             logger.info(
                 f"Starting {settings.mcp_server_name} v{settings.mcp_server_version}"
             )
-            logger.info(f"Gateway URL: {settings.swarm_gateway_url}")
+            logger.info(
+                "Gateway URL: %s", url_without_userinfo(settings.swarm_gateway_url)
+            )
             if settings.chain_enabled:
                 if chain_client:
                     logger.info("Chain: %s (wallet connected)", chain_client.chain)

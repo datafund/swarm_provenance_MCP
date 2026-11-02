@@ -111,7 +111,7 @@ Our Swarm Provenance MCP server currently provides these tools:
 
 - `purchase_stamp` - Create new postage stamps for data uploads
 - `get_stamp_status` - Check stamp details and utilization
-- `list_stamps` - List local stamps with access mode (owned/shared)
+- `list_stamps` - List local stamps with access mode (shared/owned/pool; this server can upload only to shared stamps)
 - `extend_stamp` - Add funds to existing stamps
 - `upload_data` - Store data on Swarm network (4KB limit)
 - `download_data` - Retrieve data from Swarm by reference

@@ -1,11 +1,13 @@
 """Configuration management for the Swarm Provenance MCP server."""
 
+import ipaddress
 import logging
 import os
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -13,6 +15,31 @@ logger = logging.getLogger(__name__)
 # Environment variable naming an explicit env file to load.
 ENV_FILE_VAR = "SWARM_PROVENANCE_ENV_FILE"
 CONFIG_DIR_NAME = "swarm-provenance-mcp"
+
+# PAYMENT_MODE values: "free" sends X-Payment-Mode: free (the gateway's
+# rate-limited free tier), "" sends no header. The server cannot pay x402.
+PAYMENT_MODES = ("free", "")
+
+
+def is_loopback_host(host: Optional[str]) -> bool:
+    """Whether ``host`` is localhost or a loopback address."""
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def is_plain_http_remote(url: str) -> bool:
+    """Whether ``url`` is plain http to a host other than this machine."""
+    try:
+        parts = urlsplit(url)
+        return parts.scheme.lower() == "http" and not is_loopback_host(parts.hostname)
+    except ValueError:
+        return False
 
 
 class Settings(BaseSettings):
@@ -136,6 +163,42 @@ class Settings(BaseSettings):
         ge=24,
         description="Maximum duration_hours accepted by purchase_stamp and extend_stamp",
     )
+
+    @field_validator("swarm_gateway_url")
+    @classmethod
+    def _check_gateway_url(cls, value: str) -> str:
+        # Stored stripped: a pasted " https://..." must not reach base_url.
+        value = value.strip()
+        try:
+            parts = urlsplit(value)
+            host = parts.hostname
+            _ = parts.port  # ValueError for a port that is not 0-65535
+        except ValueError:
+            parts, host = None, None
+        if parts is None or parts.scheme.lower() not in ("http", "https") or not host:
+            raise ValueError(
+                "SWARM_GATEWAY_URL must be an http:// or https:// URL with a host "
+                "and, if given, a numeric port"
+            )
+        if is_plain_http_remote(value):
+            logger.warning(
+                "SWARM_GATEWAY_URL uses plain http to %s: requests and uploads are "
+                "sent unencrypted. Use https unless the gateway is on a trusted "
+                "network.",
+                host,
+            )
+        return value
+
+    @field_validator("payment_mode")
+    @classmethod
+    def _check_payment_mode(cls, value: str) -> str:
+        mode = value.strip().lower()
+        if mode not in PAYMENT_MODES:
+            raise ValueError(
+                "PAYMENT_MODE must be 'free' (the gateway's free tier) or empty "
+                "(no payment header)"
+            )
+        return mode
 
     # No env file by default: only the global instance below reads one, from a
     # fixed location (see resolve_env_file). Unknown keys are ignored so a
@@ -268,15 +331,69 @@ def _warn_if_cwd_env_ignored(loaded: Optional[Path]) -> None:
     )
 
 
+class ConfigurationError(ValueError):
+    """A setting was refused. The message names the variables and the rules,
+    never the values: a URL can carry credentials."""
+
+
+def _error_items(error: ValidationError) -> list:
+    """The error's items, or [] if they cannot be read.
+
+    pydantic 2.0 to 2.3 reject the keyword arguments of errors() with a
+    TypeError (pyproject allows pydantic>=2.0), so fall back to the plain
+    call. Only ``loc`` and ``msg`` are used from the items: ``input``,
+    ``ctx`` and ``url`` can carry the refused value.
+    """
+    try:
+        return list(error.errors(include_input=False, include_url=False))
+    except TypeError:
+        pass
+    try:
+        return list(error.errors())
+    except Exception:
+        return []
+
+
+def _refusal_message(error: ValidationError) -> str:
+    """One line per refused setting: variable name and rule, without input."""
+    lines = []
+    for item in _error_items(error):
+        if not isinstance(item, dict):
+            continue
+        loc = item.get("loc")
+        name = str(loc[0]).upper() if isinstance(loc, (tuple, list)) and loc else "?"
+        rule = str(item.get("msg", "invalid value"))
+        rule = rule.removeprefix("Value error, ")
+        lines.append(rule if rule.startswith(name) else f"{name}: {rule}")
+    if not lines:
+        return "Invalid configuration. A setting was refused."
+    return "Invalid configuration. " + "; ".join(lines)
+
+
 def load_settings() -> Settings:
-    """Build Settings from the process environment and the resolved env file."""
+    """Build Settings from the process environment and the resolved env file.
+
+    Raises:
+        ConfigurationError: A setting was refused (without pydantic's chained
+            error, which echoes the input value).
+    """
     env_file = resolve_env_file()
     _warn_if_cwd_env_ignored(env_file)
-    return Settings(_env_file=env_file)
+    try:
+        return Settings(_env_file=env_file)
+    except ValidationError as e:
+        raise ConfigurationError(_refusal_message(e)) from None
 
 
-# Global settings instance
-settings = load_settings()
+# Global settings instance. A refused setting ends start-up with a short
+# message instead of a traceback. The SystemExit is meant for the server entry
+# point (importing the server is starting it). Library or test code that needs
+# to handle a refused setting should call load_settings() itself and catch
+# ConfigurationError.
+try:
+    settings = load_settings()
+except ConfigurationError as e:
+    raise SystemExit(f"swarm-provenance-mcp: {e}") from None
 
 # Error text for write tools called without a wallet key.
 WALLET_KEY_HINT = wallet_key_hint()

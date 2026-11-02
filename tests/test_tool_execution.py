@@ -1114,7 +1114,7 @@ class TestStampAccessMode:
 
         text = result.content[0].text
         assert "All stamps are public (shared)" in text
-        assert "dedicated stamps" in text
+        assert "run your own Bee node or gateway" in text
 
     async def test_list_stamps_owned_no_public_hint(self, server):
         """When at least one stamp is owned, do NOT show the public-only hint."""
@@ -1293,7 +1293,8 @@ class TestAdaptiveHealthCheck:
             assert "_recommendations:" in text
 
     async def test_healthy_no_usable_stamps(self, server):
-        """Healthy gateway + stamps but none usable → ready: false, recommends purchase."""
+        """Healthy gateway + a stamp not usable yet (no lasting reason given)
+        → ready: false, poll check_stamp_health instead of buying another."""
         with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.health_check.return_value = {
                 "status": "healthy",
@@ -1307,7 +1308,7 @@ class TestAdaptiveHealthCheck:
             result = await call_tool_directly(server, "health_check", {})
             text = result.content[0].text
             assert "ready: false" in text
-            assert "_next: purchase_stamp" in text
+            assert "_next: check_stamp_health" in text
 
     async def test_unhealthy_gateway(self, server):
         """Unhealthy gateway → ready: false with gateway recommendation."""

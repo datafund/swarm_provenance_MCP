@@ -98,7 +98,8 @@ closed local port if that is unset, before the package is imported. A shell
 `performance` are skipped unless `--run-performance` is passed. Any request to
 the production gateway host fails the test that sent it.
 
-To check that a fresh install starts:
+To check that a fresh install starts, lists its tools and serves the
+`provenance://skills` guide:
 
 ```bash
 python scripts/mcp_stdio_smoke.py -- swarm-provenance-mcp

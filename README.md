@@ -117,10 +117,10 @@ described under [Configuration](#configuration): the container never sees
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `SWARM_GATEWAY_URL` | Gateway endpoint URL | `https://provenance-gateway.datafund.io` |
+| `SWARM_GATEWAY_URL` | Gateway endpoint URL (`http://` or `https://`; plain http to a remote host logs a warning) | `https://provenance-gateway.datafund.io` |
 | `DEFAULT_STAMP_DURATION_HOURS` | Default stamp duration in hours (min 24) | `25` |
 | `DEFAULT_STAMP_SIZE` | Default stamp size: `small`, `medium`, or `large` | `small` |
-| `PAYMENT_MODE` | Gateway payment tier (`free` = 3 write req/min) | `free` |
+| `PAYMENT_MODE` | Gateway payment tier: `free` (3 write req/min) or empty (no payment header); other values stop the server at start-up | `free` |
 
 ## Configuration
 
@@ -137,16 +137,16 @@ ignored, the server logs a warning at start-up.
 
 - `SWARM_PROVENANCE_ENV_FILE`: Explicit absolute path of the env file to load (see above)
 
-- `SWARM_GATEWAY_URL`: URL of the swarm_connect FastAPI gateway (default: `https://provenance-gateway.datafund.io`)
+- `SWARM_GATEWAY_URL`: URL of the swarm_connect FastAPI gateway (default: `https://provenance-gateway.datafund.io`). Must be `http://` or `https://` with a host and, if given, a numeric port (0 to 65535), or the server does not start. Plain `http://` to a host other than this machine logs a warning at start-up and adds a `health_check` recommendation. The `X-Payment-Mode` header is not sent on a redirect to another origin
 - `DEFAULT_STAMP_DURATION_HOURS`: Default stamp duration in hours, minimum 24 (default: `25`)
 - `DEFAULT_STAMP_SIZE`: Default stamp size — `small`, `medium`, or `large` (default: `small`)
-- `PAYMENT_MODE`: Gateway payment tier (default: `free` — rate limited to 3 write requests/minute)
+- `PAYMENT_MODE`: Gateway payment tier (default: `free`, rate limited to 3 write requests/minute). Set it to empty to send no payment header. Any other value stops the server at start-up, because this server cannot pay x402 requests
 
 #### Chain Anchoring (Optional)
 
 - `CHAIN_ENABLED`: Enable on-chain provenance anchoring (default: `false`)
 - `CHAIN_NAME`: Blockchain network — `base-sepolia` (testnet), `base` (mainnet), or `localhost` (local hardhat, chain 31337) (default: `base-sepolia`)
-- `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x prefix)
+- `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x prefix). A key that is set but invalid is logged as an error at start-up; the server still starts with chain writes disabled, and the write tools, `chain_health` and `health_check` say why. Read-only chain tools keep working
 - `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set)
 - `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs, tried in order after `CHAIN_RPC_URL`
 - `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set). `CHAIN_CONTRACT_ADDRESS` is accepted too; `CHAIN_CONTRACT` wins if both are set
@@ -211,7 +211,7 @@ Purchase a new postage stamp.
 - `duration_hours` (int): Duration in hours, minimum 24 (optional, uses default if not provided)
 - `size` (string): Stamp size — `"small"`, `"medium"`, or `"large"` (optional, uses default if not provided)
 - `depth` (int): Explicit depth override, bypasses size (optional, advanced use only)
-- `label` (string): Optional label for the stamp
+- `label` (string): Optional label for the stamp. The result shows it as "Label requested", because the gateway's answer does not confirm it; `list_stamps` shows the label the gateway stored
 
 **Example:**
 ```json
@@ -302,7 +302,7 @@ The gateway stores the signed document as `application/json`, whatever `content_
 Download data from the Swarm network using a reference hash.
 
 **Parameters:**
-- `reference` (string): Swarm reference hash of the data to download
+- `reference` (string): Swarm reference of the data to download: 64 hexadecimal characters, or 128 for an encrypted reference. Chain tools take only 64-character hashes
 
 **Example:**
 ```json
@@ -463,7 +463,7 @@ Record a data transformation on-chain, linking the original data to its transfor
   "name": "record_transform",
   "arguments": {
     "original_hash": "a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789a",
-    "new_hash": "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789ab",
+    "new_hash": "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789abc",
     "description": "Filtered for region EU",
     "restrict_original": false
   }
@@ -486,9 +486,9 @@ Record an N-to-1 merge transformation on-chain, combining multiple source hashes
   "arguments": {
     "source_hashes": [
       "a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789a",
-      "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789ab"
+      "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789abc"
     ],
-    "new_hash": "c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789abc",
+    "new_hash": "c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789abcde",
     "description": "Merged EU and US datasets",
     "new_data_type": "merged-dataset"
   }
@@ -526,7 +526,7 @@ Attach a Swarm storage reference to an existing on-chain record. Set-once: canno
   "name": "set_storage_ref",
   "arguments": {
     "data_hash": "a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789a",
-    "storage_ref": "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789ab"
+    "storage_ref": "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789abc"
   }
 }
 ```
@@ -542,7 +542,7 @@ Reverse lookup: find the on-chain provenance record by its Swarm storage referen
 {
   "name": "lookup_by_storage_ref",
   "arguments": {
-    "storage_ref": "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789ab"
+    "storage_ref": "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789abc"
   }
 }
 ```
@@ -585,6 +585,8 @@ _recommendations:                # Actionable suggestions (only when issues exis
   - No stamps found — purchase one before uploading
 _gateway: <url> (connected|unreachable)
 ```
+
+`ready` is true only when the server has a usable stamp it can write to: a `shared` stamp, or one without an `accessMode` (older gateways). `pool` stamps (gateway inventory) and `owned` stamps (registered to the wallet that paid for them) are counted separately, because the gateway refuses writes from this server to them. A writable stamp that is not usable yet (still propagating) leads to `_next: check_stamp_health`, not to a purchase.
 
 ### MCP Prompts
 
@@ -930,7 +932,7 @@ This MCP server is designed to work with AI agents that support the Model Contex
 2. **Authentication errors**: Check that the gateway doesn't require authentication
 3. **Invalid stamp IDs**: Verify stamp IDs are valid batch IDs from the Swarm network
 4. **Timeout errors**: Increase timeout values if operations are taking too long
-5. **Chain: "wallet key not configured"**: Set `PROVENANCE_WALLET_KEY` in the MCP client's `"env"` block or in the env file (`~/.config/swarm-provenance-mcp/.env`, see [Configuration](#configuration)) for write operations (`anchor_hash`, `record_transform`, `set_storage_ref`). Read-only tools work without it.
+5. **Chain: "wallet key not configured"**: Set `PROVENANCE_WALLET_KEY` in the MCP client's `"env"` block or in the env file (`~/.config/swarm-provenance-mcp/.env`, see [Configuration](#configuration)) for write operations (`anchor_hash`, `record_transform`, `set_storage_ref`). Read-only tools work without it. If the error says the key is not a valid private key, fix the value (64 hexadecimal characters, with or without 0x) and restart the server.
 6. **Chain: "insufficient funds"**: Fund your wallet with testnet ETH (Base Sepolia faucet) or bridge ETH to Base mainnet. Run `chain_balance` for guidance.
 7. **Chain: "already registered"**: The hash is already anchored on-chain. If the result is an error, another address owns the record. Registration is first-come, so to anchor a record you own, change the content, upload it again, and anchor the new hash. Use `get_provenance` to view the existing record.
 8. **Chain: "transformation already recorded"**: The `(original → new)` link already exists on-chain. No gas spent — use `get_provenance_chain` to verify the lineage.

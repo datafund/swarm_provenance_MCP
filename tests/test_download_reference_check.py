@@ -267,6 +267,28 @@ class TestWordingMatchesBehaviour:
         assert "4096" in desc
 
     @pytest.mark.asyncio
+    async def test_prompt_listing_does_not_claim_verified_downloads(self, server):
+        """Every prompt and argument description from list_prompts."""
+        from mcp.types import ListPromptsRequest
+
+        handler = server.request_handlers[ListPromptsRequest]
+        prompts = (await handler(ListPromptsRequest(method="prompts/list"))).root.prompts
+        assert prompts
+        texts = []
+        for prompt in prompts:
+            texts.append((prompt.name, prompt.description or ""))
+            for arg in prompt.arguments or []:
+                texts.append((f"{prompt.name}.{arg.name}", arg.description or ""))
+        # No prompt or argument description claims that downloads are verified.
+        # Only provenance-verify says "verify", in its name, not its text.
+        for where, text in texts:
+            lowered = text.lower()
+            for word in ("verif", "integrity", "tamper", "cryptograph"):
+                assert word not in lowered, (where, text)
+        upload = next(p for p in prompts if p.name == "provenance-upload")
+        assert "download to confirm" in upload.description
+
+    @pytest.mark.asyncio
     async def test_prompts_do_not_claim_verified_downloads(self, server):
         from mcp.types import GetPromptRequest, GetPromptRequestParams
 

@@ -2228,7 +2228,7 @@ def create_server() -> Server:
         return [
             Prompt(
                 name="provenance-upload",
-                description="Upload data with provenance to Swarm. Guides through health check, stamp selection/purchase, upload, and verification.",
+                description="Upload data with provenance to Swarm. Guides through health check, stamp selection/purchase, upload, and a download to confirm the stored content.",
                 arguments=[
                     PromptArgument(
                         name="data",

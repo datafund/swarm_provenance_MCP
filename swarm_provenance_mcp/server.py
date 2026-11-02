@@ -2062,7 +2062,7 @@ def create_server() -> Server:
                     ),
                     Tool(
                         name="get_provenance_chain",
-                        description="Follow the transformation lineage for a Swarm hash. Walks both directions — from any node it finds parents (originals) and children (derived versions). Can be called on a leaf, middle, or root hash. Each node lists its parent hashes, and each edge is shown as 'parent_hash -> child_hash'. If a node could not be read, or max_depth stopped the walk, the output starts with an INCOMPLETE banner that names those hashes and a Retry line. Read-only, no gas or wallet key required.",
+                        description="Follow the transformation lineage for a Swarm hash. Walks both directions — from any node it finds parents (originals) and children (derived versions). Can be called on a leaf, middle, or root hash. Each node lists its parent hashes, and each edge is shown as 'parent_hash -> child_hash'. If a node could not be read, max_depth stopped the walk, or the event index could not be built (links then come from per-node queries that cover only recent blocks and no merges), the output starts with an INCOMPLETE banner that names those hashes, gives the reason and ends with a Retry line. Read-only, no gas or wallet key required.",
                         inputSchema={
                             "type": "object",
                             "properties": {

@@ -270,6 +270,10 @@ class TestAgentFacingTexts:
         tool = next(t for t in tool_list if t.name == "get_provenance_chain")
         assert "INCOMPLETE" in tool.description
         assert "parent_hash -> child_hash" in tool.description
+        # All three triggers of the banner are named.
+        assert "could not be read" in tool.description
+        assert "max_depth" in tool.description
+        assert "event index could not be built" in tool.description
 
     async def test_workflow_prompt_says_to_follow_retry(self):
         from mcp.types import GetPromptRequest

@@ -31,7 +31,7 @@ from mcp.types import (
 )
 from requests.exceptions import RequestException
 
-from .config import WALLET_KEY_HINT, settings
+from .config import WALLET_KEY_HINT, is_plain_http_remote, settings
 from .gateway_client import PaymentRequiredError, SwarmGatewayClient
 from .redact import mask_literal_urls, redact_urls, rpc_host
 from .untrusted import (
@@ -2946,6 +2946,14 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 "Gateway not healthy — check connectivity or try again later"
             )
             next_tool = "health_check"
+
+        # Advisory only: does not change readiness
+        if is_plain_http_remote(settings.swarm_gateway_url):
+            recommendations.append(
+                "SWARM_GATEWAY_URL uses plain http to a remote host: requests and "
+                "uploads are sent unencrypted. Use https unless the gateway is on "
+                "a trusted network"
+            )
 
         # Parse payment / free-tier info from gateway response
         gw_resp = result.get("gateway_response") or {}

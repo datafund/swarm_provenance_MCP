@@ -117,10 +117,10 @@ described under [Configuration](#configuration): the container never sees
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `SWARM_GATEWAY_URL` | Gateway endpoint URL | `https://provenance-gateway.datafund.io` |
+| `SWARM_GATEWAY_URL` | Gateway endpoint URL (`http://` or `https://`; plain http to a remote host logs a warning) | `https://provenance-gateway.datafund.io` |
 | `DEFAULT_STAMP_DURATION_HOURS` | Default stamp duration in hours (min 24) | `25` |
 | `DEFAULT_STAMP_SIZE` | Default stamp size: `small`, `medium`, or `large` | `small` |
-| `PAYMENT_MODE` | Gateway payment tier (`free` = 3 write req/min) | `free` |
+| `PAYMENT_MODE` | Gateway payment tier: `free` (3 write req/min) or empty (no payment header); other values stop the server at start-up | `free` |
 
 ## Configuration
 
@@ -137,10 +137,10 @@ ignored, the server logs a warning at start-up.
 
 - `SWARM_PROVENANCE_ENV_FILE`: Explicit absolute path of the env file to load (see above)
 
-- `SWARM_GATEWAY_URL`: URL of the swarm_connect FastAPI gateway (default: `https://provenance-gateway.datafund.io`)
+- `SWARM_GATEWAY_URL`: URL of the swarm_connect FastAPI gateway (default: `https://provenance-gateway.datafund.io`). Must be `http://` or `https://` with a host, or the server does not start. Plain `http://` to a host other than this machine logs a warning at start-up and adds a `health_check` recommendation. The `X-Payment-Mode` header is not sent on a redirect to another origin
 - `DEFAULT_STAMP_DURATION_HOURS`: Default stamp duration in hours, minimum 24 (default: `25`)
 - `DEFAULT_STAMP_SIZE`: Default stamp size — `small`, `medium`, or `large` (default: `small`)
-- `PAYMENT_MODE`: Gateway payment tier (default: `free` — rate limited to 3 write requests/minute)
+- `PAYMENT_MODE`: Gateway payment tier (default: `free`, rate limited to 3 write requests/minute). Set it to empty to send no payment header. Any other value stops the server at start-up, because this server cannot pay x402 requests
 
 #### Chain Anchoring (Optional)
 

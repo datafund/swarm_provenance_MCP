@@ -249,3 +249,133 @@ class TestInvalidWalletKeyInTools:
         monkeypatch.setattr(server, "_chain_init_error", "No contract code at 0x1.")
         monkeypatch.setattr(server, "_chain_init_fix", server.CONTRACT_FIX)
         assert "Fix CHAIN_CONTRACT or CHAIN_NAME" in server._writes_disabled_text()
+
+
+class TestPaymentModeValidation:
+    @pytest.mark.parametrize("value", ["paid", "x402", "free-tier", "fre", "0"])
+    def test_unknown_payment_mode_is_refused(self, value):
+        from pydantic import ValidationError
+
+        from swarm_provenance_mcp.config import Settings
+
+        with pytest.raises(ValidationError, match="PAYMENT_MODE"):
+            Settings(payment_mode=value)
+
+    @pytest.mark.parametrize(
+        "value,expected", [("free", "free"), (" FREE ", "free"), ("", ""), ("  ", "")]
+    )
+    def test_accepted_values_are_normalised(self, value, expected):
+        from swarm_provenance_mcp.config import Settings
+
+        assert Settings(payment_mode=value).payment_mode == expected
+
+    def test_empty_payment_mode_sends_no_header(self, monkeypatch):
+        from swarm_provenance_mcp import gateway_client as gc
+
+        monkeypatch.setattr(gc.settings, "payment_mode", "")
+        client = gc.SwarmGatewayClient(base_url="http://127.0.0.1:9")
+        assert "X-Payment-Mode" not in client.session.headers
+
+
+class TestGatewayUrlValidation:
+    @pytest.mark.parametrize(
+        "url", ["ftp://gw.example", "gw.example", "https://", "file:///etc/x", ""]
+    )
+    def test_unusable_url_is_refused(self, url):
+        from pydantic import ValidationError
+
+        from swarm_provenance_mcp.config import Settings
+
+        with pytest.raises(ValidationError, match="SWARM_GATEWAY_URL"):
+            Settings(swarm_gateway_url=url)
+
+    def test_plain_http_to_remote_host_warns(self, caplog):
+        import logging
+
+        from swarm_provenance_mcp import config
+
+        with caplog.at_level(logging.WARNING, logger=config.logger.name):
+            config.Settings(swarm_gateway_url="http://gw.example")
+        assert "plain http" in caplog.text
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://gw.example",
+            "http://127.0.0.1:9",
+            "http://localhost:8000",
+            "http://[::1]:8000",
+        ],
+    )
+    def test_https_and_loopback_do_not_warn(self, url, caplog):
+        import logging
+
+        from swarm_provenance_mcp import config
+
+        with caplog.at_level(logging.WARNING, logger=config.logger.name):
+            config.Settings(swarm_gateway_url=url)
+        assert "plain http" not in caplog.text
+
+    async def test_health_check_recommends_https(self, server, monkeypatch):
+        from swarm_provenance_mcp import server as srv
+
+        monkeypatch.setattr(srv.settings, "swarm_gateway_url", "http://gw.example")
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.health_check.return_value = {"status": "healthy"}
+            gw.list_stamps.return_value = {"stamps": []}
+            result = await call_tool_directly(server, "health_check", {})
+        assert "plain http" in result.content[0].text
+
+    async def test_health_check_quiet_for_loopback(self, server, monkeypatch):
+        from swarm_provenance_mcp import server as srv
+
+        monkeypatch.setattr(srv.settings, "swarm_gateway_url", "http://127.0.0.1:9")
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.health_check.return_value = {"status": "healthy"}
+            gw.list_stamps.return_value = {"stamps": []}
+            result = await call_tool_directly(server, "health_check", {})
+        assert "plain http" not in result.content[0].text
+
+
+class TestRedirectHeaders:
+    """X-Payment-Mode must not follow a redirect to another origin."""
+
+    def _get(self, monkeypatch, start, target, status=302):
+        import requests_mock
+
+        from swarm_provenance_mcp import gateway_client as gc
+
+        monkeypatch.setattr(gc.settings, "payment_mode", "free")
+        client = gc.SwarmGatewayClient(base_url=start)
+        with requests_mock.Mocker() as m:
+            m.get(
+                f"{start}/api/v1/stamps/",
+                status_code=status,
+                headers={"Location": f"{target}/api/v1/stamps/"},
+            )
+            m.get(f"{target}/api/v1/stamps/", json={"stamps": []})
+            client.list_stamps()
+            final = m.request_history[-1]
+        assert final.url.startswith(target)
+        return final.headers
+
+    @pytest.mark.parametrize("status", [301, 302, 307, 308])
+    def test_cross_origin_redirect_drops_header(self, monkeypatch, status):
+        headers = self._get(
+            monkeypatch, "https://gw.example", "https://other.example", status
+        )
+        assert "X-Payment-Mode" not in headers
+
+    def test_other_port_counts_as_other_origin(self, monkeypatch):
+        headers = self._get(
+            monkeypatch, "https://gw.example", "https://gw.example:8443"
+        )
+        assert "X-Payment-Mode" not in headers
+
+    def test_same_origin_redirect_keeps_header(self, monkeypatch):
+        headers = self._get(monkeypatch, "https://gw.example", "https://gw.example")
+        assert headers.get("X-Payment-Mode") == "free"
+
+    def test_same_host_https_upgrade_keeps_header(self, monkeypatch):
+        headers = self._get(monkeypatch, "http://gw.example", "https://gw.example")
+        assert headers.get("X-Payment-Mode") == "free"

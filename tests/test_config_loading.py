@@ -27,7 +27,7 @@ DOCUMENTED_VARS = {
     "SWARM_GATEWAY_URL": ("swarm_gateway_url", "https://gw.example", None),
     "DEFAULT_STAMP_DURATION_HOURS": ("default_stamp_duration_hours", "48", 48),
     "DEFAULT_STAMP_SIZE": ("default_stamp_size", "large", None),
-    "PAYMENT_MODE": ("payment_mode", "paid", None),
+    "PAYMENT_MODE": ("payment_mode", " FREE ", "free"),
     "MCP_SERVER_NAME": ("mcp_server_name", "custom-name", None),
     "MCP_SERVER_VERSION": ("mcp_server_version", "9.9.9", None),
     "CHAIN_ENABLED": ("chain_enabled", "true", True),
@@ -85,11 +85,11 @@ class TestEnvFileLocation:
         assert s.provenance_wallet_key is None
 
     def test_plain_settings_reads_no_env_file(self, clean_env):
-        _write(clean_env["workdir"] / ".env", "PAYMENT_MODE=paid\n")
-        assert Settings().payment_mode == "free"
+        _write(clean_env["workdir"] / ".env", "MCP_SERVER_NAME=paid\n")
+        assert Settings().mcp_server_name == "swarm-provenance-mcp"
 
     def test_ignored_cwd_env_file_is_reported(self, clean_env, caplog):
-        _write(clean_env["workdir"] / ".env", "PAYMENT_MODE=paid\n")
+        _write(clean_env["workdir"] / ".env", "MCP_SERVER_NAME=paid\n")
         with caplog.at_level(logging.WARNING, logger=config.logger.name):
             load_settings()
         assert "Ignoring" in caplog.text
@@ -98,26 +98,26 @@ class TestEnvFileLocation:
     def test_default_user_config_file_is_read(self, clean_env):
         path = default_env_file()
         assert path == clean_env["home"] / ".config" / "swarm-provenance-mcp" / ".env"
-        _write(path, "PAYMENT_MODE=paid\n")
+        _write(path, "MCP_SERVER_NAME=paid\n")
         assert resolve_env_file() == path
-        assert load_settings().payment_mode == "paid"
+        assert load_settings().mcp_server_name == "paid"
 
     def test_xdg_config_home_is_honoured(self, clean_env, monkeypatch, tmp_path):
         xdg = tmp_path / "xdg"
         monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
-        _write(xdg / "swarm-provenance-mcp" / ".env", "PAYMENT_MODE=paid\n")
-        assert load_settings().payment_mode == "paid"
+        _write(xdg / "swarm-provenance-mcp" / ".env", "MCP_SERVER_NAME=paid\n")
+        assert load_settings().mcp_server_name == "paid"
 
     def test_explicit_env_file_is_read(self, clean_env, monkeypatch, tmp_path):
-        path = _write(tmp_path / "elsewhere" / "my.env", "PAYMENT_MODE=paid\n")
+        path = _write(tmp_path / "elsewhere" / "my.env", "MCP_SERVER_NAME=paid\n")
         monkeypatch.setenv(ENV_FILE_VAR, str(path))
-        assert load_settings().payment_mode == "paid"
+        assert load_settings().mcp_server_name == "paid"
 
     def test_explicit_env_file_beats_default(self, clean_env, monkeypatch, tmp_path):
-        _write(default_env_file(), "PAYMENT_MODE=from-default\n")
-        path = _write(tmp_path / "my.env", "PAYMENT_MODE=from-explicit\n")
+        _write(default_env_file(), "MCP_SERVER_NAME=from-default\n")
+        path = _write(tmp_path / "my.env", "MCP_SERVER_NAME=from-explicit\n")
         monkeypatch.setenv(ENV_FILE_VAR, str(path))
-        assert load_settings().payment_mode == "from-explicit"
+        assert load_settings().mcp_server_name == "from-explicit"
 
     def test_missing_explicit_env_file_fails_loudly(
         self, clean_env, monkeypatch, tmp_path
@@ -131,7 +131,7 @@ class TestEnvFileLocation:
         self, clean_env, monkeypatch, value
     ):
         # A relative path would resolve against the working directory.
-        _write(clean_env["workdir"] / value, "PAYMENT_MODE=paid\n")
+        _write(clean_env["workdir"] / value, "MCP_SERVER_NAME=paid\n")
         monkeypatch.setenv(ENV_FILE_VAR, value)
         with pytest.raises(ValueError, match="absolute path"):
             load_settings()
@@ -150,22 +150,22 @@ class TestEnvFileLocation:
         monkeypatch.setenv("XDG_CONFIG_HOME", value)
         _write(
             clean_env["workdir"] / value / "swarm-provenance-mcp" / ".env",
-            "PAYMENT_MODE=paid\n",
+            "MCP_SERVER_NAME=paid\n",
         )
         assert default_env_file() == (
             clean_env["home"] / ".config" / "swarm-provenance-mcp" / ".env"
         )
-        assert load_settings().payment_mode == "free"
+        assert load_settings().mcp_server_name == "swarm-provenance-mcp"
 
     def test_home_relative_explicit_env_file_is_accepted(self, clean_env, monkeypatch):
-        _write(clean_env["home"] / "my.env", "PAYMENT_MODE=paid\n")
+        _write(clean_env["home"] / "my.env", "MCP_SERVER_NAME=paid\n")
         monkeypatch.setenv(ENV_FILE_VAR, "~/my.env")
-        assert load_settings().payment_mode == "paid"
+        assert load_settings().mcp_server_name == "paid"
 
     def test_process_environment_beats_env_file(self, clean_env, monkeypatch):
-        _write(default_env_file(), "PAYMENT_MODE=from-file\n")
-        monkeypatch.setenv("PAYMENT_MODE", "from-env")
-        assert load_settings().payment_mode == "from-env"
+        _write(default_env_file(), "MCP_SERVER_NAME=from-file\n")
+        monkeypatch.setenv("MCP_SERVER_NAME", "from-env")
+        assert load_settings().mcp_server_name == "from-env"
 
     def test_unknown_keys_in_env_file_do_not_crash(self, clean_env):
         _write(
@@ -227,11 +227,11 @@ class TestVariableNames:
     ):
         _write(
             default_env_file(),
-            "CHAIN_CONTRACT=0x" + "22" * 20 + "\nPAYMENT_MODE=paid\n",
+            "CHAIN_CONTRACT=0x" + "22" * 20 + "\nMCP_SERVER_NAME=paid\n",
         )
         monkeypatch.setenv("CHAIN_NAME", "base")
         s = load_settings()
-        assert (s.chain_name, s.payment_mode) == ("base", "paid")
+        assert (s.chain_name, s.mcp_server_name) == ("base", "paid")
         assert s.chain_contract_address == "0x" + "22" * 20
 
     def test_field_name_still_works_as_keyword(self, clean_env):

@@ -1,11 +1,13 @@
 """Configuration management for the Swarm Provenance MCP server."""
 
+import ipaddress
 import logging
 import os
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -13,6 +15,31 @@ logger = logging.getLogger(__name__)
 # Environment variable naming an explicit env file to load.
 ENV_FILE_VAR = "SWARM_PROVENANCE_ENV_FILE"
 CONFIG_DIR_NAME = "swarm-provenance-mcp"
+
+# PAYMENT_MODE values: "free" sends X-Payment-Mode: free (the gateway's
+# rate-limited free tier), "" sends no header. The server cannot pay x402.
+PAYMENT_MODES = ("free", "")
+
+
+def is_loopback_host(host: Optional[str]) -> bool:
+    """Whether ``host`` is localhost or a loopback address."""
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def is_plain_http_remote(url: str) -> bool:
+    """Whether ``url`` is plain http to a host other than this machine."""
+    try:
+        parts = urlsplit(url)
+        return parts.scheme.lower() == "http" and not is_loopback_host(parts.hostname)
+    except ValueError:
+        return False
 
 
 class Settings(BaseSettings):
@@ -136,6 +163,38 @@ class Settings(BaseSettings):
         ge=24,
         description="Maximum duration_hours accepted by purchase_stamp and extend_stamp",
     )
+
+    @field_validator("swarm_gateway_url")
+    @classmethod
+    def _check_gateway_url(cls, value: str) -> str:
+        try:
+            parts = urlsplit(value)
+            host = parts.hostname
+        except ValueError:
+            parts, host = None, None
+        if parts is None or parts.scheme.lower() not in ("http", "https") or not host:
+            raise ValueError(
+                "SWARM_GATEWAY_URL must be an http:// or https:// URL with a host"
+            )
+        if is_plain_http_remote(value):
+            logger.warning(
+                "SWARM_GATEWAY_URL uses plain http to %s: requests and uploads are "
+                "sent unencrypted. Use https unless the gateway is on a trusted "
+                "network.",
+                host,
+            )
+        return value
+
+    @field_validator("payment_mode")
+    @classmethod
+    def _check_payment_mode(cls, value: str) -> str:
+        mode = value.strip().lower()
+        if mode not in PAYMENT_MODES:
+            raise ValueError(
+                "PAYMENT_MODE must be 'free' (the gateway's free tier) or empty "
+                "(no payment header)"
+            )
+        return mode
 
     # No env file by default: only the global instance below reads one, from a
     # fixed location (see resolve_env_file). Unknown keys are ignored so a

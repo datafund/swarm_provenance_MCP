@@ -152,6 +152,26 @@ def _merge_payment_source(info: Dict[str, Any], src: Dict[str, Any]) -> None:
         info["free_tier"] = free
 
 
+# Headers this client adds that must not reach another origin on a redirect.
+# requests already drops Authorization there, but not custom headers.
+ORIGIN_BOUND_HEADERS = ("X-Payment-Mode",)
+
+
+class _GatewaySession(requests.Session):
+    """Session that drops ORIGIN_BOUND_HEADERS on a cross-origin redirect.
+
+    Uses requests' own test for dropping Authorization
+    (``should_strip_auth``): another host, port or scheme counts as another
+    origin, except an http to https upgrade on the same host.
+    """
+
+    def rebuild_auth(self, prepared_request, response):
+        super().rebuild_auth(prepared_request, response)
+        if self.should_strip_auth(response.request.url, prepared_request.url):
+            for name in ORIGIN_BOUND_HEADERS:
+                prepared_request.headers.pop(name, None)
+
+
 class SwarmGatewayClient:
     """Client for interacting with the Swarm gateway API."""
 
@@ -162,7 +182,7 @@ class SwarmGatewayClient:
             base_url: Override the default gateway URL from settings
         """
         self.base_url = (base_url or settings.swarm_gateway_url).rstrip("/")
-        self.session = requests.Session()
+        self.session = _GatewaySession()
         self.session.headers.update(
             {
                 "Content-Type": "application/json",

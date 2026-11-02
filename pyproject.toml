@@ -71,6 +71,7 @@ where = ["."]
 include = ["swarm_provenance_mcp*"]
 
 [tool.setuptools.package-data]
+"swarm_provenance_mcp" = ["SKILLS.md"]
 "swarm_provenance_mcp.chain" = ["abi/*.json"]
 
 [tool.black]

@@ -151,7 +151,7 @@ Blockchain dependencies (web3, eth-account) are included in the default install.
 - **Performance Tests** (`test_performance_regression.py`): Handler response time and concurrency regression tests
 - **User Tests** (`user-tests/`): Live end-to-end UX audit against real gateway and blockchain (not run in CI)
 - **Production gateway guard** (`tests/conftest.py`): the test run forces `SWARM_GATEWAY_URL` to `SWARM_TEST_GATEWAY_URL` (default: a closed local port), skips `integration` tests unless `--run-integration` is passed, and fails any test that sends a request to the production gateway
-- **Release gate**: `.github/workflows/tests.yml` (unit tests, fresh-install stdio smoke, image stdio smoke) runs on PRs to `main`/`development` and is called by `docker-publish.yml` before any push; `scripts/mcp_stdio_smoke.py` is the stdio `initialize` + `tools/list` check
+- **Release gate**: `.github/workflows/tests.yml` (unit tests, fresh-install stdio smoke, image stdio smoke) runs on PRs to `main`/`development` and is called by `docker-publish.yml` before any push; `scripts/mcp_stdio_smoke.py` is the stdio `initialize` + `tools/list` + `resources/read provenance://skills` check
 - **Async Support**: Uses `pytest-asyncio` for async test execution
 - **Mocking**: Uses `pytest-mock` and `unittest.mock` for external dependency mocking
 
@@ -202,7 +202,7 @@ The `config.py` module uses Pydantic Settings for type-safe configuration with a
 - **Structured errors**: All error responses include `retryable: true|false` and `_next` recovery hint
 - **Typo correction**: Unknown tool names get Levenshtein-based "Did you mean?" suggestions
 - **MCP Prompts**: 4 workflow prompts (`provenance-upload`, `provenance-verify`, `stamp-management`, `provenance-chain-workflow`) registered via `@server.list_prompts()` / `@server.get_prompt()`
-- **MCP Resources**: `provenance://skills` resource (SKILLS.md content) via `@server.list_resources()` / `@server.read_resource()`
+- **MCP Resources**: `provenance://skills` resource (SKILLS.md content) via `@server.list_resources()` / `@server.read_resource()`. `SKILLS.md` lives in the package (`swarm_provenance_mcp/SKILLS.md`, declared as package data) and is read with `importlib.resources`, so non-editable installs and the Docker image serve it
 - **Gateway status**: health_check reports swarm_connect gateway connectivity in `_gateway` field
 - **Insufficient funds**: `_is_insufficient_funds_error()` and `_format_insufficient_funds_error()` provide faucet/bridge URLs
 - **Payment required (HTTP 402)**: `_raise_with_detail` raises `PaymentRequiredError` (a `requests.HTTPError` subclass) with `payment_info` from `parse_payment_required()`, which reads the x402 body at the top level, under `detail`, or in a `PAYMENT-REQUIRED` header, and tolerates empty or non-JSON bodies. `purchase_stamp`, `upload_data` and `extend_stamp` return `format_payment_required()` with `retryable: false`. Amounts are atomic units; only the known USDC contracts (6 decimals) are converted. Paid x402 is not supported, so the options never offer it

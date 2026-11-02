@@ -3,13 +3,13 @@
 import asyncio
 import hashlib
 import hmac
+import importlib.resources
 import json
 import logging
 import re
 import secrets
 import time
 import traceback
-from pathlib import Path
 from decimal import Decimal, localcontext
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -272,11 +272,18 @@ if settings.chain_enabled:
 
 
 def _load_skills_content() -> str:
-    """Load SKILLS.md from repository root for the provenance://skills resource."""
-    skills_path = Path(__file__).parent.parent / "SKILLS.md"
+    """Load SKILLS.md for the provenance://skills resource.
+
+    The file is package data, so it is present in a non-editable install and
+    in the Docker image, not only in a source checkout.
+    """
     try:
-        return skills_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+        return (
+            importlib.resources.files("swarm_provenance_mcp")
+            .joinpath("SKILLS.md")
+            .read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, OSError):
         return "Provenance skills guide not found. See MCP_INSTRUCTIONS for basic guidance."
 
 

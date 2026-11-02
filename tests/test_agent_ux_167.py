@@ -448,3 +448,96 @@ class TestEncryptedReferences:
 
         with pytest.raises(ValueError):
             validate_and_clean_reference_hash("ab" * 64)
+
+
+SKILLS_FALLBACK = "Provenance skills guide not found"
+
+
+def _declared_package_data():
+    """[tool.setuptools.package-data] of pyproject.toml as {package: [globs]}.
+    Parsed by hand: tomllib is not available on Python 3.10."""
+    import json
+    import re
+
+    text = (Path(REPO_ROOT) / "pyproject.toml").read_text()
+    section = text.split("[tool.setuptools.package-data]", 1)[1].split("\n[", 1)[0]
+    data = {}
+    for package, globs in re.findall(r'^"([^"]+)"\s*=\s*(\[.*\])\s*$', section, re.M):
+        data[package] = json.loads(globs)
+    return data
+
+
+def _copy_installed_tree(dest):
+    """What a non-editable install puts in site-packages: the package's .py
+    files plus the declared package data, without the repository around it."""
+    import shutil
+
+    src_root = Path(REPO_ROOT)
+    for py in (src_root / "swarm_provenance_mcp").rglob("*.py"):
+        target = dest / py.relative_to(src_root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(py, target)
+    for package, globs in _declared_package_data().items():
+        pkg_dir = src_root.joinpath(*package.split("."))
+        for pattern in globs:
+            for f in pkg_dir.glob(pattern):
+                target = dest / f.relative_to(src_root)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, target)
+
+
+class TestSkillsResourcePackaged:
+    """provenance://skills read SKILLS.md from the repository root, which a
+    non-editable install and the Docker image do not have."""
+
+    def test_skills_md_is_declared_package_data(self):
+        assert "SKILLS.md" in _declared_package_data().get("swarm_provenance_mcp", [])
+
+    def test_skills_load_without_the_repository(self, tmp_path):
+        import os
+        import subprocess
+        import sys
+
+        site = tmp_path / "site"
+        _copy_installed_tree(site)
+        work = tmp_path / "work"
+        work.mkdir()
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("PYTHONPATH", "SWARM_PROVENANCE_ENV_FILE", "XDG_CONFIG_HOME")
+        }
+        env.update(
+            PYTHONPATH=str(site),
+            HOME=str(tmp_path),
+            SWARM_GATEWAY_URL="http://127.0.0.1:9",
+        )
+        code = (
+            "import swarm_provenance_mcp.server as s, sys; "
+            "assert s.__file__.startswith(sys.argv[1]), s.__file__; "
+            "sys.stdout.write(s._SKILLS_CONTENT)"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", code, str(site)],
+            env=env,
+            cwd=str(work),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode == 0, proc.stderr[-2000:]
+        assert SKILLS_FALLBACK not in proc.stdout
+        packaged = Path(REPO_ROOT) / "swarm_provenance_mcp" / "SKILLS.md"
+        assert proc.stdout == packaged.read_text(encoding="utf-8")
+
+    def test_smoke_script_reads_the_skills_resource(self):
+        import sys
+
+        sys.path.insert(0, str(Path(REPO_ROOT) / "scripts"))
+        try:
+            import mcp_stdio_smoke
+        finally:
+            sys.path.pop(0)
+        methods = [(m.get("method"), m.get("params")) for m in mcp_stdio_smoke.MESSAGES]
+        assert ("resources/read", {"uri": "provenance://skills"}) in methods
+        assert mcp_stdio_smoke.SKILLS_FALLBACK == SKILLS_FALLBACK

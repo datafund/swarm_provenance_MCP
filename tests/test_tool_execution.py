@@ -293,6 +293,82 @@ class TestToolExecution:
         assert "\n_next: purchase_stamp" not in text
         assert "_next: download_data" in text
 
+    @staticmethod
+    async def _upload_sign_description(server) -> str:
+        from mcp.types import ListToolsRequest
+
+        handler = None
+        for h in server.request_handlers.values():
+            if hasattr(h, "__name__") and "list_tools" in str(h):
+                handler = h
+                break
+        assert handler is not None
+        result = await handler(ListToolsRequest(method="tools/list"))
+        inner = result.root if hasattr(result, "root") else result
+        tools = inner.tools if hasattr(inner, "tools") else inner
+        upload = next(t for t in tools if t.name == "upload_data")
+        return upload.inputSchema["properties"]["sign"]["description"]
+
+    async def test_upload_data_sign_description_names_real_tool(self, server):
+        """Issue #183: the description named a tool that does not exist."""
+        import re
+
+        description = await self._upload_sign_description(server)
+        assert "get_notary_info" in description
+        assert not re.search(r"(?<!get_)notary_info", description)
+
+    async def test_upload_data_sign_description_documents_envelope(self, server):
+        """Issue #183: the agent must learn the envelope and the 400 codes."""
+        description = await self._upload_sign_description(server)
+        assert '"data"' in description
+        assert "signatures" in description
+        assert "INVALID_DOCUMENT_FORMAT" in description
+        assert "NOTARY_NOT_ENABLED" in description
+        assert "NOTARY_NOT_CONFIGURED" in description
+        assert "application/json" in description
+
+    async def test_upload_data_signed_output_describes_stored_document(
+        self, server, mock_gateway_client
+    ):
+        """Issue #183: a signed upload is stored as application/json."""
+        data = '{"data": {"k": 1}, "signatures": []}'
+        result = await call_tool_directly(
+            server,
+            "upload_data",
+            {
+                "data": data,
+                "stamp_id": TEST_STAMP_ID,
+                "content_type": "text/plain",
+                "sign": "notary",
+            },
+        )
+
+        assert not result.isError
+        text = result.content[0].text
+        assert f"Size: {len(data):,} bytes (before signing)" in text
+        assert "Content Type: application/json (signed document)" in text
+        assert "Content Type: text/plain" not in text
+
+    async def test_upload_data_unsigned_output_unchanged(
+        self, server, mock_gateway_client
+    ):
+        result = await call_tool_directly(
+            server,
+            "upload_data",
+            {
+                "data": "plain text",
+                "stamp_id": TEST_STAMP_ID,
+                "content_type": "text/plain",
+            },
+        )
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "Size: 10 bytes\n" in text
+        assert "Content Type: text/plain\n" in text
+        assert "before signing" not in text
+        assert "signed document" not in text
+
     async def test_download_data_tool(self, server, mock_gateway_client):
         """Test download_data tool execution."""
         result = await call_tool_directly(

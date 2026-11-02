@@ -1021,3 +1021,68 @@ class TestHealthCheckBranchHintsAgree:
         next_lines, recs = self._hints(result.content[0].text)
         assert next_lines == ["_next: list_stamps"]
         assert "try list_stamps separately" in recs
+
+
+class _OldPydanticValidationError(Exception):
+    """Stands in for pydantic 2.0 to 2.3, whose errors() takes no keyword
+    arguments. Its items carry the input, as the real ones do."""
+
+    SECRET = "ftp://user:secret@host.example"
+
+    def __str__(self):
+        return f"1 validation error input_value={self.SECRET!r}"
+
+    def errors(self, *args, **kwargs):
+        if args or kwargs:
+            raise TypeError("errors() takes no keyword arguments")
+        return [
+            {
+                "type": "value_error",
+                "loc": ("swarm_gateway_url",),
+                "msg": "Value error, SWARM_GATEWAY_URL must be an http:// or "
+                "https:// URL with a host",
+                "input": self.SECRET,
+                "ctx": {"error": self.SECRET},
+                "url": "https://errors.pydantic.dev/2.3/v/value_error",
+            }
+        ]
+
+
+class TestRefusalMessageOnOldPydantic:
+    def test_message_without_keyword_support(self):
+        from swarm_provenance_mcp.config import _refusal_message
+
+        message = _refusal_message(_OldPydanticValidationError())
+        assert "SWARM_GATEWAY_URL must be an http:// or https:// URL" in message
+        assert "secret" not in message
+        assert "errors.pydantic.dev" not in message
+
+    def test_load_settings_does_not_chain_the_error(self, monkeypatch):
+        import traceback
+
+        from swarm_provenance_mcp import config
+
+        def refuse(**_kwargs):
+            raise _OldPydanticValidationError()
+
+        monkeypatch.setattr(config, "ValidationError", _OldPydanticValidationError)
+        monkeypatch.setattr(config, "Settings", refuse)
+        monkeypatch.setattr(config, "resolve_env_file", lambda: None)
+        with pytest.raises(config.ConfigurationError) as info:
+            config.load_settings()
+        err = info.value
+        assert err.__cause__ is None and err.__suppress_context__
+        printed = "".join(traceback.format_exception(type(err), err, err.__traceback__))
+        assert "secret" not in printed
+        assert "SWARM_GATEWAY_URL" in str(err)
+
+    def test_unreadable_errors_still_give_a_clean_message(self):
+        from swarm_provenance_mcp.config import _refusal_message
+
+        class Broken(_OldPydanticValidationError):
+            def errors(self, *args, **kwargs):
+                raise TypeError("nope")
+
+        message = _refusal_message(Broken())
+        assert message.startswith("Invalid configuration.")
+        assert "secret" not in message

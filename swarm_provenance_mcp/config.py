@@ -334,15 +334,37 @@ class ConfigurationError(ValueError):
     never the values: a URL can carry credentials."""
 
 
+def _error_items(error: ValidationError) -> list:
+    """The error's items, or [] if they cannot be read.
+
+    pydantic 2.0 to 2.3 reject the keyword arguments of errors() with a
+    TypeError (pyproject allows pydantic>=2.0), so fall back to the plain
+    call. Only ``loc`` and ``msg`` are used from the items: ``input``,
+    ``ctx`` and ``url`` can carry the refused value.
+    """
+    try:
+        return list(error.errors(include_input=False, include_url=False))
+    except TypeError:
+        pass
+    try:
+        return list(error.errors())
+    except Exception:
+        return []
+
+
 def _refusal_message(error: ValidationError) -> str:
     """One line per refused setting: variable name and rule, without input."""
     lines = []
-    for item in error.errors(include_input=False, include_url=False):
-        loc = item.get("loc") or ("?",)
-        name = str(loc[0]).upper()
+    for item in _error_items(error):
+        if not isinstance(item, dict):
+            continue
+        loc = item.get("loc")
+        name = str(loc[0]).upper() if isinstance(loc, (tuple, list)) and loc else "?"
         rule = str(item.get("msg", "invalid value"))
         rule = rule.removeprefix("Value error, ")
         lines.append(rule if rule.startswith(name) else f"{name}: {rule}")
+    if not lines:
+        return "Invalid configuration. A setting was refused."
     return "Invalid configuration. " + "; ".join(lines)
 
 

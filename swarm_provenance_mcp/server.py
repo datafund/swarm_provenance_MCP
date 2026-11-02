@@ -936,7 +936,23 @@ _WRITABLE_ACCESS_MODES = ("shared", None)
 
 
 # unusableReason values (gateway) after which waiting does not help.
-_SPENT_REASONS = ("expired", "expiring_soon", "full", "invalid_depth")
+# "unreadable": the gateway could not parse the batch's TTL or depth.
+_SPENT_REASONS = ("expired", "expiring_soon", "full", "invalid_depth", "unreadable")
+# A "not_found" batch bought through the gateway less than this many seconds
+# ago (its secondsSincePurchase) may not have reached the node yet: wait for
+# it. Older, or of unknown age, it will not appear.
+NOT_FOUND_GRACE_SECONDS = 180
+
+
+def _recently_purchased(stamp: Dict[str, Any]) -> bool:
+    """Whether the gateway reports the stamp as bought less than
+    NOT_FOUND_GRACE_SECONDS ago. Only a plain non-negative int counts."""
+    age = stamp.get("secondsSincePurchase")
+    return (
+        isinstance(age, int)
+        and not isinstance(age, bool)
+        and 0 <= age < NOT_FOUND_GRACE_SECONDS
+    )
 
 
 def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
@@ -966,7 +982,10 @@ def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
             if not writable:
                 continue
             reason = stamp.get("unusableReason")
-            if isinstance(reason, str) and reason in _SPENT_REASONS:
+            if isinstance(reason, str) and (
+                reason in _SPENT_REASONS
+                or (reason == "not_found" and not _recently_purchased(stamp))
+            ):
                 blocked["spent"] += 1
                 continue
             # Not usable yet, for no lasting reason: it may still be
@@ -1010,7 +1029,8 @@ def _no_writable_stamp_text(blocked: Dict[str, int]) -> str:
     if spent:
         parts.append(
             f"{spent} stamp{'s' if spent != 1 else ''} cannot become usable "
-            "(expired, full or about to expire)"
+            "(expired, full or about to expire, or not found or unreadable on "
+            "the node)"
         )
     detail = f": {'; '.join(parts)}." if parts else "."
     return f"No stamp this server can write to{detail} Purchase a stamp with purchase_stamp"

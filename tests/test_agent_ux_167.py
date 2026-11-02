@@ -1092,3 +1092,46 @@ class TestRefusalMessageOnOldPydantic:
         message = _refusal_message(Broken())
         assert message.startswith("Invalid configuration.")
         assert "secret" not in message
+
+
+class TestNotFoundAndUnreadableStamps:
+    """The gateway's other unusableReason codes: 'unreadable' (TTL or depth
+    could not be parsed) never fixes itself; 'not_found' does only for a
+    stamp bought moments ago that the node has not seen yet."""
+
+    async def _health(self, server, stamp):
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.health_check.return_value = {"status": "healthy"}
+            gw.list_stamps.return_value = {"stamps": [stamp]}
+            result = await call_tool_directly(server, "health_check", {})
+        text = result.content[0].text
+        return [l for l in text.splitlines() if l.startswith("_next:")], text
+
+    def _stamp(self, reason, **extra):
+        stamp = dict(_stamp("shared", usable=False), unusableReason=reason)
+        stamp.update(extra)
+        return stamp
+
+    async def test_unreadable_is_spent(self, server):
+        nxt, text = await self._health(server, self._stamp("unreadable"))
+        assert nxt == ["_next: purchase_stamp"]
+        assert "cannot become usable" in text
+
+    @pytest.mark.parametrize("age", [0, 30, 179])
+    async def test_recent_not_found_is_pending(self, server, age):
+        nxt, text = await self._health(
+            server, self._stamp("not_found", secondsSincePurchase=age)
+        )
+        assert nxt == ["_next: check_stamp_health"]
+        assert "not usable yet" in text
+
+    @pytest.mark.parametrize(
+        "age",
+        [180, 10_000, None, "absent", -1, True, False, 1.5, "30", float("nan"),
+         float("inf"), 10**30, [5], {"s": 5}],
+    )
+    async def test_old_or_unknown_not_found_is_spent(self, server, age):
+        extra = {} if age == "absent" else {"secondsSincePurchase": age}
+        nxt, text = await self._health(server, self._stamp("not_found", **extra))
+        assert nxt == ["_next: purchase_stamp"], age
+        assert "cannot become usable" in text

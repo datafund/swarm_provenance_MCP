@@ -6964,7 +6964,8 @@ class TestAnchorAlreadyRegisteredOwner:
         assert "Registered: unknown" in _lines(result.content[0].text)
 
     @pytest.mark.parametrize(
-        "owner", ["0x123", "not-an-address", "0x" + "g" * 40, 42, True]
+        "owner",
+        ["0x123", "not-an-address", "0x" + "g" * 40, 42, True, False, 0, ""],
     )
     async def test_malformed_owner_argument_rejected(self, server, owner):
         mock_client = MagicMock()
@@ -7064,7 +7065,9 @@ class TestVerifyHashExpectedOwner:
         assert not result.isError
         assert "NOT registered" in result.content[0].text
 
-    @pytest.mark.parametrize("value", ["0x123", "abc", 7, True, "0x" + "z" * 40])
+    @pytest.mark.parametrize(
+        "value", ["0x123", "abc", 7, True, False, 0, "", "0x" + "z" * 40]
+    )
     async def test_malformed_expected_owner_rejected(self, server, value):
         mock_client = MagicMock()
 
@@ -7133,3 +7136,30 @@ class TestVerifyHashExpectedOwner:
         prop = tool.inputSchema["properties"]["expected_owner"]
         assert prop["pattern"] == "^0x[a-fA-F0-9]{40}$"
         assert tool.inputSchema["required"] == ["swarm_hash"]
+
+
+async def test_anchor_hash_description_describes_owner_check():
+    """#164: the tools/list description must not promise success for any
+    already-registered hash."""
+    from mcp.types import ListToolsRequest
+
+    with (
+        patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+        patch("swarm_provenance_mcp.server.settings") as mock_settings,
+    ):
+        mock_settings.chain_enabled = True
+        mock_settings.mcp_server_name = "test"
+        mock_settings.mcp_server_version = "0.1.0"
+        mock_settings.default_stamp_duration_hours = 25
+        mock_settings.default_stamp_size = "small"
+        test_server = create_server()
+        handler = test_server.request_handlers[ListToolsRequest]
+        result = await handler(ListToolsRequest(method="tools/list"))
+    inner = result.root if hasattr(result, "root") else result
+    description = next(t for t in inner.tools if t.name == "anchor_hash").description
+    assert (
+        "If the hash is already registered to the expected owner (owner, or the "
+        "wallet), it returns the existing record without error. If another "
+        "address owns it, the result is an error."
+    ) in description
+    assert "If the hash is already registered, returns" not in description

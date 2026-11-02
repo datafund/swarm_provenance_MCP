@@ -1670,7 +1670,7 @@ def create_server() -> Server:
                     ),
                     Tool(
                         name="anchor_hash",
-                        description="Register a Swarm reference hash on the blockchain, creating an immutable provenance record with owner, timestamp, and data type. Costs gas — requires a funded wallet (check with chain_balance). If the hash is already registered, returns the existing record without error. Do not use this on hashes that will be the new_hash in record_transform — record_transform auto-registers them.",
+                        description="Register a Swarm reference hash on the blockchain, creating an immutable provenance record with owner, timestamp, and data type. Costs gas — requires a funded wallet (check with chain_balance). If the hash is already registered to the expected owner (owner, or the wallet), it returns the existing record without error. If another address owns it, the result is an error. Do not use this on hashes that will be the new_hash in record_transform — record_transform auto-registers them.",
                         inputSchema={
                             "type": "object",
                             "properties": {
@@ -3467,7 +3467,9 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
         if len(data_type) > 64:
             raise ValueError("data_type must be 64 characters or fewer")
 
-        owner = arguments.get("owner") or None
+        # Only a missing key or None means "no owner": any other value,
+        # including "", False and 0, must be a valid address.
+        owner = arguments.get("owner")
         if owner is not None:
             owner = validate_address_argument(owner, "owner")
         storage_ref = arguments.get("storage_ref") or None
@@ -3719,13 +3721,12 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
             raise ValueError("swarm_hash is required")
         clean_hash = validate_and_clean_reference_hash(swarm_hash)
 
+        # Only a missing key or None means "no expected owner".
         expected_owner = arguments.get("expected_owner")
-        if expected_owner is not None and expected_owner != "":
+        if expected_owner is not None:
             expected_owner = validate_address_argument(
                 expected_owner, "expected_owner"
             )
-        else:
-            expected_owner = None
 
         from .chain.exceptions import DataNotRegisteredError
 
@@ -4101,7 +4102,7 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
             )
 
         if isinstance(e, TransformationAlreadyExistsError):
-            # Intentionally NOT isError — idempotent, same as anchor_hash
+            # Intentionally NOT isError: recording the same link again is idempotent.
             response_text = f"⛓️  Transformation already recorded on-chain\n\n"
             response_text += f"   Original: {e.original_hash}\n"
             response_text += f"   Transformed: {e.new_hash}\n"

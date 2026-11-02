@@ -56,9 +56,62 @@ def _remote_uses():
     return found
 
 
+# Any `uses` key, in block or flow style (`{uses: x@v1}`), quoted or not.
+RAW_USES_RE = re.compile(r"""(?<![\w-])["']?uses["']?\s*:""")
+# At least the 25 remote refs pinned for issue #201 (secret-scan.yml adds one).
+MIN_REMOTE_USES = 25
+
+
+def _strip_comment(line):
+    """Drop a YAML comment: `#` at the start or after whitespace."""
+    m = re.search(r"(^|\s)#", line)
+    return line[: m.start()] if m else line
+
+
+def _raw_uses_count(text):
+    return sum(len(RAW_USES_RE.findall(_strip_comment(line))) for line in text.splitlines())
+
+
 def test_workflow_scan_finds_uses_lines():
     assert _workflow_files(), "no workflow files found"
-    assert _remote_uses(), "scanner found no remote `uses:` lines"
+    remote = _remote_uses()
+    assert len(remote) >= MIN_REMOTE_USES, (
+        f"scanner found {len(remote)} remote `uses:` lines, expected at least {MIN_REMOTE_USES}"
+    )
+
+
+def test_scanner_parses_every_uses_occurrence():
+    """Backstop: a `uses` the line scanner misses (flow style, odd layout) fails here."""
+    for path in _workflow_files():
+        text = path.read_text()
+        parsed = len(list(_uses_lines(text)))
+        raw = _raw_uses_count(text)
+        assert parsed == raw, (
+            f"{path.name}: scanner parsed {parsed} `uses:` lines, file has {raw} `uses` keys"
+        )
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("      - uses: actions/checkout@v4", 1),
+        ("      - {uses: actions/checkout@v4, with: {fetch-depth: 0}}", 1),
+        ('      - "uses": actions/checkout@v4', 1),
+        ("steps: [{uses: a/b@v1}, {uses: c/d@v2}]", 2),
+        ("      # uses: actions/checkout@v4", 0),
+        ("      - uses: a/b@0123456789abcdef0123456789abcdef01234567 # uses: old", 1),
+        ("      - name: reuses: nothing", 0),
+        ("      - run: echo causes", 0),
+    ],
+)
+def test_raw_uses_count(text, expected):
+    assert _raw_uses_count(text) == expected
+
+
+def test_backstop_catches_flow_style_uses():
+    text = "      - {uses: actions/checkout@v4}"
+    assert len(list(_uses_lines(text))) == 0
+    assert _raw_uses_count(text) == 1
 
 
 @pytest.mark.parametrize(

@@ -119,8 +119,14 @@ class TestHealthCheckCountsOnlyWritableStamps:
         )
         assert "0 usable by this server / 4 local" in text
         assert "2 pool" in text
-        assert "1 owned by another wallet" in text
+        assert "1 owned (registered to the x402 wallet that paid for it)" in text
+        assert "another wallet" not in text
         assert "ready: false" in text
+
+    async def test_owned_count_plural(self, server):
+        text = await self._health(server, [_stamp("owned"), _stamp("owned")])
+        assert "2 owned (registered to the x402 wallets that paid for them)" in text
+        assert "another wallet" not in text
 
     async def test_mixed_list_with_one_shared_is_ready(self, server):
         text = await self._health(server, [_stamp("pool"), _stamp("shared")])

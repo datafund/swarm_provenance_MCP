@@ -3130,8 +3130,13 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 others = []
                 if counts["pool"]:
                     others.append(f"{counts['pool']} pool")
-                if counts["owned"]:
-                    others.append(f"{counts['owned']} owned by another wallet")
+                owned = counts["owned"]
+                if owned:
+                    payer = (
+                        "wallets that paid for them" if owned != 1
+                        else "wallet that paid for it"
+                    )
+                    others.append(f"{owned} owned (registered to the x402 {payer})")
                 if counts["other"]:
                     others.append(f"{counts['other']} with another access mode")
                 if others:

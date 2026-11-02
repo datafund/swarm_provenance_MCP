@@ -227,9 +227,15 @@ Inspect provenance records without a wallet.
                                                    │  anchored: block P│
                                                    └───────────────────┘
 
-  get_provenance_chain(hash_0) returns: hash_0 → hash_1 → hash_2
-  get_provenance_chain(hash_2) returns: hash_0 → hash_1 → hash_2  (walks backward to root)
-  get_provenance_chain(hash_1) returns: hash_0 → hash_1 → hash_2  (walks both directions)
+  get_provenance_chain on hash_0, hash_1 or hash_2 returns all three nodes,
+  because it walks both directions. The first entry is the hash you queried.
+  The output shows the same parents and edges in each case:
+
+    hash_0   Parents: none
+             Edge: hash_0 -> hash_1: "Removed duplicates"
+    hash_1   Parents: hash_0
+             Edge: hash_1 -> hash_2: "Anonymized PII"
+    hash_2   Parents: hash_1
 ```
 
 Each node lists its parent hashes, and each edge prints as `Edge: <parent_hash> -> <child_hash>: "<description>"`.

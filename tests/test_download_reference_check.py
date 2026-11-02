@@ -306,3 +306,7 @@ class TestWordingMatchesBehaviour:
             text = result.root.messages[0].content.text
             assert "Reference check" in text, name
             assert "to verify the upload" not in text
+            if name == "provenance-verify":
+                # A verified chunk proves which bytes the reference names,
+                # not that they are the document the agent expected.
+                assert "the document you expected" in text

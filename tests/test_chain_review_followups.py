@@ -292,12 +292,12 @@ class TestLineageUnderFailover:
 
     @pytest.mark.parametrize(
         "error,expected",
-        [(_http_error(503), "raises"), (ValueError("no DataMerged event"), [])],
+        [(_http_error(503), "503"), (ValueError("no DataMerged event"), "DataMerged")],
     )
     def test_contract_merge_events_classify_errors(
         self, mock_chain_deps, error, expected
     ):
-        """get_all_merge_events itself must not turn an outage into 'no merges'."""
+        """get_all_merge_events must not turn any scan error into 'no merges'."""
         from swarm_provenance_mcp.chain.contract import DataProvenanceContract
 
         contract = DataProvenanceContract(
@@ -306,11 +306,8 @@ class TestLineageUnderFailover:
         )
         events = mock_chain_deps["contract"].events.DataMerged
         events.get_logs.side_effect = error
-        if expected == "raises":
-            with pytest.raises(Exception, match="503"):
-                contract.get_all_merge_events(from_block=0, to_block=10)
-        else:
-            assert contract.get_all_merge_events(from_block=0, to_block=10) == []
+        with pytest.raises(Exception, match=expected):
+            contract.get_all_merge_events(from_block=0, to_block=10)
 
     def test_cache_not_advanced_through_real_contract_wrapper(self, mock_chain_deps):
         """End to end: wrapper + cache, as the review's v1 scenario."""
@@ -330,7 +327,7 @@ class TestLineageUnderFailover:
             cache.get_maps(contract, deploy_block=0, current_block=10)
         assert cache._last_scanned_block is None
 
-    def test_v1_merge_scan_failure_still_skipped(self):
+    def test_merge_scan_failure_fails_cache_build(self):
         from swarm_provenance_mcp.chain.event_cache import TransformationEventCache
 
         cache = TransformationEventCache()
@@ -338,8 +335,9 @@ class TestLineageUnderFailover:
         contract.get_all_transformations.return_value = []
         contract.get_all_merge_events.side_effect = ValueError("no such event")
 
-        cache.get_maps(contract, deploy_block=100, current_block=200)
-        assert cache._last_scanned_block == 200
+        with pytest.raises(ValueError, match="no such event"):
+            cache.get_maps(contract, deploy_block=100, current_block=200)
+        assert cache._last_scanned_block is None
 
 
 class TestNoWalletV3Records:

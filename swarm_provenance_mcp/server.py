@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import re
 import secrets
 import time
@@ -1568,7 +1569,7 @@ def create_server() -> Server:
                     "properties": {
                         "data": {
                             "type": "string",
-                            "description": "Data content to upload as a string (max 4096 bytes). Can be JSON, text, or any string data.",
+                            "description": "Data content to upload as a string (max 4096 bytes). Can be JSON, text, or any string data. With sign=notary, see sign for the required format.",
                             "maxLength": 4096,
                         },
                         "stamp_id": {
@@ -1583,7 +1584,16 @@ def create_server() -> Server:
                         },
                         "sign": {
                             "type": "string",
-                            "description": "Signing method for provenance. Use 'notary' to have the gateway cryptographically sign the data at upload time, creating a verifiable proof of upload. Check notary_info first to confirm signing is available. Omit it for an unsigned upload.",
+                            "description": (
+                                "Signing method for provenance. Use 'notary' to have the gateway sign the data at upload time, which creates a verifiable proof of upload. "
+                                "Call get_notary_info first to check that signing is available. "
+                                'With notary, data must be a JSON object with a top-level "data" field, for example {"data": {...}, "signatures": []}. '
+                                '"signatures" is optional and must be an array. The gateway adds its signature to it. '
+                                "Plain text or JSON without a \"data\" field fails with 400 INVALID_DOCUMENT_FORMAT. "
+                                "If the notary is off, the gateway returns 400 NOTARY_NOT_ENABLED or NOTARY_NOT_CONFIGURED. "
+                                "The stored document is larger than your input, and its content type is always application/json. "
+                                "Omit sign for an unsigned upload."
+                            ),
                             "enum": sorted(UPLOAD_SIGN_METHODS),
                         },
                     },
@@ -2291,6 +2301,56 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         )
 
 
+def _format_stamp_utilization(details: Dict[str, Any]) -> str:
+    """Stamp utilization as a percentage.
+
+    Bee's ``utilization`` is the number of filled slots in the fullest
+    bucket, not a percentage. Each bucket holds 2^(depth - bucketDepth) slots.
+    """
+
+    def _is_int(v: Any) -> bool:
+        return isinstance(v, int) and not isinstance(v, bool)
+
+    percent = details.get("utilizationPercent")
+    if not (
+        isinstance(percent, (int, float))
+        and not isinstance(percent, bool)
+        and math.isfinite(percent)
+        and 0 <= percent <= 100
+    ):
+        percent = None
+
+    raw = details.get("utilization")
+    count = None
+    if _is_int(raw):
+        count = raw
+    elif isinstance(raw, float) and math.isfinite(raw) and raw.is_integer():
+        count = int(raw)
+
+    depth = details.get("depth")
+    bucket_depth = details.get("bucketDepth")
+    slots = None
+    if _is_int(depth) and _is_int(bucket_depth) and 0 <= bucket_depth < depth <= 255:
+        slots = 2 ** (depth - bucket_depth)
+
+    if count is not None and slots is not None and 0 <= count <= slots:
+        # The gateway's utilizationPercent wins when it disagrees with the count.
+        if percent is None:
+            percent = count / slots * 100
+        return f"{percent:.1f}% ({count} of {slots} slots in the fullest bucket)"
+
+    detail = None
+    if raw is not None:
+        # Not validated against the bucket size, so cap it like any gateway value.
+        shown = _gw(count if count is not None else raw, 40)
+        detail = f"filled slots in the fullest bucket: {shown}"
+    if percent is not None:
+        return f"{percent:.1f}% ({detail})" if detail else f"{percent:.1f}%"
+    if detail:
+        return f"not available ({detail})"
+    return "N/A"
+
+
 async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle stamp status requests."""
     try:
@@ -2331,11 +2391,7 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += " ✅ (Ready for uploads)"
         response_text += "\n"
 
-        utilization = result.get("utilization", "N/A")
-        if utilization != "N/A" and isinstance(utilization, (int, float)):
-            response_text += f"Utilization: {utilization}%\n"
-        else:
-            response_text += f"Utilization: {utilization}\n"
+        response_text += f"Utilization: {_format_stamp_utilization(result)}\n"
 
         response_text += f"Immutable: {result.get('immutableFlag', 'N/A')}\n"
         response_text += f"Local: {result.get('local', 'N/A')}\n"
@@ -2645,8 +2701,15 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
 
         response_text = f"🎉 Data uploaded successfully to Swarm!\n\n"
         response_text += f"📄 Upload Details:\n"
-        response_text += f"   Size: {len(data.encode('utf-8')):,} bytes\n"
-        response_text += f"   Content Type: {content_type}\n"
+        size = len(data.encode("utf-8"))
+        if sign:
+            # The gateway stores the signed document, always as JSON, so the
+            # input size and content type do not describe what was stored.
+            response_text += f"   Size: {size:,} bytes (before signing)\n"
+            response_text += "   Content Type: application/json (signed document)\n"
+        else:
+            response_text += f"   Size: {size:,} bytes\n"
+            response_text += f"   Content Type: {content_type}\n"
         response_text += f"   Stamp Used: `{clean_stamp_id}`\n"
         if sign:
             response_text += f"   Signing: {sign}\n"
@@ -2797,20 +2860,34 @@ def _describe_download(reference: str, data: bytes) -> Tuple[str, Optional[str]]
             "To save it, you would need to write the bytes to a file."
         ), None
 
+    def _reject_constant(name: str) -> None:
+        # NaN and Infinity are not JSON, although Python accepts them.
+        raise ValueError(f"{name} is not valid JSON")
+
     kind = "text"
     shape = ""
     try:
-        parsed = json.loads(text)
-    except (json.JSONDecodeError, RecursionError):
+        parsed = json.loads(text, parse_constant=_reject_constant)
+    except (ValueError, RecursionError):
+        # ValueError covers JSONDecodeError, the constants above, and numbers
+        # too long for Python to convert. The content is still shown as text.
         parsed = None
     else:
         kind = "JSON"
         if isinstance(parsed, dict):
-            shape = f", object with {len(parsed)} top-level fields"
+            count = len(parsed)
+            shape = f", object with {count} top-level field{'' if count == 1 else 's'}"
         elif isinstance(parsed, list):
-            shape = f", array with {len(parsed)} items"
+            count = len(parsed)
+            shape = f", array with {count} item{'' if count == 1 else 's'}"
+        elif parsed is None:
+            shape = ", null value"
+        elif isinstance(parsed, bool):
+            shape = ", boolean value"
+        elif isinstance(parsed, str):
+            shape = ", string value"
         else:
-            shape = f", {type(parsed).__name__} value"
+            shape = ", number value"
 
     summary = (
         f"📥 Successfully downloaded {kind} data from `{reference}` "
@@ -2982,24 +3059,18 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
 
         response_text += stamps_info
 
-        # Summary
-        response_text += f"\nready: {str(ready).lower()}"
-
-        if recommendations:
-            response_text += "\n_recommendations:"
-            for rec in recommendations:
-                response_text += f"\n  - {rec}"
-
-        # Chain anchoring status
+        # Chain anchoring status. Built before the summary so that its
+        # recommendations reach the _recommendations list (#212).
+        chain_text = ""
         if settings.chain_enabled:
             await _recheck_write_contract()
             if CHAIN_AVAILABLE and chain_client:
                 try:
                     chain_client.health_check()
-                    response_text += f"\n\n⛓️  Chain: {chain_client.chain} (connected)"
-                    response_text += _chain_id_lines(chain_client._provider)
-                    response_text += f"\n   Contract: {chain_client.contract_address}"
-                    response_text += f"\n   Wallet: {chain_client.address}"
+                    chain_text += f"\n\n⛓️  Chain: {chain_client.chain} (connected)"
+                    chain_text += _chain_id_lines(chain_client._provider)
+                    chain_text += f"\n   Contract: {chain_client.contract_address}"
+                    chain_text += f"\n   Wallet: {chain_client.address}"
                     # Proactive balance check — warn if wallet can't transact
                     try:
                         wallet_info = chain_client.balance()
@@ -3009,7 +3080,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                             wallet_info.chain,
                         )
                         if guidance:
-                            response_text += guidance
+                            chain_text += guidance
                             recommendations.append(
                                 "Wallet balance too low for write operations — "
                                 "fund it before using anchor_hash or record_transform"
@@ -3019,11 +3090,11 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 except Exception as chain_err:
                     from .chain.exceptions import ChainIdMismatchError
 
-                    response_text += (
+                    chain_text += (
                         f"\n\n⛓️  Chain: {settings.chain_name} "
                         f"(error: {_exc_text(chain_err)})"
                     )
-                    response_text += _chain_id_lines(chain_client._provider)
+                    chain_text += _chain_id_lines(chain_client._provider)
                     recommendations.append(
                         "RPC is on another chain than CHAIN_NAME — fix "
                         "CHAIN_RPC_URL / CHAIN_RPC_URLS or CHAIN_NAME"
@@ -3032,7 +3103,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     )
             elif CHAIN_AVAILABLE and _chain_init_error:
                 # Wallet configured, but the contract check failed
-                response_text += (
+                chain_text += (
                     f"\n\n⛓️  Chain: {settings.chain_name} (writes disabled)\n   "
                     + _writes_disabled_text().replace("\n", "\n   ")
                 )
@@ -3042,26 +3113,36 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 )
             elif CHAIN_AVAILABLE:
                 # Dependencies present but no wallet → read-only mode
-                response_text += (
+                chain_text += (
                     f"\n\n⛓️  Chain: {settings.chain_name} "
                     f"(read-only, no wallet — set PROVENANCE_WALLET_KEY for write tools)"
                 )
                 try:
                     reader = await asyncio.to_thread(_chain_reader)
-                    response_text += _chain_id_lines(reader._provider)
+                    chain_text += _chain_id_lines(reader._provider)
                 except Exception as chain_err:
-                    response_text += f"\n   Chain error: {_exc_text(chain_err)}"
+                    chain_text += f"\n   Chain error: {_exc_text(chain_err)}"
                     configured = _effective_chain_id(settings.chain_name)
                     if configured is not None:
-                        response_text += (
+                        chain_text += (
                             f"\n   Chain ID: {configured} "
                             "(configured, not verified against the RPC)"
                         )
             else:
-                response_text += "\n\n⛓️  Chain: enabled but dependencies not available"
+                chain_text += "\n\n⛓️  Chain: enabled but dependencies not available"
                 recommendations.append(
                     "Reinstall with: pip install -e . (web3/eth-account should be included)"
                 )
+
+        # Summary
+        response_text += f"\nready: {str(ready).lower()}"
+
+        if recommendations:
+            response_text += "\n_recommendations:"
+            for rec in recommendations:
+                response_text += f"\n  - {rec}"
+
+        response_text += chain_text
 
         # Gateway status
         response_text += f"\n_gateway: {gateway_url} ({'connected' if gateway_ok else 'unreachable'})"

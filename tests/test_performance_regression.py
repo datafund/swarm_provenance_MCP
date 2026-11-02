@@ -1,6 +1,13 @@
-"""Tests to catch performance regressions and resource issues."""
+"""Tests to catch performance regressions and resource issues.
+
+Tests that assert on wall-clock time carry the ``performance`` marker. They
+depend on machine load, so the default run skips them; pass
+``--run-performance`` to run them (the regression_tests.yml performance job
+does). The resource-leak checks run in the default suite.
+"""
 
 import pytest
+import statistics
 import time
 import asyncio
 import threading
@@ -15,6 +22,7 @@ from swarm_provenance_mcp.gateway_client import SwarmGatewayClient
 class TestPerformanceBaselines:
     """Tests to establish and monitor performance baselines."""
 
+    @pytest.mark.performance
     def test_server_creation_performance(self):
         """Test that server creation doesn't become unreasonably slow."""
         start_time = time.time()
@@ -27,6 +35,7 @@ class TestPerformanceBaselines:
         assert creation_time < 1.0, f"Server creation too slow: {creation_time:.2f}s"
         print(f"Server creation time: {creation_time:.3f}s")
 
+    @pytest.mark.performance
     async def test_tool_handler_response_times(self):
         """Test that tool handlers respond within reasonable time."""
         from swarm_provenance_mcp.server import (
@@ -67,6 +76,7 @@ class TestPerformanceBaselines:
                 ), f"Handler {name} too slow: {response_time:.3f}s"
                 print(f"Handler {name} response time: {response_time:.3f}s")
 
+    @pytest.mark.performance
     def test_gateway_client_initialization_performance(self):
         """Test that gateway client initialization is fast."""
         start_time = time.time()
@@ -101,6 +111,7 @@ class TestPerformanceBaselines:
 class TestConcurrencyAndLoad:
     """Tests to ensure the system handles concurrent operations well."""
 
+    @pytest.mark.performance
     async def test_concurrent_handler_calls(self):
         """Test multiple concurrent handler calls don't interfere."""
         from swarm_provenance_mcp.server import handle_health_check
@@ -154,6 +165,7 @@ class TestConcurrencyAndLoad:
             f"Memory after rapid client creation/destruction: +{memory_increase:.1f}MB"
         )
 
+    @pytest.mark.performance
     def test_large_data_handling_performance(self):
         """Test performance with large (but valid) data."""
         client = SwarmGatewayClient()
@@ -257,6 +269,7 @@ class TestResourceLeakDetection:
 class TestScalabilityLimits:
     """Tests to understand system limits and scalability."""
 
+    @pytest.mark.performance
     def test_tool_definition_scalability(self):
         """Test that adding more tools doesn't cause exponential slowdown."""
         # This test would catch if tool registration becomes O(n²) or similar
@@ -276,34 +289,41 @@ class TestScalabilityLimits:
         ), f"Tool handler access scaling poorly: {access_time:.3f}s"
         print(f"Tool handler access time (100x): {access_time:.3f}s")
 
+    @pytest.mark.performance
     @pytest.mark.slow
     def test_sustained_operation_stability(self):
-        """Test that sustained operations remain stable."""
+        """Test that sustained operations remain stable.
+
+        Discards the first 2 operations as warm-up, because the first
+        asyncio.run call is cold. Then compares the median of the first 10
+        measured operations with the median of the last 10, once. A median
+        ignores single slow outliers from scheduler noise, and one check avoids
+        the false positives of re-checking after every operation.
+        """
         from swarm_provenance_mcp.server import handle_health_check
 
         with patch("swarm_provenance_mcp.server.gateway_client") as mock_client:
             mock_client.health_check.return_value = {"status": "healthy"}
 
             # Run many operations to test for memory leaks or performance degradation
+            warmup = 2
             times = []
-            for i in range(50):
+            for i in range(warmup + 50):
                 start = time.time()
 
                 # Run async operation
                 asyncio.run(handle_health_check({}))
 
-                times.append(time.time() - start)
+                if i >= warmup:
+                    times.append(time.time() - start)
 
-                # Check for performance degradation
-                if i > 10:
-                    recent_avg = sum(times[-10:]) / 10
-                    early_avg = sum(times[:10]) / 10
-
-                    # Performance shouldn't degrade more than 50%
-                    degradation = recent_avg / early_avg
-                    assert (
-                        degradation < 1.5
-                    ), f"Performance degraded {degradation:.1f}x after {i} operations"
+            # Performance shouldn't degrade more than 50%
+            early_median = statistics.median(times[:10])
+            recent_median = statistics.median(times[-10:])
+            degradation = recent_median / early_median
+            assert (
+                degradation < 1.5
+            ), f"Performance degraded {degradation:.1f}x after {len(times)} operations"
 
             print(
                 f"Sustained operations: avg {sum(times)/len(times):.4f}s per operation"

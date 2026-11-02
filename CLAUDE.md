@@ -111,7 +111,7 @@ On-chain provenance module. Dependencies (web3, eth-account) included in default
 - `list_stamps` - List local stamps with access mode (owned/shared) and propagation status
   Stamps have `accessMode`: `"owned"` (dedicated, yours) or `"shared"` (public, any gateway user). Use owned stamps for production.
 - `extend_stamp` - Extend stamp duration
-- `upload_data` - Upload data to Swarm (max 4KB)
+- `upload_data` - Upload data to Swarm (max 4KB). Optional `sign: "notary"` makes the gateway sign the data; check `get_notary_info` first. With notary, `data` must be a JSON object with a top-level `data` field (`{"data": {...}, "signatures": []}`), or the gateway returns 400 `INVALID_DOCUMENT_FORMAT`; a disabled notary returns 400 `NOTARY_NOT_ENABLED` or `NOTARY_NOT_CONFIGURED`. The signed document is stored as `application/json`, so the result labels the size "before signing"
 - `download_data` - Download data from Swarm by reference hash
 - `check_stamp_health` - Diagnose stamp upload readiness with errors/warnings and propagation timing
 - `get_wallet_info` - Node wallet address and BZZ balance (debug, may be removed)
@@ -148,9 +148,9 @@ Blockchain dependencies (web3, eth-account) are included in the default install.
 - **Tool Execution Tests** (`test_tool_execution.py`): Handler-level tests for all MCP tools including chain tools, with mocked chain_client/CHAIN_AVAILABLE. Covers insufficient funds handling, event-based chain traversal, already-registered reverts, duplicate transformation detection, and proactive health_check balance warnings.
 - **Tool Definition Tests** (`test_tool_definitions.py`): Validates tool schemas, required parameters, and registration consistency
 - **Integration Tests** (`test_integration.py`): End-to-end MCP tool testing
-- **Performance Tests** (`test_performance_regression.py`): Handler response time and concurrency regression tests
+- **Performance Tests** (`test_performance_regression.py`): Handler response time and concurrency regression tests, plus resource-leak checks. Tests that assert on wall-clock time carry the `performance` marker and are skipped unless `--run-performance` is passed, because machine load makes them fail at random. The `performance-tests` job in `.github/workflows/regression_tests.yml` passes the flag. Mark any new wall-clock test in `test_performance_regression.py` `performance`; `tests/test_performance_marker_gating.py` enforces this for that module only, because the job runs only that module. Security and timeout guards in other modules that assert on wall-clock time with generous bounds stay unmarked and run in the default suite: the ReDoS linearity checks in `test_redact_logs.py` and `test_redact_tool_output.py`, and the startup budget check in `test_contract_verification.py`
 - **User Tests** (`user-tests/`): Live end-to-end UX audit against real gateway and blockchain (not run in CI)
-- **Production gateway guard** (`tests/conftest.py`): the test run forces `SWARM_GATEWAY_URL` to `SWARM_TEST_GATEWAY_URL` (default: a closed local port), skips `integration` tests unless `--run-integration` is passed, and fails any test that sends a request to the production gateway
+- **Production gateway guard** (`tests/conftest.py`): the test run forces `SWARM_GATEWAY_URL` to `SWARM_TEST_GATEWAY_URL` (default: a closed local port), skips `integration` tests unless `--run-integration` is passed and `performance` tests unless `--run-performance` is passed, and fails any test that sends a request to the production gateway
 - **Release gate**: `.github/workflows/tests.yml` (unit tests, fresh-install stdio smoke, image stdio smoke) runs on PRs to `main`/`development` and is called by `docker-publish.yml` before any push; `scripts/mcp_stdio_smoke.py` is the stdio `initialize` + `tools/list` check
 - **Async Support**: Uses `pytest-asyncio` for async test execution
 - **Mocking**: Uses `pytest-mock` and `unittest.mock` for external dependency mocking

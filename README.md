@@ -390,7 +390,7 @@ Test blockchain RPC connectivity for on-chain provenance. Returns connection sta
 ```
 
 #### `anchor_hash` *(optional — requires `CHAIN_ENABLED=true` and `PROVENANCE_WALLET_KEY`)*
-Register a Swarm reference hash on the blockchain, creating an immutable provenance record with owner, timestamp, and data type. Costs gas. If the hash is already registered, returns the existing record without error.
+Register a Swarm reference hash on the blockchain, creating an immutable provenance record with owner, timestamp, and data type. Costs gas. If the hash is already registered to the expected owner (`owner`, or the wallet address), it returns the existing record without error. If another address owns the record, it returns an error that shows both addresses, and it sends no transaction.
 
 **Parameters:**
 - `swarm_hash` (string, required): 64-character hex Swarm reference hash to anchor
@@ -414,6 +414,7 @@ Check whether a Swarm reference hash is registered on the blockchain. Returns ve
 
 **Parameters:**
 - `swarm_hash` (string, required): 64-character hex Swarm reference hash to verify
+- `expected_owner` (string): Ethereum address the record must belong to. If the record belongs to another address, the result is an error that shows both addresses
 
 **Example:**
 ```json
@@ -925,7 +926,7 @@ This MCP server is designed to work with AI agents that support the Model Contex
 4. **Timeout errors**: Increase timeout values if operations are taking too long
 5. **Chain: "wallet key not configured"**: Set `PROVENANCE_WALLET_KEY` in the MCP client's `"env"` block or in the env file (`~/.config/swarm-provenance-mcp/.env`, see [Configuration](#configuration)) for write operations (`anchor_hash`, `record_transform`, `set_storage_ref`). Read-only tools work without it.
 6. **Chain: "insufficient funds"**: Fund your wallet with testnet ETH (Base Sepolia faucet) or bridge ETH to Base mainnet. Run `chain_balance` for guidance.
-7. **Chain: "already registered"**: The hash is already anchored on-chain. Use `get_provenance` to view the existing record.
+7. **Chain: "already registered"**: The hash is already anchored on-chain. If the result is an error, another address owns the record. Registration is first-come, so to anchor a record you own, change the content, upload it again, and anchor the new hash. Use `get_provenance` to view the existing record.
 8. **Chain: "transformation already recorded"**: The `(original → new)` link already exists on-chain. No gas spent — use `get_provenance_chain` to verify the lineage.
 9. **Chain: "too few/many sources"**: `record_merge_transform` requires 2–50 source hashes. Adjust the `source_hashes` array accordingly.
 

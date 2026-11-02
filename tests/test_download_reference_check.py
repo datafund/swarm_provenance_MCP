@@ -114,6 +114,17 @@ class TestReferenceCheckHelper:
     def test_tampered_body_is_not_verified(self):
         _assert_not_checked(_reference_check(HELLO_ADDRESS, b"hello worle"), "manifest")
 
+    def test_unequal_address_reason_holds_for_single_chunk_references(self):
+        """The reason must stay true when the reference is a real single chunk."""
+        line = _reference_check(HELLO_ADDRESS, b"hello worle")
+        assert line == (
+            "Reference check: not checked. The content's chunk address does not "
+            "equal the reference. The reference is probably a manifest (/bzz "
+            "upload), which this server cannot verify "
+            "(datafund/swarm_connect#499)."
+        )
+        assert "probably names a manifest" not in line
+
     def test_tampered_full_chunk_is_not_verified(self):
         body = bytearray(FULL_PAYLOAD)
         body[100] ^= 1

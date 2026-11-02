@@ -3192,8 +3192,9 @@ def _reference_check(reference: Any, data: Any) -> str:
 
     Both values are untrusted. Content of at most one chunk is verified when
     its single-chunk BMT address equals the reference. Every other case is
-    "not checked" with the reason, never a mismatch: a reference from a
-    ``/bzz`` upload names a manifest, whose address differs from the content's.
+    "not checked" with the reason, never a mismatch. When the addresses
+    differ, the reference is probably a ``/bzz`` manifest, whose address
+    differs from the content's; the text stays true when it is not.
     """
     if isinstance(reference, str) and _HEX128.fullmatch(reference):
         return (
@@ -3217,10 +3218,9 @@ def _reference_check(reference: Any, data: Any) -> str:
             "and equals the reference."
         )
     return (
-        _NOT_CHECKED + "The reference probably names a manifest (from a "
-        "/bzz upload, the usual case for upload_data references), and this "
-        "server cannot check content against a manifest. Gateway support for "
-        "that is tracked in datafund/swarm_connect#499."
+        _NOT_CHECKED + "The content's chunk address does not equal the "
+        "reference. The reference is probably a manifest (/bzz upload), which "
+        "this server cannot verify (datafund/swarm_connect#499)."
     )
 
 

@@ -197,7 +197,7 @@ The `config.py` module uses Pydantic Settings for type-safe configuration with a
 - Chain-specific error handling: insufficient funds detection with faucet/bridge guidance, "already registered" revert catch, duplicate transformation detection via state read (v2) or event cache (v1), proactive balance warnings in health_check
 
 ### Agent Guidance (MCP Design Guidelines)
-- **Adaptive health_check**: Returns `ready` boolean, `_recommendations`, `_gateway`, and contextual `_next` based on stamp availability
+- **Adaptive health_check**: Returns `ready` boolean, `_recommendations`, `_gateway`, and contextual `_next` based on stamp availability. Only usable stamps this server can write to count toward `ready`: `accessMode` `shared` or absent. `pool` and `owned` stamps are refused by the gateway for this server, which sends no wallet (`_writable_stamp_counts` in `server.py`)
 - **Response hints**: All success responses append `_next: <tool>` and `_related: <tools>` guiding agents to the logical next step
 - **Structured errors**: All error responses include `retryable: true|false` and `_next` recovery hint
 - **Typo correction**: Unknown tool names get Levenshtein-based "Did you mean?" suggestions

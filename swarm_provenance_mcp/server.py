@@ -850,6 +850,32 @@ def _label(label: Any) -> str:
     return quote(flatten(label, MAX_GATEWAY_STRING_CHARS))
 
 
+# accessMode values of stamps this server can write to. It sends no wallet,
+# so only shared stamps qualify, plus stamps without an access mode (gateways
+# that do not report one). "pool" is gateway inventory and "owned" belongs to
+# the wallet that paid for it: the gateway refuses both.
+_WRITABLE_ACCESS_MODES = ("shared", None)
+
+
+def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, int]:
+    """Usable stamps in a list_stamps answer, split by whether this server can
+    write to them. Entries that are not objects are not counted."""
+    counts = {"writable": 0, "pool": 0, "owned": 0, "other": 0}
+    for stamp in stamps:
+        if not isinstance(stamp, dict) or stamp.get("usable") is not True:
+            continue
+        mode = stamp.get("accessMode")
+        if mode is None or (isinstance(mode, str) and mode in _WRITABLE_ACCESS_MODES):
+            counts["writable"] += 1
+        elif mode == "pool":
+            counts["pool"] += 1
+        elif mode == "owned":
+            counts["owned"] += 1
+        else:
+            counts["other"] += 1
+    return counts
+
+
 def _new_batch_hint(label: Optional[str], depth: Optional[int]) -> str:
     """How to spot, in list_stamps output, a batch the unanswered purchase made.
 
@@ -2918,18 +2944,39 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
             try:
                 stamps_result = gateway_client.list_stamps()
                 stamps = stamps_result.get("stamps", [])
+                if not isinstance(stamps, list):
+                    stamps = []
                 total_stamps = len(stamps)
-                usable_count = sum(1 for s in stamps if s.get("usable") is True)
+                counts = _writable_stamp_counts(stamps)
+                usable_count = counts["writable"]
 
                 stamps_info += (
-                    f"\n📋 Stamps: {usable_count} usable / {total_stamps} local\n"
+                    f"\n📋 Stamps: {usable_count} usable by this server / "
+                    f"{total_stamps} local"
                 )
+                others = []
+                if counts["pool"]:
+                    others.append(f"{counts['pool']} pool")
+                if counts["owned"]:
+                    others.append(f"{counts['owned']} owned by another wallet")
+                if counts["other"]:
+                    others.append(f"{counts['other']} with another access mode")
+                if others:
+                    stamps_info += f" (usable but not by this server: {', '.join(others)})"
+                stamps_info += "\n"
 
                 if usable_count > 0 and (network is None or network["ok"]):
                     ready = True
                     next_tool = "upload_data"
                 elif usable_count > 0:
                     next_tool = None
+                elif others:
+                    recommendations.append(
+                        "No stamp this server can write to: pool stamps are gateway "
+                        "inventory, and owned stamps belong to the wallet that paid "
+                        "for them. Purchase a stamp with purchase_stamp"
+                    )
+                    next_tool = "purchase_stamp"
                 elif total_stamps > 0:
                     recommendations.append(
                         f"Found {total_stamps} stamp(s) but none are usable — poll check_stamp_health, stamps take up to 2 minutes to propagate"

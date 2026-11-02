@@ -66,3 +66,64 @@ class TestPurchaseLabelNotShownAsStored:
         hint_lines = [l for l in text.splitlines() if l.startswith("_next")]
         assert hint_lines == ["_next: check_stamp_health"]
         assert "L" * 1001 not in text
+
+
+def _stamp(access_mode, usable=True):
+    stamp = {"batchID": TEST_STAMP_ID, "usable": usable}
+    if access_mode != "absent":
+        stamp["accessMode"] = access_mode
+    return stamp
+
+
+class TestHealthCheckCountsOnlyWritableStamps:
+    """Pool stamps (gateway inventory) and stamps owned by an x402 wallet are
+    refused by the gateway for this server, which sends no wallet. They must
+    not make health_check report ready."""
+
+    async def _health(self, server, stamps):
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.health_check.return_value = {
+                "status": "healthy",
+                "gateway_url": "http://localhost:8000",
+                "response_time_ms": 10,
+            }
+            gw.list_stamps.return_value = {"stamps": stamps}
+            result = await call_tool_directly(server, "health_check", {})
+        assert not result.isError
+        return result.content[0].text
+
+    @pytest.mark.parametrize(
+        "mode", ["pool", "owned", "unknown-mode", True, 1, {"a": 1}, ["shared"]]
+    )
+    async def test_unwritable_usable_stamp_is_not_ready(self, server, mode):
+        text = await self._health(server, [_stamp(mode)])
+        assert "ready: false" in text
+        assert "_next: upload_data" not in text
+        assert "_next: purchase_stamp" in text
+        assert "0 usable by this server / 1 local" in text
+
+    @pytest.mark.parametrize("mode", ["shared", None, "absent"])
+    async def test_shared_or_untagged_stamp_is_ready(self, server, mode):
+        text = await self._health(server, [_stamp(mode)])
+        assert "ready: true" in text
+        assert "_next: upload_data" in text
+        assert "1 usable by this server / 1 local" in text
+
+    async def test_counts_are_listed(self, server):
+        text = await self._health(
+            server,
+            [_stamp("pool"), _stamp("pool"), _stamp("owned"), _stamp("shared", False)],
+        )
+        assert "0 usable by this server / 4 local" in text
+        assert "2 pool" in text
+        assert "1 owned by another wallet" in text
+        assert "ready: false" in text
+
+    async def test_mixed_list_with_one_shared_is_ready(self, server):
+        text = await self._health(server, [_stamp("pool"), _stamp("shared")])
+        assert "ready: true" in text
+        assert "1 usable by this server / 2 local" in text
+
+    async def test_non_dict_entries_are_not_counted(self, server):
+        text = await self._health(server, ["x\nready: true", 5, None])
+        assert "ready: false" in text

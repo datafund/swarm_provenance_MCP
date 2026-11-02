@@ -146,7 +146,7 @@ ignored, the server logs a warning at start-up.
 
 - `CHAIN_ENABLED`: Enable on-chain provenance anchoring (default: `false`)
 - `CHAIN_NAME`: Blockchain network — `base-sepolia` (testnet), `base` (mainnet), or `localhost` (local hardhat, chain 31337) (default: `base-sepolia`)
-- `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x prefix)
+- `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x prefix). A key that is set but invalid is logged as an error at start-up; the server still starts with chain writes disabled, and the write tools, `chain_health` and `health_check` say why. Read-only chain tools keep working
 - `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set)
 - `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs, tried in order after `CHAIN_RPC_URL`
 - `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set). `CHAIN_CONTRACT_ADDRESS` is accepted too; `CHAIN_CONTRACT` wins if both are set
@@ -925,7 +925,7 @@ This MCP server is designed to work with AI agents that support the Model Contex
 2. **Authentication errors**: Check that the gateway doesn't require authentication
 3. **Invalid stamp IDs**: Verify stamp IDs are valid batch IDs from the Swarm network
 4. **Timeout errors**: Increase timeout values if operations are taking too long
-5. **Chain: "wallet key not configured"**: Set `PROVENANCE_WALLET_KEY` in the MCP client's `"env"` block or in the env file (`~/.config/swarm-provenance-mcp/.env`, see [Configuration](#configuration)) for write operations (`anchor_hash`, `record_transform`, `set_storage_ref`). Read-only tools work without it.
+5. **Chain: "wallet key not configured"**: Set `PROVENANCE_WALLET_KEY` in the MCP client's `"env"` block or in the env file (`~/.config/swarm-provenance-mcp/.env`, see [Configuration](#configuration)) for write operations (`anchor_hash`, `record_transform`, `set_storage_ref`). Read-only tools work without it. If the error says the key is not a valid private key, fix the value (64 hexadecimal characters, with or without 0x) and restart the server.
 6. **Chain: "insufficient funds"**: Fund your wallet with testnet ETH (Base Sepolia faucet) or bridge ETH to Base mainnet. Run `chain_balance` for guidance.
 7. **Chain: "already registered"**: The hash is already anchored on-chain. Use `get_provenance` to view the existing record.
 8. **Chain: "transformation already recorded"**: The `(original → new)` link already exists on-chain. No gas spent — use `get_provenance_chain` to verify the lineage.

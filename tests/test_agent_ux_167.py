@@ -1,11 +1,14 @@
 """#167: agent-facing correctness fixes (bundle)."""
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from swarm_provenance_mcp.server import create_server
 from tests.test_tool_execution import TEST_STAMP_ID, call_tool_directly
+
+REPO_ROOT = str(Path(__file__).resolve().parents[1])
 
 
 @pytest.fixture
@@ -127,3 +130,122 @@ class TestHealthCheckCountsOnlyWritableStamps:
     async def test_non_dict_entries_are_not_counted(self, server):
         text = await self._health(server, ["x\nready: true", 5, None])
         assert "ready: false" in text
+
+
+_BAD_KEY = "0x" + "ab" * 31  # 62 hex characters: one byte short
+
+
+def _start_server(tmp_path, key):
+    """Import the server in a fresh process with chain enabled and ``key``.
+
+    Returns (state line printed by the child, its stderr)."""
+    import os
+    import subprocess
+    import sys
+
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k
+        not in (
+            "SWARM_PROVENANCE_ENV_FILE",
+            "XDG_CONFIG_HOME",
+            "PROVENANCE_WALLET_KEY",
+            "CHAIN_RPC_URL",
+            "CHAIN_RPC_URLS",
+        )
+    }
+    env.update(
+        HOME=str(tmp_path),
+        CHAIN_ENABLED="true",
+        CHAIN_RPC_URL="http://127.0.0.1:9",
+        SWARM_GATEWAY_URL="http://127.0.0.1:9",
+        PYTHONPATH=os.pathsep.join(
+            p for p in (REPO_ROOT, env.get("PYTHONPATH")) if p
+        ),
+    )
+    if key is not None:
+        env["PROVENANCE_WALLET_KEY"] = key
+    code = (
+        "import swarm_provenance_mcp.server as s; "
+        "print('STATE', s.CHAIN_AVAILABLE, s.chain_client is None, "
+        "repr(s._chain_init_error))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        env=env,
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    state = [l for l in proc.stdout.splitlines() if l.startswith("STATE")][-1]
+    return state, proc.stderr
+
+
+class TestInvalidWalletKeyAtStartup:
+    """An invalid PROVENANCE_WALLET_KEY used to be logged at INFO as
+    'read-only mode (no wallet configured)'."""
+
+    @pytest.mark.parametrize("key", [_BAD_KEY, "not-a-key", "0x" + "zz" * 32])
+    def test_invalid_key_is_reported_not_read_only(self, tmp_path, key):
+        state, stderr = _start_server(tmp_path, key)
+        assert state.startswith("STATE True True ")
+        assert "PROVENANCE_WALLET_KEY" in state
+        assert "not a valid private key" in state
+        assert "ERROR" in stderr
+        assert "not a valid private key" in stderr
+        assert "no wallet configured" not in stderr
+
+    def test_key_value_is_not_logged(self, tmp_path):
+        state, stderr = _start_server(tmp_path, _BAD_KEY)
+        assert _BAD_KEY[2:12] not in stderr
+        assert _BAD_KEY[2:12] not in state
+
+    def test_unset_key_is_still_read_only(self, tmp_path):
+        state, stderr = _start_server(tmp_path, None)
+        assert state == "STATE True True None"
+        assert "not a valid private key" not in stderr
+
+
+@pytest.fixture
+def invalid_key_state(monkeypatch):
+    from swarm_provenance_mcp import server
+
+    monkeypatch.setattr(server, "CHAIN_AVAILABLE", True)
+    monkeypatch.setattr(server, "chain_client", None)
+    monkeypatch.setattr(server, "_unverified_write_client", None)
+    monkeypatch.setattr(server, "_chain_init_error", server.WALLET_KEY_INVALID_REASON)
+    monkeypatch.setattr(server, "_chain_init_fix", server.WALLET_KEY_INVALID_FIX)
+    monkeypatch.setattr(server.settings, "chain_enabled", True)
+    return server
+
+
+class TestInvalidWalletKeyInTools:
+    async def test_anchor_hash_names_the_key(self, server, invalid_key_state):
+        result = await call_tool_directly(
+            server, "anchor_hash", {"swarm_hash": "c" * 64}
+        )
+        text = result.content[0].text
+        assert result.isError
+        assert "not a valid private key" in text
+        assert "PROVENANCE_WALLET_KEY" in text
+        assert "CHAIN_CONTRACT" not in text
+
+    async def test_health_check_names_the_key(self, server, invalid_key_state):
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.health_check.return_value = {"status": "healthy"}
+            gw.list_stamps.return_value = {"stamps": []}
+            result = await call_tool_directly(server, "health_check", {})
+        text = result.content[0].text
+        assert "writes disabled" in text
+        assert "not a valid private key" in text
+        assert "CHAIN_CONTRACT" not in text
+
+    def test_contract_reason_keeps_contract_fix(self, monkeypatch):
+        from swarm_provenance_mcp import server
+
+        monkeypatch.setattr(server, "_chain_init_error", "No contract code at 0x1.")
+        monkeypatch.setattr(server, "_chain_init_fix", server.CONTRACT_FIX)
+        assert "Fix CHAIN_CONTRACT or CHAIN_NAME" in server._writes_disabled_text()

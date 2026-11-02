@@ -168,7 +168,7 @@ Read from the process environment, then an env file. The env file is never taken
 - `MCP_SERVER_VERSION`: Server version (default: `0.2.0`)
 - `CHAIN_ENABLED`: Enable on-chain provenance anchoring (default: `false`)
 - `CHAIN_NAME`: Blockchain network (`base-sepolia`, `base`, or `localhost`, default: `base-sepolia`)
-- `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x)
+- `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x). Unset or empty means read-only mode. A key that is set but invalid is not read-only mode: start-up logs an ERROR (without the key) and starts with writes disabled (`_chain_init_error = WALLET_KEY_INVALID_REASON`, fix text in `_chain_init_fix`), reported by the write tools, `chain_health` and `health_check`
 - `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set)
 - `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs, tried in order after `CHAIN_RPC_URL`
 - `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set); `CHAIN_CONTRACT_ADDRESS` also accepted, `CHAIN_CONTRACT` wins

@@ -63,6 +63,36 @@ CHAIN_AVAILABLE = False
 # code at the configured address). Reported by the write tools.
 _chain_init_error: Optional[str] = None
 
+# How to fix the cause in _chain_init_error, for the write tools' errors.
+CONTRACT_FIX = (
+    "Fix CHAIN_CONTRACT or CHAIN_NAME, then restart the server. The "
+    "address is checked again before each write."
+)
+WALLET_KEY_INVALID_REASON = (
+    "PROVENANCE_WALLET_KEY is set but is not a valid private key "
+    "(expected 64 hexadecimal characters, with or without 0x)."
+)
+WALLET_KEY_INVALID_FIX = (
+    "Fix PROVENANCE_WALLET_KEY, or remove it for read-only mode, then "
+    "restart the server. Read-only chain tools work in the meantime."
+)
+_chain_init_fix: str = CONTRACT_FIX
+
+
+def _wallet_key_is_invalid(key: Optional[str]) -> bool:
+    """Whether a configured wallet key cannot be loaded. An unset or empty
+    key is not invalid: it means read-only mode."""
+    if not key:
+        return False
+    from .chain.exceptions import ChainConfigurationError
+    from .chain.wallet import ChainWallet
+
+    try:
+        ChainWallet(private_key=key)
+    except ChainConfigurationError:
+        return True
+    return False
+
 
 def _parse_rpc_fallbacks():
     """Parse CHAIN_RPC_URLS into a list of fallback URLs, or None."""
@@ -189,7 +219,13 @@ if settings.chain_enabled:
         from .chain import CHAIN_AVAILABLE as _chain_avail, ChainClient
 
         CHAIN_AVAILABLE = _chain_avail
-        if CHAIN_AVAILABLE:
+        if CHAIN_AVAILABLE and _wallet_key_is_invalid(settings.provenance_wallet_key):
+            # Not read-only mode: the operator asked for writes. Neither the
+            # key nor the loader's error text (which may quote it) is logged.
+            _chain_init_error = WALLET_KEY_INVALID_REASON
+            _chain_init_fix = WALLET_KEY_INVALID_FIX
+            logger.error("Chain writes disabled: %s", WALLET_KEY_INVALID_REASON)
+        elif CHAIN_AVAILABLE:
             chain_client = ChainClient(
                 chain=settings.chain_name,
                 rpc_url=settings.chain_rpc_url,
@@ -591,10 +627,19 @@ def _format_hints(next_tool: str, related: List[str]) -> str:
 
 def _writes_disabled_text() -> str:
     """Why write tools are disabled although a wallet is configured."""
+    return f"Chain writes are disabled: {_chain_init_error}\n{_chain_init_fix}"
+
+
+def _writes_disabled_recommendation() -> str:
+    """health_check recommendation for disabled writes."""
+    if _chain_init_fix == WALLET_KEY_INVALID_FIX:
+        return (
+            "Chain writes disabled: PROVENANCE_WALLET_KEY is not a valid "
+            "private key. Fix it, or remove it for read-only mode"
+        )
     return (
-        f"Chain writes are disabled: {_chain_init_error}\n"
-        "Fix CHAIN_CONTRACT or CHAIN_NAME, then restart the server. The "
-        "address is checked again before each write."
+        "Chain writes disabled: no DataProvenance contract at the "
+        "configured address — fix CHAIN_CONTRACT or CHAIN_NAME"
     )
 
 
@@ -3044,15 +3089,12 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                         else "Chain anchoring enabled but RPC unreachable"
                     )
             elif CHAIN_AVAILABLE and _chain_init_error:
-                # Wallet configured, but the contract check failed
+                # Wallet configured, but the key or the contract check failed
                 response_text += (
                     f"\n\n⛓️  Chain: {settings.chain_name} (writes disabled)\n   "
                     + _writes_disabled_text().replace("\n", "\n   ")
                 )
-                recommendations.append(
-                    "Chain writes disabled: no DataProvenance contract at the "
-                    "configured address — fix CHAIN_CONTRACT or CHAIN_NAME"
-                )
+                recommendations.append(_writes_disabled_recommendation())
             elif CHAIN_AVAILABLE:
                 # Dependencies present but no wallet → read-only mode
                 response_text += (

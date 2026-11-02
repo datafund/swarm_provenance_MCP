@@ -2755,20 +2755,34 @@ def _describe_download(reference: str, data: bytes) -> Tuple[str, Optional[str]]
             "To save it, you would need to write the bytes to a file."
         ), None
 
+    def _reject_constant(name: str) -> None:
+        # NaN and Infinity are not JSON, although Python accepts them.
+        raise ValueError(f"{name} is not valid JSON")
+
     kind = "text"
     shape = ""
     try:
-        parsed = json.loads(text)
-    except (json.JSONDecodeError, RecursionError):
+        parsed = json.loads(text, parse_constant=_reject_constant)
+    except (ValueError, RecursionError):
+        # ValueError covers JSONDecodeError, the constants above, and numbers
+        # too long for Python to convert. The content is still shown as text.
         parsed = None
     else:
         kind = "JSON"
         if isinstance(parsed, dict):
-            shape = f", object with {len(parsed)} top-level fields"
+            count = len(parsed)
+            shape = f", object with {count} top-level field{'' if count == 1 else 's'}"
         elif isinstance(parsed, list):
-            shape = f", array with {len(parsed)} items"
+            count = len(parsed)
+            shape = f", array with {count} item{'' if count == 1 else 's'}"
+        elif parsed is None:
+            shape = ", null value"
+        elif isinstance(parsed, bool):
+            shape = ", boolean value"
+        elif isinstance(parsed, str):
+            shape = ", string value"
         else:
-            shape = f", {type(parsed).__name__} value"
+            shape = ", number value"
 
     summary = (
         f"📥 Successfully downloaded {kind} data from `{reference}` "

@@ -143,6 +143,40 @@ class TestHealthCheckCountsOnlyWritableStamps:
         assert "poll check_stamp_health" in text
         assert "Purchase a stamp" not in text
 
+    def _recommendation(self, text):
+        lines = [l for l in text.splitlines() if "No stamp this server can write to" in l]
+        assert len(lines) == 1, text
+        return lines[0]
+
+    async def test_recommendation_names_only_pool(self, server):
+        rec = self._recommendation(await self._health(server, [_stamp("pool")] * 2))
+        assert "2 pool stamps are gateway inventory" in rec
+        assert "owned" not in rec
+        assert "access mode" not in rec
+        assert "Purchase a stamp with purchase_stamp" in rec
+
+    async def test_recommendation_names_only_owned(self, server):
+        rec = self._recommendation(await self._health(server, [_stamp("owned")]))
+        assert "1 owned stamp belongs to the wallet that paid for it" in rec
+        assert "pool" not in rec
+
+    async def test_recommendation_counts_every_kind(self, server):
+        stamps = [
+            _stamp("pool"),
+            _stamp("owned", usable=False),
+            _stamp("owned"),
+            _stamp("weird"),
+        ]
+        rec = self._recommendation(await self._health(server, stamps))
+        assert "1 pool stamp is gateway inventory" in rec
+        assert "2 owned stamps belong to the wallet that paid for them" in rec
+        assert "1 stamp has an access mode this server cannot use" in rec
+
+    async def test_recommendation_without_known_kinds(self, server):
+        rec = self._recommendation(await self._health(server, ["junk", 5]))
+        assert rec.strip().startswith("- No stamp this server can write to.")
+        assert "pool" not in rec and "owned" not in rec
+
     async def test_unusable_unwritable_stamp_leads_to_purchase(self, server):
         text = await self._health(server, [_stamp("pool", usable=False)])
         assert "poll check_stamp_health" not in text

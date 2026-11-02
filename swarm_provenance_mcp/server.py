@@ -937,9 +937,13 @@ _WRITABLE_ACCESS_MODES = ("shared", None)
 
 def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, int]:
     """Usable stamps in a list_stamps answer, split by whether this server can
-    write to them, plus ``pending``: writable stamps not usable yet. Entries
+    write to them, plus ``pending`` (writable stamps not usable yet) and
+    ``blocked`` (every stamp this server cannot write to, by kind). Entries
     that are not objects are not counted."""
     counts = {"writable": 0, "pending": 0, "pool": 0, "owned": 0, "other": 0}
+    # Every stamp this server cannot write to, usable or not, by kind.
+    blocked = {"pool": 0, "owned": 0, "other": 0}
+    counts["blocked"] = blocked
     for stamp in stamps:
         if not isinstance(stamp, dict):
             continue
@@ -947,6 +951,8 @@ def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, int]:
         writable = mode is None or (
             isinstance(mode, str) and mode in _WRITABLE_ACCESS_MODES
         )
+        if not writable:
+            blocked[mode if mode in ("pool", "owned") else "other"] += 1
         if stamp.get("usable") is not True:
             # A writable stamp that is not usable yet may still be
             # propagating: wait for it rather than buy another.
@@ -962,6 +968,29 @@ def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, int]:
         else:
             counts["other"] += 1
     return counts
+
+
+def _no_writable_stamp_text(blocked: Dict[str, int]) -> str:
+    """health_check recommendation when no stamp is writable, naming only the
+    kinds of stamps actually listed."""
+    parts = []
+    pool, owned, other = blocked["pool"], blocked["owned"], blocked["other"]
+    if pool:
+        parts.append(
+            f"{pool} pool stamp{'s are' if pool != 1 else ' is'} gateway inventory"
+        )
+    if owned:
+        parts.append(
+            f"{owned} owned stamp{'s belong' if owned != 1 else ' belongs'} to the "
+            f"wallet that paid for {'them' if owned != 1 else 'it'}"
+        )
+    if other:
+        parts.append(
+            f"{other} stamp{'s have' if other != 1 else ' has'} an access mode "
+            "this server cannot use"
+        )
+    detail = f": {'; '.join(parts)}." if parts else "."
+    return f"No stamp this server can write to{detail} Purchase a stamp with purchase_stamp"
 
 
 def _new_batch_hint(label: Optional[str], depth: Optional[int]) -> str:
@@ -3072,11 +3101,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     )
                     next_tool = "purchase_stamp"
                 elif total_stamps > 0:
-                    recommendations.append(
-                        "No stamp this server can write to: pool stamps are gateway "
-                        "inventory, and owned stamps belong to the wallet that paid "
-                        "for them. Purchase a stamp with purchase_stamp"
-                    )
+                    recommendations.append(_no_writable_stamp_text(counts["blocked"]))
                     next_tool = "purchase_stamp"
                 else:
                     recommendations.append(

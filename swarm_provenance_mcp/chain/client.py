@@ -1479,15 +1479,17 @@ class ChainClient:
         Returns:
             ProvenanceChain: a list of ChainProvenanceRecord, starting with
             the given hash, that also says whether the lineage is complete.
-            A non-transport read failure on a node other than the root does
-            not end the call: the node is named in ``failed`` (and in its
-            record's ``read_error`` when the record was read). A node the
+            A non-transport read failure does not end the call: the node is
+            named in ``failed`` (and in its record's ``read_error`` when the
+            record was read). This includes the root's child-link and parent
+            reads; only an error reading the root record raises. A node the
             depth limit stopped at has ``expanded=False``. ``scan_note`` is
             set when the event index could not be built.
 
         Raises:
             Transport errors (so ``_rpc_failover`` can retry on another
-            endpoint), a chain id mismatch, and any read error on the root.
+            endpoint), a chain id mismatch, and an error reading the root
+            record.
         """
         logger.debug(
             "Get provenance chain: hash=%s max_depth=%s", swarm_hash, max_depth

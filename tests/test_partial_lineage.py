@@ -186,6 +186,24 @@ class TestReadFailuresMarkIncomplete:
         with pytest.raises(ValueError):
             _client(contract).get_provenance_chain(A)
 
+    @pytest.mark.parametrize("v2", [True, False])
+    @pytest.mark.parametrize(
+        "errors,label",
+        [
+            ("link_errors", "child link read failed"),
+            ("parent_errors", "parent read failed"),
+        ],
+    )
+    def test_root_link_read_failure_is_flagged_not_raised(self, v2, errors, label):
+        contract = FakeContract(LINE, v2=v2)
+        getattr(contract, errors)[A] = ValueError(SECRET)
+        chain = _client(contract, deploy_block=None).get_provenance_chain(A)
+
+        assert chain.complete is False
+        assert label in chain.failed[A]
+        assert "SECRET" not in chain.failed[A]
+        assert _by_hash(chain)[A].read_error == chain.failed[A]
+
     def test_chain_id_mismatch_on_a_node_is_not_a_partial_result(self):
         contract = FakeContract(LINE)
         contract.record_errors[B] = ChainIdMismatchError("wrong chain")

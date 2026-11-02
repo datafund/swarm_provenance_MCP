@@ -894,6 +894,45 @@ class TestStampStatusUtilization:
             )
             assert "Utilization: 50.0% (1 of 2 slots in the fullest bucket)" in text
 
+    async def test_out_of_range_gateway_percent_falls_back(self, server):
+        """A utilizationPercent below 0 or above 100 is ignored."""
+        for bad in (-5, 1e300):
+            text = await self._status_text(
+                server,
+                {
+                    "depth": 17,
+                    "bucketDepth": 16,
+                    "utilization": 1,
+                    "utilizationPercent": bad,
+                },
+            )
+            assert "Utilization: 50.0% (1 of 2 slots in the fullest bucket)" in text
+            assert "-5.0%" not in text
+            assert "0000000000" not in text
+
+            text = await self._status_text(
+                server, {"utilization": 1, "utilizationPercent": bad}
+            )
+            assert (
+                "Utilization: not available (filled slots in the fullest bucket: 1)"
+                in text
+            )
+
+    async def test_full_gateway_percent_is_accepted(self, server):
+        """A utilizationPercent of exactly 100 is still shown."""
+        text = await self._status_text(
+            server,
+            {
+                "depth": 17,
+                "bucketDepth": 16,
+                "utilization": 2,
+                "utilizationPercent": 100.0,
+            },
+        )
+        assert "Utilization: 100.0% (2 of 2 slots in the fullest bucket)" in text
+        text = await self._status_text(server, {"utilizationPercent": 100.0})
+        assert "Utilization: 100.0%\n" in text
+
     async def test_missing_utilization(self, server):
         """No utilization data still prints N/A."""
         text = await self._status_text(server, {"depth": 17, "bucketDepth": 16})

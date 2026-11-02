@@ -2265,6 +2265,7 @@ def _format_stamp_utilization(details: Dict[str, Any]) -> str:
         isinstance(percent, (int, float))
         and not isinstance(percent, bool)
         and math.isfinite(percent)
+        and 0 <= percent <= 100
     ):
         percent = None
 

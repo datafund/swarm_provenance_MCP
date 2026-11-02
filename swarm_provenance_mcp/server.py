@@ -3148,9 +3148,13 @@ def _lineage_banner(result: Any, queried_hash: str, max_depth: int) -> str:
 
     summary = []
     if failed:
-        summary.append(f"{len(failed)} node(s) could not be read")
+        n = len(failed)
+        summary.append(f"{n} {'node' if n == 1 else 'nodes'} could not be read")
     if unexpanded:
-        summary.append(f"{len(unexpanded)} node(s) not expanded (max_depth reached)")
+        n = len(unexpanded)
+        summary.append(
+            f"{n} {'node' if n == 1 else 'nodes'} not expanded (max_depth reached)"
+        )
     if scan_note:
         summary.append("links were read from a limited block range")
     lines = [

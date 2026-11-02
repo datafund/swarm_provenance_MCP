@@ -132,6 +132,19 @@ class TestToolOutput:
         assert _retry(text) == f"Retry: call get_provenance_chain with swarm_hash {B}"
         assert "Not expanded: max_depth reached" in text
 
+    @pytest.mark.parametrize("count,word", [(1, "node"), (2, "nodes")])
+    async def test_banner_counts_use_singular_and_plural(self, count, word):
+        hashes = [f"{i + 1:064x}" for i in range(count)]
+        failed = {h: "record read failed (ValueError)" for h in hashes}
+        records = [_record(A, parents=[])] + [
+            _record(h, parents=[A], expanded=False) for h in hashes
+        ]
+        text = await _run(_chain(records, failed=failed))
+        first = text.splitlines()[0]
+        assert f"{count} {word} could not be read" in first
+        assert f"{count} {word} not expanded (max_depth reached)" in first
+        assert "(s)" not in first
+
     async def test_scan_note_is_in_banner(self):
         note = "The event index could not be built (ValueError)."
         text = await _run(_chain([_record(A, parents=[])], scan_note=note))

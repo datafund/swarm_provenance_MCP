@@ -729,3 +729,56 @@ class TestRefusedSettingsMessage:
         assert "SWARM_GATEWAY_URL" in message
         assert "secret" not in message
         assert info.value.__cause__ is None and info.value.__suppress_context__
+
+
+def _all_tool_properties(monkeypatch):
+    """(tool, property path, schema) for every property of every tool,
+    including the chain tools."""
+    import asyncio
+
+    from mcp.types import ListToolsRequest
+
+    from swarm_provenance_mcp import server as srv
+
+    monkeypatch.setattr(srv, "CHAIN_AVAILABLE", True)
+    monkeypatch.setattr(srv.settings, "chain_enabled", True)
+    handler = srv.create_server().request_handlers[ListToolsRequest]
+    tools = asyncio.run(handler(ListToolsRequest(method="tools/list"))).root.tools
+
+    def walk(props, tool, prefix):
+        for name, schema in (props or {}).items():
+            yield tool, prefix + name, schema
+            if isinstance(schema.get("items"), dict):
+                yield from walk(schema["items"].get("properties"), tool, f"{prefix}{name}[].")
+            yield from walk(schema.get("properties"), tool, f"{prefix}{name}.")
+
+    for tool in tools:
+        yield from walk(tool.inputSchema.get("properties"), tool.name, "")
+
+
+class TestSchemaExamplesMatchPatterns:
+    def test_every_example_matches_its_pattern(self, monkeypatch):
+        import re
+
+        checked = []
+        for tool, path, schema in _all_tool_properties(monkeypatch):
+            match = re.search(r"Example: (\S+?)\.?(?:\s|$)", schema.get("description", ""))
+            if not match or "pattern" not in schema:
+                continue
+            example = match.group(1)
+            assert re.fullmatch(schema["pattern"], example), (tool, path, example)
+            checked.append((tool, path))
+        assert ("download_data", "reference") in checked
+        assert ("get_stamp_status", "stamp_id") in checked
+        assert len(checked) >= 4
+
+    def test_readme_hex_examples_have_valid_lengths(self):
+        import re
+
+        text = (Path(REPO_ROOT) / "README.md").read_text()
+        keys = "stamp_id|reference|swarm_hash|original_hash|new_hash|storage_ref|data_hash"
+        found = re.findall(rf'"({keys})": "([0-9a-fA-F]+)"', text)
+        assert found
+        for key, value in found:
+            allowed = (64, 128) if key == "reference" else (64,)
+            assert len(value) in allowed, (key, value)

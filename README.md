@@ -456,7 +456,7 @@ Record a data transformation on-chain, linking the original data to its transfor
   "name": "record_transform",
   "arguments": {
     "original_hash": "a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789a",
-    "new_hash": "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789ab",
+    "new_hash": "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789abc",
     "description": "Filtered for region EU",
     "restrict_original": false
   }
@@ -479,9 +479,9 @@ Record an N-to-1 merge transformation on-chain, combining multiple source hashes
   "arguments": {
     "source_hashes": [
       "a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789a",
-      "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789ab"
+      "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789abc"
     ],
-    "new_hash": "c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789abc",
+    "new_hash": "c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789abcde",
     "description": "Merged EU and US datasets",
     "new_data_type": "merged-dataset"
   }
@@ -519,7 +519,7 @@ Attach a Swarm storage reference to an existing on-chain record. Set-once: canno
   "name": "set_storage_ref",
   "arguments": {
     "data_hash": "a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789a",
-    "storage_ref": "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789ab"
+    "storage_ref": "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789abc"
   }
 }
 ```
@@ -535,7 +535,7 @@ Reverse lookup: find the on-chain provenance record by its Swarm storage referen
 {
   "name": "lookup_by_storage_ref",
   "arguments": {
-    "storage_ref": "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789ab"
+    "storage_ref": "b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789abc"
   }
 }
 ```

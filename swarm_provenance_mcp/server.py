@@ -1700,7 +1700,7 @@ def create_server() -> Server:
                     "properties": {
                         "reference": {
                             "type": "string",
-                            "description": "Swarm reference (without 0x prefix): 64 hexadecimal characters, or 128 for an encrypted reference. Example: b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789ab",
+                            "description": "Swarm reference (without 0x prefix): 64 hexadecimal characters, or 128 for an encrypted reference. Example: b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789abc",
                             "pattern": SWARM_REFERENCE_SCHEMA_PATTERN,
                         }
                     },

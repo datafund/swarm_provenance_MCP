@@ -35,6 +35,7 @@ from .config import WALLET_KEY_HINT, settings
 from .gateway_client import PaymentRequiredError, SwarmGatewayClient
 from .redact import mask_literal_urls, redact_urls, rpc_host
 from .untrusted import (
+    MAX_EXCEPTION_CHARS,
     QUOTED_NOTE,
     defang_hint_lines,
     fence,
@@ -620,6 +621,19 @@ def _format_error(
     return lines
 
 
+def _exc_text(e: Any) -> str:
+    """Exception text for a tool result: RPC URLs masked, one line, capped.
+
+    Chain and RPC errors can carry a long body from the endpoint. URLs are
+    masked before the cap, so a cut cannot leave part of a key that the
+    later redaction of the whole result no longer recognizes.
+    """
+    urls = _rpc_urls()
+    hosts = {rpc_host(u) for u in urls} - {""}
+    text = redact_urls(mask_literal_urls(e, urls), hosts) if urls else str(e)
+    return one_line(text, MAX_EXCEPTION_CHARS)
+
+
 def _may_be_pending(e: Exception) -> bool:
     """Whether a failed write may still land: it was broadcast and then the
     endpoint dropped out or the receipt wait timed out."""
@@ -641,7 +655,7 @@ def _pending_tx_result(e: Exception, check_tool: str) -> CallToolResult:
     """Report a broadcast write with an unknown outcome as possibly pending."""
     msg = (
         "Transaction outcome unknown: it was sent, but the RPC failed or the "
-        f"receipt did not arrive in time ({e}).\n"
+        f"receipt did not arrive in time ({_exc_text(e)}).\n"
     )
     if getattr(e, "tx_hash", None):
         msg += f"   Tx Hash: {e.tx_hash}\n"
@@ -687,7 +701,7 @@ def _restrict_failure_text(e: Exception, transform_tx: str, original: str) -> st
             + "\nretryable: false"
         )
     return (
-        f"\n\n   ⚠️  Transform succeeded but failed to restrict original: {e}\n"
+        f"\n\n   ⚠️  Transform succeeded but failed to restrict original: {_exc_text(e)}\n"
         + recorded
         + "failed.\n"
         + restrict_call
@@ -1894,7 +1908,7 @@ def create_server() -> Server:
                     TextContent(
                         type="text",
                         text=_format_error(
-                            f"Error executing {name}: {str(e)}",
+                            f"Error executing {name}: {_exc_text(e)}",
                             retryable=retryable,
                             next_tool=_recovery_hint(e),
                         ),
@@ -3008,7 +3022,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     reader = await asyncio.to_thread(_chain_reader)
                     response_text += _chain_id_lines(reader._provider)
                 except Exception as chain_err:
-                    response_text += f"\n   Chain error: {chain_err}"
+                    response_text += f"\n   Chain error: {_exc_text(chain_err)}"
                     configured = _effective_chain_id(settings.chain_name)
                     if configured is not None:
                         response_text += (
@@ -3275,7 +3289,7 @@ async def handle_chain_balance(arguments: Dict[str, Any]) -> CallToolResult:
                 TextContent(
                     type="text",
                     text=_format_error(
-                        f"Failed to get chain balance: {str(e)}",
+                        f"Failed to get chain balance: {_exc_text(e)}",
                         retryable=True,
                         next_tool="chain_health",
                     ),
@@ -3351,7 +3365,7 @@ async def handle_chain_health(arguments: Dict[str, Any]) -> CallToolResult:
 
         error_msg = f"⛓️  Chain RPC Health\n\n"
         error_msg += f"   Connected: false\n"
-        error_msg += f"   Error: {str(e)}"
+        error_msg += f"   Error: {_exc_text(e)}"
 
         return CallToolResult(
             content=[
@@ -3481,7 +3495,7 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
                 TextContent(
                     type="text",
                     text=_format_error(
-                        f"Validation error: {str(e)}",
+                        f"Validation error: {_exc_text(e)}",
                         retryable=False,
                     ),
                 )
@@ -3504,7 +3518,7 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
                 content=[
                     TextContent(
                         type="text",
-                        text=_format_error(f"Chain error: {str(e)}", retryable=False),
+                        text=_format_error(f"Chain error: {_exc_text(e)}", retryable=False),
                     )
                 ],
                 isError=True,
@@ -3542,7 +3556,7 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
             if _is_insufficient_funds_error(e):
                 msg = _format_insufficient_funds_error("anchor_hash", chain_client)
             else:
-                msg = f"Transaction failed: {str(e)}"
+                msg = f"Transaction failed: {_exc_text(e)}"
                 if e.tx_hash:
                     msg += f"\n   Tx Hash: {e.tx_hash}"
             return CallToolResult(
@@ -3563,7 +3577,7 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
                     TextContent(
                         type="text",
                         text=_format_error(
-                            f"Chain connection error: {str(e)}",
+                            f"Chain connection error: {_exc_text(e)}",
                             retryable=True,
                             next_tool="chain_health",
                         ),
@@ -3578,7 +3592,7 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
                     TextContent(
                         type="text",
                         text=_format_error(
-                            f"Chain validation error: {str(e)}",
+                            f"Chain validation error: {_exc_text(e)}",
                             retryable=False,
                         ),
                     )
@@ -3606,7 +3620,7 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
             content=[
                 TextContent(
                     type="text",
-                    text=_format_error(f"Chain error: {str(e)}", retryable=False),
+                    text=_format_error(f"Chain error: {_exc_text(e)}", retryable=False),
                 )
             ],
             isError=True,
@@ -3685,7 +3699,7 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
             content=[
                 TextContent(
                     type="text",
-                    text=_format_error(f"Validation error: {str(e)}", retryable=False),
+                    text=_format_error(f"Validation error: {_exc_text(e)}", retryable=False),
                 )
             ],
             isError=True,
@@ -3703,7 +3717,7 @@ async def handle_verify_hash(arguments: Dict[str, Any]) -> CallToolResult:
                 TextContent(
                     type="text",
                     text=_format_error(
-                        f"Chain error: {str(e)}",
+                        f"Chain error: {_exc_text(e)}",
                         retryable=is_conn_error,
                         next_tool="chain_health" if is_conn_error else None,
                     ),
@@ -3791,7 +3805,7 @@ async def handle_get_provenance(arguments: Dict[str, Any]) -> CallToolResult:
             content=[
                 TextContent(
                     type="text",
-                    text=_format_error(f"Validation error: {str(e)}", retryable=False),
+                    text=_format_error(f"Validation error: {_exc_text(e)}", retryable=False),
                 )
             ],
             isError=True,
@@ -3825,7 +3839,7 @@ async def handle_get_provenance(arguments: Dict[str, Any]) -> CallToolResult:
                 TextContent(
                     type="text",
                     text=_format_error(
-                        f"Chain error: {str(e)}",
+                        f"Chain error: {_exc_text(e)}",
                         retryable=is_conn_error,
                         next_tool="chain_health" if is_conn_error else None,
                     ),
@@ -3971,7 +3985,7 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
                 TextContent(
                     type="text",
                     text=_format_error(
-                        f"Validation error: {str(e)}",
+                        f"Validation error: {_exc_text(e)}",
                         retryable=False,
                     ),
                 )
@@ -3992,7 +4006,7 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
                 content=[
                     TextContent(
                         type="text",
-                        text=_format_error(f"Chain error: {str(e)}", retryable=False),
+                        text=_format_error(f"Chain error: {_exc_text(e)}", retryable=False),
                     )
                 ],
                 isError=True,
@@ -4033,7 +4047,7 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
             if _is_insufficient_funds_error(e):
                 msg = _format_insufficient_funds_error("record_transform", chain_client)
             else:
-                msg = f"Transaction failed: {str(e)}"
+                msg = f"Transaction failed: {_exc_text(e)}"
                 if e.tx_hash:
                     msg += f"\n   Tx Hash: {e.tx_hash}"
             return CallToolResult(
@@ -4054,7 +4068,7 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
                     TextContent(
                         type="text",
                         text=_format_error(
-                            f"Chain connection error: {str(e)}",
+                            f"Chain connection error: {_exc_text(e)}",
                             retryable=True,
                             next_tool="chain_health",
                         ),
@@ -4069,7 +4083,7 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
                     TextContent(
                         type="text",
                         text=_format_error(
-                            f"Chain validation error: {str(e)}",
+                            f"Chain validation error: {_exc_text(e)}",
                             retryable=False,
                         ),
                     )
@@ -4097,7 +4111,7 @@ async def handle_record_transform(arguments: Dict[str, Any]) -> CallToolResult:
             content=[
                 TextContent(
                     type="text",
-                    text=_format_error(f"Chain error: {str(e)}", retryable=False),
+                    text=_format_error(f"Chain error: {_exc_text(e)}", retryable=False),
                 )
             ],
             isError=True,
@@ -4226,7 +4240,7 @@ async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolRe
                 TextContent(
                     type="text",
                     text=_format_error(
-                        f"Validation error: {str(e)}",
+                        f"Validation error: {_exc_text(e)}",
                         retryable=False,
                     ),
                 )
@@ -4246,7 +4260,7 @@ async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolRe
                 content=[
                     TextContent(
                         type="text",
-                        text=_format_error(f"Chain error: {str(e)}", retryable=False),
+                        text=_format_error(f"Chain error: {_exc_text(e)}", retryable=False),
                     )
                 ],
                 isError=True,
@@ -4271,7 +4285,7 @@ async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolRe
                     "record_merge_transform", chain_client
                 )
             else:
-                msg = f"Transaction failed: {str(e)}"
+                msg = f"Transaction failed: {_exc_text(e)}"
                 if e.tx_hash:
                     msg += f"\n   Tx Hash: {e.tx_hash}"
             return CallToolResult(
@@ -4292,7 +4306,7 @@ async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolRe
                     TextContent(
                         type="text",
                         text=_format_error(
-                            f"Chain connection error: {str(e)}",
+                            f"Chain connection error: {_exc_text(e)}",
                             retryable=True,
                             next_tool="chain_health",
                         ),
@@ -4307,7 +4321,7 @@ async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolRe
                     TextContent(
                         type="text",
                         text=_format_error(
-                            f"Chain validation error: {str(e)}",
+                            f"Chain validation error: {_exc_text(e)}",
                             retryable=False,
                         ),
                     )
@@ -4335,7 +4349,7 @@ async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolRe
             content=[
                 TextContent(
                     type="text",
-                    text=_format_error(f"Chain error: {str(e)}", retryable=False),
+                    text=_format_error(f"Chain error: {_exc_text(e)}", retryable=False),
                 )
             ],
             isError=True,
@@ -4444,7 +4458,7 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
             content=[
                 TextContent(
                     type="text",
-                    text=_format_error(f"Validation error: {str(e)}", retryable=False),
+                    text=_format_error(f"Validation error: {_exc_text(e)}", retryable=False),
                 )
             ],
             isError=True,
@@ -4462,7 +4476,7 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
                 TextContent(
                     type="text",
                     text=_format_error(
-                        f"Chain error: {str(e)}",
+                        f"Chain error: {_exc_text(e)}",
                         retryable=is_conn_error,
                         next_tool="chain_health" if is_conn_error else None,
                     ),
@@ -4563,7 +4577,7 @@ async def handle_set_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
             content=[
                 TextContent(
                     type="text",
-                    text=_format_error(f"Validation error: {str(e)}", retryable=False),
+                    text=_format_error(f"Validation error: {_exc_text(e)}", retryable=False),
                 )
             ],
             isError=True,
@@ -4581,7 +4595,7 @@ async def handle_set_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
                 content=[
                     TextContent(
                         type="text",
-                        text=_format_error(f"Chain error: {str(e)}", retryable=False),
+                        text=_format_error(f"Chain error: {_exc_text(e)}", retryable=False),
                     )
                 ],
                 isError=True,
@@ -4616,7 +4630,7 @@ async def handle_set_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
             if _is_insufficient_funds_error(e):
                 msg = _format_insufficient_funds_error("set_storage_ref", chain_client)
             else:
-                msg = f"Transaction failed: {str(e)}"
+                msg = f"Transaction failed: {_exc_text(e)}"
                 if e.tx_hash:
                     msg += f"\n   Tx Hash: {e.tx_hash}"
             return CallToolResult(
@@ -4637,7 +4651,7 @@ async def handle_set_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
                     TextContent(
                         type="text",
                         text=_format_error(
-                            f"Chain connection error: {str(e)}",
+                            f"Chain connection error: {_exc_text(e)}",
                             retryable=True,
                             next_tool="chain_health",
                         ),
@@ -4664,7 +4678,7 @@ async def handle_set_storage_ref(arguments: Dict[str, Any]) -> CallToolResult:
             content=[
                 TextContent(
                     type="text",
-                    text=_format_error(f"Chain error: {str(e)}", retryable=False),
+                    text=_format_error(f"Chain error: {_exc_text(e)}", retryable=False),
                 )
             ],
             isError=True,
@@ -4745,7 +4759,7 @@ async def handle_lookup_by_storage_ref(arguments: Dict[str, Any]) -> CallToolRes
             content=[
                 TextContent(
                     type="text",
-                    text=_format_error(f"Validation error: {str(e)}", retryable=False),
+                    text=_format_error(f"Validation error: {_exc_text(e)}", retryable=False),
                 )
             ],
             isError=True,
@@ -4763,7 +4777,7 @@ async def handle_lookup_by_storage_ref(arguments: Dict[str, Any]) -> CallToolRes
                 TextContent(
                     type="text",
                     text=_format_error(
-                        f"Chain error: {str(e)}",
+                        f"Chain error: {_exc_text(e)}",
                         retryable=is_conn_error,
                         next_tool="chain_health" if is_conn_error else None,
                     ),

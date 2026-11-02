@@ -45,6 +45,20 @@ logger = logging.getLogger(__name__)
 # Held only briefly, unlike SWITCH_LOCK, which spans endpoint probes.
 _BINDING_LOCK = threading.Lock()
 
+# One lock per (chain id, wallet address). Held from the nonce read until
+# send_raw_transaction returns, so parallel writes from one wallet (tool
+# calls run in asyncio.to_thread workers) never read the same nonce. Shared
+# by every ChainClient in the process that uses the wallet.
+_NONCE_LOCKS: dict = {}
+_NONCE_LOCKS_GUARD = threading.Lock()
+
+
+def _nonce_lock(chain_id, address: str) -> threading.Lock:
+    """The lock that serializes nonce, sign and send for one wallet."""
+    key = (chain_id, str(address).lower())
+    with _NONCE_LOCKS_GUARD:
+        return _NONCE_LOCKS.setdefault(key, threading.Lock())
+
 
 def _rpc_host(url: str) -> str:
     """Hostname of an RPC URL for logs: paths and queries can carry API keys."""
@@ -471,41 +485,50 @@ class ChainClient:
         self._provider.check_chain_id(web3)
 
         try:
-            # Fill in nonce
-            tx["nonce"] = web3.eth.get_transaction_count(self._wallet.address)
-            tx["chainId"] = self._provider.chain_id
+            # Nonce through broadcast under the wallet lock. The "pending"
+            # tag counts transactions still in the mempool. The receipt
+            # wait stays outside, so other writes are not held for it.
+            with _nonce_lock(self._provider.chain_id, self._wallet.address):
+                tx["nonce"] = web3.eth.get_transaction_count(
+                    self._wallet.address, "pending"
+                )
+                tx["chainId"] = self._provider.chain_id
 
-            # Set gas limit: explicit value or estimate with multiplier
-            if self._gas_limit is not None:
-                tx["gas"] = self._gas_limit
-                logger.debug("Using explicit gas limit: %d", self._gas_limit)
-            else:
-                estimated_gas = web3.eth.estimate_gas(tx)
-                tx["gas"] = int(estimated_gas * self._gas_limit_multiplier)
-                logger.debug("Estimated gas: %d, limit: %d", estimated_gas, tx["gas"])
+                # Set gas limit: explicit value or estimate with multiplier
+                if self._gas_limit is not None:
+                    tx["gas"] = self._gas_limit
+                    logger.debug("Using explicit gas limit: %d", self._gas_limit)
+                else:
+                    estimated_gas = web3.eth.estimate_gas(tx)
+                    tx["gas"] = int(estimated_gas * self._gas_limit_multiplier)
+                    logger.debug(
+                        "Estimated gas: %d, limit: %d", estimated_gas, tx["gas"]
+                    )
 
-            # Explicit fee fields within the cap (replacing whatever the RPC
-            # suggested when the tx was built), then reserve the worst case.
-            fee_fields, max_fee = self.spend.fee_fields(web3)
-            for key in ("gasPrice", "maxFeePerGas", "maxPriorityFeePerGas"):
-                tx.pop(key, None)
-            tx.update(fee_fields)
-            reserved = self.spend.reserve(self.spend.worst_case(tx["gas"], max_fee))
+                # Explicit fee fields within the cap (replacing whatever the RPC
+                # suggested when the tx was built), then reserve the worst case.
+                fee_fields, max_fee = self.spend.fee_fields(web3)
+                for key in ("gasPrice", "maxFeePerGas", "maxPriorityFeePerGas"):
+                    tx.pop(key, None)
+                tx.update(fee_fields)
+                reserved = self.spend.reserve(
+                    self.spend.worst_case(tx["gas"], max_fee)
+                )
 
-            # Sign and send
-            try:
-                raw_tx = self._wallet.sign_transaction(tx)
-            except Exception:
-                self.spend.release(reserved)
-                raise
-            broadcast = True
-            try:
-                tx_hash = web3.eth.send_raw_transaction(raw_tx)
-            except Exception as send_err:
-                if _rejected_by_node(send_err):
-                    # The node refused it: nothing reached the network.
+                # Sign and send
+                try:
+                    raw_tx = self._wallet.sign_transaction(tx)
+                except Exception:
                     self.spend.release(reserved)
-                raise
+                    raise
+                broadcast = True
+                try:
+                    tx_hash = web3.eth.send_raw_transaction(raw_tx)
+                except Exception as send_err:
+                    if _rejected_by_node(send_err):
+                        # The node refused it: nothing reached the network.
+                        self.spend.release(reserved)
+                    raise
 
             logger.debug("Transaction sent: %s", tx_hash.hex())
 

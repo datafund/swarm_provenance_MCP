@@ -140,6 +140,16 @@ class TestToolOutput:
         assert note in head
         assert _next(text) == ["_next: get_provenance_chain"]
         assert _retry(text) == f"Retry: call get_provenance_chain with swarm_hash {A}"
+        assert (
+            "A retry may return the same result while the event index cannot "
+            "be built; check chain_health." in head
+        )
+
+    async def test_no_index_warning_without_scan_note(self):
+        text = await _run(
+            _chain([_record(A, parents=[])], failed={A: "parent read failed (X)"})
+        )
+        assert "event index" not in text
 
     async def test_banner_survives_output_cap(self):
         from swarm_provenance_mcp.chain.models import ChainTransformation

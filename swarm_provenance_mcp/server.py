@@ -3183,6 +3183,11 @@ def _lineage_banner(result: Any, queried_hash: str, max_depth: int) -> str:
     else:
         retry_hash = next((h for h in unexpanded if _is_chain_hash(h)), queried_hash)
         lines.append(retry.format(retry_hash))
+    if scan_note:
+        lines.append(
+            "   A retry may return the same result while the event index cannot "
+            "be built; check chain_health."
+        )
     return "\n".join(lines)
 
 

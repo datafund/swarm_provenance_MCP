@@ -34,6 +34,8 @@ MAX_FENCED_BYTES = 16 * 1024
 MAX_QUOTED_CHARS = 200
 # Gateway error detail appended to an HTTP error.
 MAX_ERROR_DETAIL_CHARS = 200
+# Chain, RPC or other exception text embedded in a tool error.
+MAX_EXCEPTION_CHARS = 300
 
 FENCE_BEGIN = "<<<UNTRUSTED_DATA_BEGIN"
 FENCE_END = "<<<UNTRUSTED_DATA_END"

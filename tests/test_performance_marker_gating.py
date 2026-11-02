@@ -13,9 +13,10 @@ from tests import conftest
 
 TESTS_DIR = Path(__file__).parent
 PERF_MODULE = TESTS_DIR / "test_performance_regression.py"
-REGRESSION_WORKFLOW = (
-    TESTS_DIR.parent / ".github" / "workflows" / "regression_tests.yml"
-)
+REPO_ROOT = TESTS_DIR.parent
+REGRESSION_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "regression_tests.yml"
+REGRESSION_RUNNER = REPO_ROOT / "run_regression_tests.py"
+TESTING_DOC = REPO_ROOT / "TESTING.md"
 CLOCK_CALLS = {
     "time",
     "time_ns",
@@ -170,6 +171,42 @@ def test_performance_job_passes_run_performance():
     ]
     assert len(runs) == 2, runs
     for line in runs:
+        assert "--run-performance" in line, line
+
+
+def test_regression_runner_passes_run_performance():
+    """Both run_regression_tests.py commands for the module pass the flag.
+
+    Without it, every timing test is skipped and the runner reports success.
+    """
+    tree = ast.parse(REGRESSION_RUNNER.read_text())
+    commands = [
+        [e.value for e in node.elts if isinstance(e, ast.Constant)]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.List)
+        and any(
+            isinstance(e, ast.Constant)
+            and e.value == "tests/test_performance_regression.py"
+            for e in node.elts
+        )
+    ]
+    assert len(commands) == 2, commands
+    for command in commands:
+        assert "--run-performance" in command, command
+
+
+def test_testing_doc_commands_pass_run_performance():
+    commands = [
+        line.strip()
+        for line in TESTING_DOC.read_text().splitlines()
+        if line.strip().startswith("pytest")
+        and (
+            "test_performance_regression.py" in line
+            or "-m performance" in line
+        )
+    ]
+    assert len(commands) >= 2, commands
+    for line in commands:
         assert "--run-performance" in line, line
 
 

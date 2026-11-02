@@ -610,3 +610,70 @@ class TestOwnershipGuidanceMatchesReadiness:
         for phrase in _WRONG_OWNERSHIP_ADVICE:
             assert phrase not in text
         assert "run your own Bee node or gateway" in text
+
+
+def _import_server_with(tmp_path, **env_vars):
+    import os
+    import subprocess
+    import sys
+
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("SWARM_PROVENANCE_ENV_FILE", "XDG_CONFIG_HOME", "PAYMENT_MODE")
+    }
+    env.update(
+        HOME=str(tmp_path),
+        PYTHONPATH=os.pathsep.join(p for p in (REPO_ROOT, env.get("PYTHONPATH")) if p),
+    )
+    env.update(env_vars)
+    return subprocess.run(
+        [sys.executable, "-c", "import swarm_provenance_mcp.server"],
+        env=env,
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+class TestRefusedSettingsMessage:
+    """A refused setting must end start-up with a short message that names the
+    variable and the rule, not a pydantic traceback that echoes the value."""
+
+    def test_gateway_url_with_credentials_is_not_echoed(self, tmp_path):
+        proc = _import_server_with(
+            tmp_path, SWARM_GATEWAY_URL="ftp://user:secret@host.example"
+        )
+        assert proc.returncode != 0
+        assert "SWARM_GATEWAY_URL" in proc.stderr
+        assert "http:// or https://" in proc.stderr
+        assert "secret" not in proc.stderr
+        assert "user:" not in proc.stderr
+        assert "Traceback" not in proc.stderr
+        assert "input_value" not in proc.stderr
+
+    def test_payment_mode_message(self, tmp_path):
+        proc = _import_server_with(
+            tmp_path,
+            SWARM_GATEWAY_URL="http://127.0.0.1:9",
+            PAYMENT_MODE="paid-secret-token",
+        )
+        assert proc.returncode != 0
+        assert "PAYMENT_MODE" in proc.stderr
+        assert "paid-secret-token" not in proc.stderr
+        assert "Traceback" not in proc.stderr
+
+    def test_load_settings_raises_a_clean_error(self, monkeypatch, tmp_path):
+        from swarm_provenance_mcp import config
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv(config.ENV_FILE_VAR, raising=False)
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setenv("SWARM_GATEWAY_URL", "ftp://user:secret@host.example")
+        with pytest.raises(config.ConfigurationError) as info:
+            config.load_settings()
+        message = str(info.value)
+        assert "SWARM_GATEWAY_URL" in message
+        assert "secret" not in message
+        assert info.value.__cause__ is None and info.value.__suppress_context__

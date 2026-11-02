@@ -182,7 +182,7 @@ Read from the process environment, then an env file. The env file is never taken
 - `MAX_STAMP_DURATION_HOURS`: Maximum `duration_hours` for `purchase_stamp` / `extend_stamp` (default: `8760`)
 
 ### Settings Management
-The `config.py` module uses Pydantic Settings for type-safe configuration with automatic environment variable loading and validation.
+The `config.py` module uses Pydantic Settings for type-safe configuration with automatic environment variable loading and validation. `load_settings()` turns a refused setting into `ConfigurationError`, whose message names each variable and its rule but never the value (a URL can carry credentials), and start-up ends with that one line instead of a pydantic traceback.
 
 ## Development Patterns
 

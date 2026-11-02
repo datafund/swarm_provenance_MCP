@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -327,15 +327,44 @@ def _warn_if_cwd_env_ignored(loaded: Optional[Path]) -> None:
     )
 
 
+class ConfigurationError(ValueError):
+    """A setting was refused. The message names the variables and the rules,
+    never the values: a URL can carry credentials."""
+
+
+def _refusal_message(error: ValidationError) -> str:
+    """One line per refused setting: variable name and rule, without input."""
+    lines = []
+    for item in error.errors(include_input=False, include_url=False):
+        loc = item.get("loc") or ("?",)
+        name = str(loc[0]).upper()
+        rule = str(item.get("msg", "invalid value"))
+        rule = rule.removeprefix("Value error, ")
+        lines.append(rule if rule.startswith(name) else f"{name}: {rule}")
+    return "Invalid configuration. " + "; ".join(lines)
+
+
 def load_settings() -> Settings:
-    """Build Settings from the process environment and the resolved env file."""
+    """Build Settings from the process environment and the resolved env file.
+
+    Raises:
+        ConfigurationError: A setting was refused (without pydantic's chained
+            error, which echoes the input value).
+    """
     env_file = resolve_env_file()
     _warn_if_cwd_env_ignored(env_file)
-    return Settings(_env_file=env_file)
+    try:
+        return Settings(_env_file=env_file)
+    except ValidationError as e:
+        raise ConfigurationError(_refusal_message(e)) from None
 
 
-# Global settings instance
-settings = load_settings()
+# Global settings instance. A refused setting ends start-up with a short
+# message instead of a traceback.
+try:
+    settings = load_settings()
+except ConfigurationError as e:
+    raise SystemExit(f"swarm-provenance-mcp: {e}") from None
 
 # Error text for write tools called without a wallet key.
 WALLET_KEY_HINT = wallet_key_hint()

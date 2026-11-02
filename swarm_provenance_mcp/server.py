@@ -1471,7 +1471,7 @@ def create_server() -> Server:
                         },
                         "label": {
                             "type": "string",
-                            "description": "Optional human-readable label for easier stamp identification. If omitted, a unique label (mcp-<hex>) is generated so the batch can be found in list_stamps.",
+                            "description": "Optional human-readable label for easier stamp identification. If omitted, a unique label (mcp-<hex>) is generated so the batch can be found in list_stamps. The result shows it as requested, not as stored: list_stamps shows the label the gateway stored.",
                             "maxLength": 100,
                         },
                     },
@@ -2179,8 +2179,16 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += f"   Depth: {depth}\n"
         else:
             response_text += f"   Size: {size}\n"
-        if label:
-            response_text += f"   Label: {_label(label)}\n"
+        # The gateway's answer does not carry the label, and older gateways
+        # dropped it without saying so: show the requested one as such.
+        stored_label = result.get("label")
+        if isinstance(stored_label, str) and stored_label:
+            response_text += f"   Label: {_label(stored_label)}\n"
+        elif label:
+            response_text += (
+                f"   Label requested: {_label(label)} (not confirmed by the "
+                "gateway; list_stamps shows the label it stored)\n"
+            )
         response_text += f"\n✅ Stamp ID: `{batch_id}`\n"
 
         propagation_status = result.get("propagationStatus")

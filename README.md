@@ -211,7 +211,7 @@ Purchase a new postage stamp.
 - `duration_hours` (int): Duration in hours, minimum 24 (optional, uses default if not provided)
 - `size` (string): Stamp size — `"small"`, `"medium"`, or `"large"` (optional, uses default if not provided)
 - `depth` (int): Explicit depth override, bypasses size (optional, advanced use only)
-- `label` (string): Optional label for the stamp
+- `label` (string): Optional label for the stamp. The result shows it as "Label requested", because the gateway's answer does not confirm it; `list_stamps` shows the label the gateway stored
 
 **Example:**
 ```json

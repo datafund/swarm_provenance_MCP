@@ -32,6 +32,7 @@ from mcp.types import (
 )
 from requests.exceptions import RequestException
 
+from . import bmt
 from .config import WALLET_KEY_HINT, is_plain_http_remote, settings
 from .gateway_client import PaymentRequiredError, SwarmGatewayClient
 from .redact import mask_literal_urls, redact_urls, rpc_host, url_without_userinfo
@@ -3173,6 +3174,48 @@ def _describe_download(reference: str, data: bytes) -> Tuple[str, Optional[str]]
     return summary, fence(data, f"Swarm reference {reference}")
 
 
+_HEX64 = re.compile(r"[0-9a-fA-F]{64}")
+_HEX128 = re.compile(r"[0-9a-fA-F]{128}")
+_NOT_CHECKED = "Reference check: not checked. "
+
+
+def _reference_check(reference: Any, data: Any) -> str:
+    """One line saying whether ``data`` was checked against ``reference``.
+
+    Both values are untrusted. Content of at most one chunk is verified when
+    its single-chunk BMT address equals the reference. Every other case is
+    "not checked" with the reason, never a mismatch: a reference from a
+    ``/bzz`` upload names a manifest, whose address differs from the content's.
+    """
+    if isinstance(reference, str) and _HEX128.fullmatch(reference):
+        return (
+            _NOT_CHECKED + "The reference is encrypted (128 hexadecimal "
+            "characters), and this server cannot check encrypted content."
+        )
+    if not isinstance(reference, str) or not _HEX64.fullmatch(reference):
+        return _NOT_CHECKED + "The reference is not 64 hexadecimal characters."
+    if not isinstance(data, bytes):
+        return _NOT_CHECKED + "The gateway did not return raw bytes."
+    if len(data) > bmt.CHUNK_SIZE:
+        return (
+            _NOT_CHECKED + f"The content is larger than one chunk "
+            f"({bmt.CHUNK_SIZE:,} bytes), and this server checks only "
+            "single-chunk content."
+        )
+    if bmt.chunk_address(data).hex() == reference.lower():
+        return (
+            "Reference check: verified. These bytes are the single Swarm chunk "
+            "that the reference names: their BMT chunk address was recomputed "
+            "and equals the reference."
+        )
+    return (
+        _NOT_CHECKED + "The reference probably names a manifest (from a "
+        "/bzz upload, the usual case for upload_data references), and this "
+        "server cannot check content against a manifest. Gateway support for "
+        "that is tracked in datafund/swarm_connect#499."
+    )
+
+
 async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle data download requests."""
     clean_reference = None
@@ -3186,6 +3229,7 @@ async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
 
         result_bytes = gateway_client.download_data(clean_reference)
         summary, fenced = _describe_download(clean_reference, result_bytes)
+        summary += "\n" + _reference_check(clean_reference, result_bytes)
         content = [
             TextContent(
                 type="text",

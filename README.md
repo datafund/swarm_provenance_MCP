@@ -22,7 +22,7 @@ This MCP server provides tools for AI agents to interact with Swarm postage stam
 
 This MCP server is specifically designed for provenance data use cases, leveraging Swarm's decentralized network to provide:
 
-- **Immutable Records**: Swarm addresses content by its hash, so the data stored under a reference cannot be changed. A download is checked against its reference only as the `download_data` reference check describes
+- **Immutable Records**: Swarm addresses content by its hash, so the data stored under a reference cannot be changed. `download_data` checks content against its reference only in the cases its [reference check](#download_data) lists
 - **Decentralized Storage**: No single point of failure or central authority
 - **Provenance Metadata**: Support for structured provenance records with creator, timestamp, and lineage information
 - **Reference Check on Download**: `download_data` recomputes the Swarm chunk address of content up to 4 KB and reports the content as verified only when that address equals the reference. References from `/bzz` uploads name a manifest and are reported as not checked; see [datafund/swarm_connect#499](https://github.com/datafund/swarm_connect/issues/499)

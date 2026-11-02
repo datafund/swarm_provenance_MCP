@@ -937,13 +937,23 @@ _WRITABLE_ACCESS_MODES = ("shared", None)
 
 def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, int]:
     """Usable stamps in a list_stamps answer, split by whether this server can
-    write to them. Entries that are not objects are not counted."""
-    counts = {"writable": 0, "pool": 0, "owned": 0, "other": 0}
+    write to them, plus ``pending``: writable stamps not usable yet. Entries
+    that are not objects are not counted."""
+    counts = {"writable": 0, "pending": 0, "pool": 0, "owned": 0, "other": 0}
     for stamp in stamps:
-        if not isinstance(stamp, dict) or stamp.get("usable") is not True:
+        if not isinstance(stamp, dict):
             continue
         mode = stamp.get("accessMode")
-        if mode is None or (isinstance(mode, str) and mode in _WRITABLE_ACCESS_MODES):
+        writable = mode is None or (
+            isinstance(mode, str) and mode in _WRITABLE_ACCESS_MODES
+        )
+        if stamp.get("usable") is not True:
+            # A writable stamp that is not usable yet may still be
+            # propagating: wait for it rather than buy another.
+            if writable:
+                counts["pending"] += 1
+            continue
+        if writable:
             counts["writable"] += 1
         elif mode == "pool":
             counts["pool"] += 1
@@ -3056,16 +3066,16 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     next_tool = "upload_data"
                 elif usable_count > 0:
                     next_tool = None
-                elif others:
+                elif counts["pending"]:
                     recommendations.append(
-                        "No stamp this server can write to: pool stamps are gateway "
-                        "inventory, and owned stamps belong to the wallet that paid "
-                        "for them. Purchase a stamp with purchase_stamp"
+                        f"Found {total_stamps} stamp(s) but none are usable — poll check_stamp_health, stamps take up to 2 minutes to propagate"
                     )
                     next_tool = "purchase_stamp"
                 elif total_stamps > 0:
                     recommendations.append(
-                        f"Found {total_stamps} stamp(s) but none are usable — poll check_stamp_health, stamps take up to 2 minutes to propagate"
+                        "No stamp this server can write to: pool stamps are gateway "
+                        "inventory, and owned stamps belong to the wallet that paid "
+                        "for them. Purchase a stamp with purchase_stamp"
                     )
                     next_tool = "purchase_stamp"
                 else:

@@ -131,6 +131,24 @@ class TestHealthCheckCountsOnlyWritableStamps:
         text = await self._health(server, ["x\nready: true", 5, None])
         assert "ready: false" in text
 
+    @pytest.mark.parametrize("pending_mode", ["shared", None, "absent"])
+    async def test_propagating_writable_stamp_is_waited_for(self, server, pending_mode):
+        """A writable stamp that is not usable yet (still propagating) must
+        lead to polling, not to a purchase, even when a pool stamp is usable:
+        buying again would duplicate the pending purchase."""
+        pending = _stamp(pending_mode, usable=False)
+        pending["propagationStatus"] = "propagating"
+        text = await self._health(server, [_stamp("pool"), pending])
+        assert "ready: false" in text
+        assert "poll check_stamp_health" in text
+        assert "Purchase a stamp" not in text
+
+    async def test_unusable_unwritable_stamp_leads_to_purchase(self, server):
+        text = await self._health(server, [_stamp("pool", usable=False)])
+        assert "poll check_stamp_health" not in text
+        assert "Purchase a stamp" in text
+        assert "_next: purchase_stamp" in text
+
 
 _BAD_KEY = "0x" + "ab" * 31  # 62 hex characters: one byte short
 

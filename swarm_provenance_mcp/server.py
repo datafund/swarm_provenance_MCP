@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import re
 import secrets
 import time
@@ -2249,6 +2250,56 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         )
 
 
+def _format_stamp_utilization(details: Dict[str, Any]) -> str:
+    """Stamp utilization as a percentage.
+
+    Bee's ``utilization`` is the number of filled slots in the fullest
+    bucket, not a percentage. Each bucket holds 2^(depth - bucketDepth) slots.
+    """
+
+    def _is_int(v: Any) -> bool:
+        return isinstance(v, int) and not isinstance(v, bool)
+
+    percent = details.get("utilizationPercent")
+    if not (
+        isinstance(percent, (int, float))
+        and not isinstance(percent, bool)
+        and math.isfinite(percent)
+        and 0 <= percent <= 100
+    ):
+        percent = None
+
+    raw = details.get("utilization")
+    count = None
+    if _is_int(raw):
+        count = raw
+    elif isinstance(raw, float) and math.isfinite(raw) and raw.is_integer():
+        count = int(raw)
+
+    depth = details.get("depth")
+    bucket_depth = details.get("bucketDepth")
+    slots = None
+    if _is_int(depth) and _is_int(bucket_depth) and 0 <= bucket_depth < depth <= 255:
+        slots = 2 ** (depth - bucket_depth)
+
+    if count is not None and slots is not None and 0 <= count <= slots:
+        # The gateway's utilizationPercent wins when it disagrees with the count.
+        if percent is None:
+            percent = count / slots * 100
+        return f"{percent:.1f}% ({count} of {slots} slots in the fullest bucket)"
+
+    detail = None
+    if raw is not None:
+        # Not validated against the bucket size, so cap it like any gateway value.
+        shown = _gw(count if count is not None else raw, 40)
+        detail = f"filled slots in the fullest bucket: {shown}"
+    if percent is not None:
+        return f"{percent:.1f}% ({detail})" if detail else f"{percent:.1f}%"
+    if detail:
+        return f"not available ({detail})"
+    return "N/A"
+
+
 async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle stamp status requests."""
     try:
@@ -2289,11 +2340,7 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += " ✅ (Ready for uploads)"
         response_text += "\n"
 
-        utilization = result.get("utilization", "N/A")
-        if utilization != "N/A" and isinstance(utilization, (int, float)):
-            response_text += f"Utilization: {utilization}%\n"
-        else:
-            response_text += f"Utilization: {utilization}\n"
+        response_text += f"Utilization: {_format_stamp_utilization(result)}\n"
 
         response_text += f"Immutable: {result.get('immutableFlag', 'N/A')}\n"
         response_text += f"Local: {result.get('local', 'N/A')}\n"

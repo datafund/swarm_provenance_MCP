@@ -307,6 +307,24 @@ class TestGatewayUrlValidation:
         with pytest.raises(ValidationError, match="SWARM_GATEWAY_URL"):
             Settings(swarm_gateway_url=url)
 
+    @pytest.mark.parametrize(
+        "url",
+        ["http://host:abc", "https://host:99999", "http://host:-1", "http://[::1"],
+    )
+    def test_invalid_port_or_host_is_refused(self, url):
+        from pydantic import ValidationError
+
+        from swarm_provenance_mcp.config import Settings
+
+        with pytest.raises(ValidationError, match="SWARM_GATEWAY_URL"):
+            Settings(swarm_gateway_url=url)
+
+    @pytest.mark.parametrize("url", ["http://127.0.0.1:9", "https://host:8443"])
+    def test_valid_port_is_accepted(self, url):
+        from swarm_provenance_mcp.config import Settings
+
+        assert Settings(swarm_gateway_url=url).swarm_gateway_url == url
+
     def test_plain_http_to_remote_host_warns(self, caplog):
         import logging
 

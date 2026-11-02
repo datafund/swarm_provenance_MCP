@@ -170,11 +170,13 @@ class Settings(BaseSettings):
         try:
             parts = urlsplit(value)
             host = parts.hostname
+            _ = parts.port  # ValueError for a port that is not 0-65535
         except ValueError:
             parts, host = None, None
         if parts is None or parts.scheme.lower() not in ("http", "https") or not host:
             raise ValueError(
-                "SWARM_GATEWAY_URL must be an http:// or https:// URL with a host"
+                "SWARM_GATEWAY_URL must be an http:// or https:// URL with a host "
+                "and, if given, a numeric port"
             )
         if is_plain_http_remote(value):
             logger.warning(

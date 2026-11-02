@@ -1542,7 +1542,16 @@ def create_server() -> Server:
                         },
                         "sign": {
                             "type": "string",
-                            "description": "Signing method for provenance. Use 'notary' to have the gateway cryptographically sign the data at upload time, creating a verifiable proof of upload. Check notary_info first to confirm signing is available. Omit it for an unsigned upload.",
+                            "description": (
+                                "Signing method for provenance. Use 'notary' to have the gateway sign the data at upload time, which creates a verifiable proof of upload. "
+                                "Call get_notary_info first to check that signing is available. "
+                                'With notary, data must be a JSON object with a top-level "data" field, for example {"data": {...}, "signatures": []}. '
+                                '"signatures" is optional and must be an array. The gateway adds its signature to it. '
+                                "Plain text or JSON without a \"data\" field fails with 400 INVALID_DOCUMENT_FORMAT. "
+                                "If the notary is off, the gateway returns 400 NOTARY_NOT_ENABLED or NOTARY_NOT_CONFIGURED. "
+                                "The gateway stores the signed document as application/json, so the stored size and content type differ from your input. "
+                                "Omit sign for an unsigned upload."
+                            ),
                             "enum": sorted(UPLOAD_SIGN_METHODS),
                         },
                     },
@@ -2603,8 +2612,15 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
 
         response_text = f"🎉 Data uploaded successfully to Swarm!\n\n"
         response_text += f"📄 Upload Details:\n"
-        response_text += f"   Size: {len(data.encode('utf-8')):,} bytes\n"
-        response_text += f"   Content Type: {content_type}\n"
+        size = len(data.encode("utf-8"))
+        if sign:
+            # The gateway stores the signed document, always as JSON, so the
+            # input size and content type do not describe what was stored.
+            response_text += f"   Size: {size:,} bytes (before signing)\n"
+            response_text += "   Content Type: application/json (signed document)\n"
+        else:
+            response_text += f"   Size: {size:,} bytes\n"
+            response_text += f"   Content Type: {content_type}\n"
         response_text += f"   Stamp Used: `{clean_stamp_id}`\n"
         if sign:
             response_text += f"   Signing: {sign}\n"

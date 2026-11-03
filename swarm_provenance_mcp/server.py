@@ -2841,7 +2841,7 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                 batch_id = stamp.get("batchID")
                 if not (isinstance(batch_id, str) and STAMP_ID_PATTERN.match(batch_id)):
                     batch_id = _gw(batch_id, 70) if batch_id is not None else "N/A"
-                expiration = _gw(stamp.get("expectedExpiration", "N/A"), 40)
+                expiration = _gw(stamp.get("expectedExpiration"), 40) or "N/A"
                 status = _stamp_status(stamp, _stamp_readiness(stamp))
 
                 response_text += f"Batch ID: {batch_id}\n"

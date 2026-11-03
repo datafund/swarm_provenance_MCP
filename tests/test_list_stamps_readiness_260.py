@@ -403,3 +403,14 @@ class TestSpentReasonsNamedEverywhere:
             content = doc.read_text()
             for text in self._reasons():
                 assert text in content, (doc.name, text)
+
+
+class TestMissingExpiration:
+    @pytest.mark.parametrize("value", [None, "", "   "])
+    async def test_empty_expiration_prints_na(self, server, value):
+        text = await _list(server, [_stamp("shared", expectedExpiration=value)])
+        assert "Expiration: N/A |" in text
+
+    async def test_missing_expiration_prints_na(self, server):
+        text = await _list(server, [_stamp("shared")])
+        assert "Expiration: N/A |" in text

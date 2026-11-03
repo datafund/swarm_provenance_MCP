@@ -1155,7 +1155,7 @@ class TestNotFoundAndUnreadableStamps:
 
     @pytest.mark.parametrize(
         "age",
-        [-1, True, False, 1.5, "30", float("nan"), float("inf"), 10**30, [5], {"s": 5}],
+        [True, False, 1.5, "30", float("nan"), float("inf"), [5], {"s": 5}],
     )
     async def test_unreadable_age_not_found_is_pending(self, server, age):
         # The age cannot be read, so the stamp may be new: wait, do not buy (#270).
@@ -1164,7 +1164,9 @@ class TestNotFoundAndUnreadableStamps:
         assert nxt == ["_next: check_stamp_health"], age
         assert "not usable yet" in text
 
-    @pytest.mark.parametrize("age", [180, 10_000, None, "absent"])
+    # Any int follows the earlier rule (the model sets no bounds), so -1 and
+    # 10**30 are spent, as before #270.
+    @pytest.mark.parametrize("age", [180, 10_000, None, "absent", -1, 10**30])
     async def test_old_or_unknown_not_found_is_spent(self, server, age):
         extra = {} if age == "absent" else {"secondsSincePurchase": age}
         nxt, text = await self._health(server, self._stamp("not_found", **extra))

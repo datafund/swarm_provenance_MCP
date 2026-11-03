@@ -1069,9 +1069,9 @@ def _stamp_baseline(stamp_id: str) -> str:
     parts = []
     if _is_text(details.get("expectedExpiration")):
         parts.append(f"expiry {_gw(details['expectedExpiration'])}")
-    ttl = _number_in(details.get("batchTTL"), 0, MAX_TTL_SECONDS)
-    if ttl is not None:
-        parts.append(f"TTL {ttl}s")
+    ttl = details.get("batchTTL")
+    if _is_plain_int(ttl) or _number_in(ttl, 0, MAX_TTL_SECONDS) is not None:
+        parts.append(f"TTL {_gw(ttl)}s")
     return ", ".join(parts)
 
 
@@ -1152,15 +1152,16 @@ _SPENT_REASONS_PHRASE = (
 def _recently_purchased(stamp: Dict[str, Any]) -> bool:
     """Whether a not_found stamp may still appear: the gateway reports it as
     bought less than NOT_FOUND_GRACE_SECONDS ago, or its secondsSincePurchase
-    cannot be read (not a plain int from 0 to MAX_STAMP_AGE_SECONDS), so its
-    age is unknown and buying another could duplicate it. Null means it was
-    not bought through this gateway: not recent."""
+    is not an int, so its age is unknown and buying another could duplicate
+    it. Null means it was not bought through this gateway: not recent."""
     age = stamp.get("secondsSincePurchase")
     if age is None:
         return False
-    if not isinstance(age, int) or _stamp_age(age) is None:
+    if not _is_plain_int(age):
+        # Not an int (the model type): the age is unknown.
         return True
-    return age < NOT_FOUND_GRACE_SECONDS
+    # Any int, as before #270 (the model sets no bounds).
+    return 0 <= age < NOT_FOUND_GRACE_SECONDS
 
 
 def _stamp_list(answer: Any) -> Optional[Tuple[List[Dict[str, Any]], int]]:
@@ -1191,20 +1192,54 @@ def _entries(count: int) -> str:
     return f"{count} entr{'ies' if count != 1 else 'y'}"
 
 
-def _stamp_list_incomplete(unreadable: int) -> str:
-    """No writable or pending stamp among the readable entries, and some
-    entries cannot be read."""
-    verb = "are" if unreadable != 1 else "is"
+def _no_id_text(count: int) -> str:
+    """Stamps reported usable or pending whose batch ID cannot be read."""
+    if count == 1:
+        return (
+            "1 stamp is reported usable or pending, but its batch ID is not in "
+            "the expected format"
+        )
     return (
-        f"The stamp list is incomplete: {_entries(unreadable)} {verb} not in the "
-        "expected format, so this server cannot tell whether a usable stamp exists."
+        f"{count} stamps are reported usable or pending, but their batch IDs "
+        "are not in the expected format"
     )
 
 
-def _unreadable_entries_note(unreadable: int) -> str:
-    """A usable or pending stamp was found; some entries cannot be read."""
-    verb = "are" if unreadable != 1 else "is"
-    return f"{_entries(unreadable)} in the stamp list {verb} not in the expected format"
+def _stamp_list_incomplete(entries: int, no_id: int) -> str:
+    """No writable or pending stamp to use, and the list has ``entries``
+    that are not objects and ``no_id`` usable or pending stamps without a
+    valid batch ID. Each kind is named only when present."""
+    parts = []
+    if entries:
+        verb = "are" if entries != 1 else "is"
+        parts.append(
+            f"{_entries(entries)} {verb} not in the expected format, so this "
+            "server cannot tell whether a usable stamp exists"
+        )
+    if no_id:
+        parts.append(
+            f"{_no_id_text(no_id)}, so this server cannot name "
+            f"{'them' if no_id != 1 else 'it'}"
+        )
+    return f"The stamp list is incomplete: {'; '.join(parts)}."
+
+
+def _unreadable_entries_note(entries: int, no_id: int) -> str:
+    """A usable or pending stamp was found; name what could not be read."""
+    parts = []
+    if entries:
+        verb = "are" if entries != 1 else "is"
+        parts.append(f"{_entries(entries)} in the stamp list {verb} not in the expected format")
+    if no_id:
+        parts.append(_no_id_text(no_id))
+    return "; ".join(parts)
+
+
+def _is_plain_int(value: Any) -> bool:
+    """An int that is not a bool: the type the gateway models give counts,
+    depths, TTLs and ages, with no bounds. Such a value is printed as the
+    code before #270 printed it, even when it fails a range check."""
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _plain_int(value: Any, low: int, high: int) -> Optional[int]:
@@ -1557,8 +1592,6 @@ def _bee_advisories(gateway_response: Dict[str, Any]) -> List[str]:
     return [w for w in warnings if isinstance(w, str)]
 
 
-# connected_peers above this is not a real count.
-MAX_BEE_PEERS = 10**6
 
 
 def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1582,7 +1615,10 @@ def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, 
         return None
     # Only values of the right type count, for the decision and the summary.
     # A bee_node with none of them counts as not reported.
-    peers = _plain_int(bee.get("connected_peers"), 0, MAX_BEE_PEERS)
+    # Any int, as before #270; another type is not reported.
+    peers = bee.get("connected_peers")
+    if not _is_plain_int(peers):
+        peers = None
     availability = bee.get("network_availability")
     if not isinstance(availability, str) or not availability.strip():
         availability = None
@@ -2884,15 +2920,27 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         if amount is None:
             amount = _gw_text(result.get("amount"), 40) or "N/A"
         response_text += f"Amount: {amount}\n"
+        # An int outside the checked range prints as it did before #270:
+        # the models type these as int with no bounds.
         for name, key in (("Depth", "depth"), ("Bucket Depth", "bucketDepth")):
             depth = _plain_depth(result.get(key))
-            response_text += f"{name}: {'N/A' if depth is None else depth}\n"
+            if depth is None:
+                depth = _gw(result.get(key), 20) if _is_plain_int(result.get(key)) else "N/A"
+            response_text += f"{name}: {depth}\n"
         block = _number_in(result.get("blockNumber"), 0, MAX_BLOCK_NUMBER)
-        response_text += f"Block Number: {'N/A' if block is None else block}\n"
+        if block is None:
+            raw = result.get("blockNumber")
+            block = _gw(raw, 20) if _is_plain_int(raw) else "N/A"
+        response_text += f"Block Number: {block}\n"
 
         # Enhanced TTL information
         ttl = _number_in(result.get("batchTTL"), 0, MAX_TTL_SECONDS)
-        shown = "N/A" if ttl is None else _ttl_text(ttl)
+        if ttl is not None:
+            shown = _ttl_text(ttl)
+        elif _is_plain_int(result.get("batchTTL")):
+            shown = _gw(result.get("batchTTL"), 40)
+        else:
+            shown = "N/A"
         response_text += f"Batch TTL: {shown}\n"
 
         expiry = result.get("expectedExpiration")
@@ -2925,10 +2973,13 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
 
         if isinstance(propagation_status, str) and propagation_status:
             response_text += f"Propagation: {_gw(propagation_status)}"
-            # Left out when it fails validation, as when it is missing.
+            # Left out when it is not a number, as when it is missing; an
+            # int out of range prints as before #270.
             age = _stamp_age(seconds_since)
             if age is not None:
                 response_text += f" ({age}s since purchase)"
+            elif _is_plain_int(seconds_since):
+                response_text += f" ({_gw(seconds_since, 20)} since purchase)"
             if has_estimate and propagation_status == "propagating":
                 response_text += f" — ready at {estimated_ready}"
             response_text += "\n"
@@ -3044,9 +3095,9 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
         # The gateway's total_count is not printed: the count is the number
         # of entries listed here.
         counts = _writable_stamp_counts(stamps)
-        # A usable or pending stamp without a valid batch ID counts as an
-        # entry this server cannot read.
-        unreadable += counts["unreadable"]
+        # A usable or pending stamp without a valid batch ID cannot be used
+        # either: both kinds make the list incomplete.
+        no_id = counts["unreadable"]
 
         if not stamps:
             response_text = "📭 No stamps found.\n\n💡 Use the 'purchase_stamp' tool to create your first stamp!"
@@ -3103,8 +3154,8 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
         if any(_is_text(s.get("label")) for s in stamps):
             response_text += f"\n{QUOTED_NOTE}\n"
 
-        if unreadable and (counts["writable"] or counts["pending"]):
-            response_text += f"\n💡 {_unreadable_entries_note(unreadable)}.\n"
+        if (unreadable or no_id) and (counts["writable"] or counts["pending"]):
+            response_text += f"\n💡 {_unreadable_entries_note(unreadable, no_id)}.\n"
 
         # Contextual hints, in health_check's order. Each recommendation
         # matches its _next.
@@ -3117,10 +3168,10 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                 f"\n💡 {_pending_stamp_text(counts['pending'], counts['pending_ids'])}.\n"
             )
             response_text += _format_hints("check_stamp_health", ["get_stamp_status"])
-        elif unreadable:
+        elif unreadable or no_id:
             # An entry it cannot read may be the stamp to use: never buy.
             response_text += (
-                f"\n💡 {_stamp_list_incomplete(unreadable)} {_REPEAT_TO_OPERATOR}\n"
+                f"\n💡 {_stamp_list_incomplete(unreadable, no_id)} {_REPEAT_TO_OPERATOR}\n"
             )
             response_text += _format_hints("health_check", ["check_stamp_health"])
         else:
@@ -3828,9 +3879,13 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         if not isinstance(free_tier, dict):
             free_tier = {}
         # Only a sane count says free tier; any other value counts as absent.
-        rate_limit = _plain_int(free_tier.get("rate_limit_per_minute"), 1, 10**6)
+        rate_limit_raw = free_tier.get("rate_limit_per_minute")
+        rate_limit = _plain_int(rate_limit_raw, 1, 10**6)
         if rate_limit is not None:
             response_text += f"\n💰 Payment: free tier ({rate_limit} write req/min, reads unlimited)\n"
+        elif _is_plain_int(rate_limit_raw) and rate_limit_raw:
+            # An int out of range: free tier, without the count (as before).
+            response_text += "\n💰 Payment: free tier\n"
         elif x402:
             response_text += "\n💰 Payment: x402 enabled\n"
 
@@ -3873,7 +3928,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 total_stamps = len(stamps)
                 counts = _writable_stamp_counts(stamps)
                 usable_count = counts["writable"]
-                unreadable += counts["unreadable"]
+                no_id = counts["unreadable"]
 
                 stamps_info += (
                     f"\n📋 Stamps: {usable_count} usable by this server / "
@@ -3896,8 +3951,10 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 stamps_info += "\n"
                 # Named here only when a stamp to use was found; otherwise the
                 # incomplete-list recommendation names it.
-                if unreadable and (usable_count or counts["pending"]):
-                    stamps_info += f"   ⚠️  {_unreadable_entries_note(unreadable)}\n"
+                if (unreadable or no_id) and (usable_count or counts["pending"]):
+                    stamps_info += (
+                        f"   ⚠️  {_unreadable_entries_note(unreadable, no_id)}\n"
+                    )
 
                 if usable_count > 0 and (network is None or network["ok"]):
                     ready = True
@@ -3917,10 +3974,10 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                         _pending_stamp_text(counts["pending"], counts["pending_ids"])
                     )
                     next_tool = "check_stamp_health"
-                elif unreadable:
+                elif unreadable or no_id:
                     # An entry it cannot read may be the stamp to use: never buy.
                     recommendations.append(
-                        f"{_stamp_list_incomplete(unreadable)} Call list_stamps to "
+                        f"{_stamp_list_incomplete(unreadable, no_id)} Call list_stamps to "
                         f"check the stamps. {_REPEAT_TO_OPERATOR}"
                     )
                     next_tool = "list_stamps"
@@ -4180,10 +4237,13 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
                 else:
                     util_status = "unknown"
                 response_text += f"   Utilization: {shown} ({util_status})\n"
-            # Left out when it fails validation, as when it is missing.
+            # Left out when it is not a number, as when it is missing; an
+            # int out of range prints as before #270.
             ttl = _number_in(status.get("batchTTL"), 0, MAX_TTL_SECONDS)
             if ttl is not None:
                 response_text += f"   TTL: {_ttl_text(ttl)}\n"
+            elif _is_plain_int(status.get("batchTTL")):
+                response_text += f"   TTL: {_gw(status['batchTTL'], 40)}\n"
             if _is_text(status.get("expectedExpiration")):
                 response_text += f"   Expires: {_gw(status['expectedExpiration'])}\n"
 
@@ -4199,6 +4259,8 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
             age = _stamp_age(seconds_since)
             if age is not None:
                 response_text += f"   Purchased: {age}s ago\n"
+            elif _is_plain_int(seconds_since):
+                response_text += f"   Purchased: {_gw(seconds_since, 20)}\n"
             if has_estimate:
                 response_text += f"   Estimated ready: {estimated_ready}\n"
 

@@ -32,6 +32,7 @@ from mcp.types import (
 )
 from requests.exceptions import RequestException
 
+from . import bmt
 from .config import WALLET_KEY_HINT, is_plain_http_remote, settings
 from .gateway_client import PaymentRequiredError, SwarmGatewayClient
 from .redact import mask_literal_urls, redact_urls, rpc_host, url_without_userinfo
@@ -1861,7 +1862,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="download_data",
-                description="Download data from the Swarm network using a reference hash, retrieved through the gateway's Bee node. The reference can come from upload_data or any other Swarm upload. Returns the decoded content for text/JSON, or size and type metadata for binary data. A not-found result says whether the gateway is connected to the Swarm network — do not re-upload when it is not.",
+                description="Download data from the Swarm network using a reference hash, retrieved through the gateway's Bee node. The reference can come from upload_data or any other Swarm upload. Returns the decoded content for text/JSON, or size and type metadata for binary data, plus a 'Reference check' line. The content is 'verified' only when it is at most 4096 bytes and its single-chunk Swarm address equals the reference. Otherwise the check says 'not checked' and why: references from upload_data most likely name a /bzz manifest, which this server cannot check; the content is larger than one chunk; or the reference is encrypted. Treat unchecked content as unverified. A not-found result says whether the gateway is connected to the Swarm network — do not re-upload when it is not.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -2227,7 +2228,7 @@ def create_server() -> Server:
         return [
             Prompt(
                 name="provenance-upload",
-                description="Upload data with provenance to Swarm. Guides through health check, stamp selection/purchase, upload, and verification.",
+                description="Upload data with provenance to Swarm. Guides through health check, stamp selection/purchase, upload, and a download to confirm the stored content.",
                 arguments=[
                     PromptArgument(
                         name="data",
@@ -2243,11 +2244,11 @@ def create_server() -> Server:
             ),
             Prompt(
                 name="provenance-verify",
-                description="Verify existing provenance data by downloading and inspecting it from Swarm.",
+                description="Download existing provenance data from Swarm, inspect it, and report what the reference check covered.",
                 arguments=[
                     PromptArgument(
                         name="reference",
-                        description="64-character hex Swarm reference hash to verify",
+                        description="Swarm reference of the data to download and inspect",
                         required=True,
                     ),
                 ],
@@ -2303,7 +2304,9 @@ def create_server() -> Server:
                                 f"cannot upload to 'owned' or 'pool' stamps).\n"
                                 f"3. Poll check_stamp_health every 15 seconds until ready (up to 2 minutes)\n"
                                 f"4. Call upload_data with the data and your stamp_id\n"
-                                f"5. Call download_data with the returned reference to verify the upload\n"
+                                f"5. Call download_data with the returned reference and check that the content "
+                                f"is the data you uploaded. Its 'Reference check' line usually says 'not checked' "
+                                f"for upload_data references, because they most likely name a /bzz manifest\n"
                                 f"6. Report the reference hash — this is the permanent Swarm address"
                             ),
                         ),
@@ -2314,20 +2317,26 @@ def create_server() -> Server:
         elif name == "provenance-verify":
             reference = args.get("reference", "<reference hash>")
             return GetPromptResult(
-                description="Verify existing provenance data from Swarm",
+                description="Inspect existing provenance data from Swarm",
                 messages=[
                     PromptMessage(
                         role="user",
                         content=TextContent(
                             type="text",
                             text=(
-                                f"Verify this provenance data from Swarm:\n\n"
+                                f"Inspect this provenance data from Swarm:\n\n"
                                 f"Reference: {reference}\n\n"
                                 f"Steps:\n"
                                 f"1. Call download_data with the reference hash\n"
-                                f"2. Inspect the returned content — check structure, fields, and integrity\n"
-                                f"3. Report what was found: content type, size, key fields, "
-                                f"and whether the data appears intact"
+                                f"2. Read the 'Reference check' line. 'verified' means the bytes are "
+                                f"the single Swarm chunk the reference names. 'not checked' means "
+                                f"nothing proves the bytes belong to the reference; give the reason. "
+                                f"Even when it says 'verified', check that the content is the document "
+                                f"you expected: a verified chunk proves only that the bytes are the chunk "
+                                f"the reference names\n"
+                                f"3. Inspect the returned content: structure, fields, and whether it is well formed\n"
+                                f"4. Report the content type, size, key fields, and the reference check result. "
+                                f"Do not call the content cryptographically verified unless the check says 'verified'"
                             ),
                         ),
                     )
@@ -3173,6 +3182,48 @@ def _describe_download(reference: str, data: bytes) -> Tuple[str, Optional[str]]
     return summary, fence(data, f"Swarm reference {reference}")
 
 
+_HEX64 = re.compile(r"[0-9a-fA-F]{64}")
+_HEX128 = re.compile(r"[0-9a-fA-F]{128}")
+_NOT_CHECKED = "Reference check: not checked. "
+
+
+def _reference_check(reference: Any, data: Any) -> str:
+    """One line saying whether ``data`` was checked against ``reference``.
+
+    Both values are untrusted. Content of at most one chunk is verified when
+    its single-chunk BMT address equals the reference. Every other case is
+    "not checked" with the reason, never a mismatch. When the addresses
+    differ, the reference is probably a ``/bzz`` manifest, whose address
+    differs from the content's; the text stays true when it is not.
+    """
+    if isinstance(reference, str) and _HEX128.fullmatch(reference):
+        return (
+            _NOT_CHECKED + "The reference is encrypted (128 hexadecimal "
+            "characters), and this server cannot check encrypted content."
+        )
+    if not isinstance(reference, str) or not _HEX64.fullmatch(reference):
+        return _NOT_CHECKED + "The reference is not 64 hexadecimal characters."
+    if not isinstance(data, bytes):
+        return _NOT_CHECKED + "The gateway did not return raw bytes."
+    if len(data) > bmt.CHUNK_SIZE:
+        return (
+            _NOT_CHECKED + f"The content is larger than one chunk "
+            f"({bmt.CHUNK_SIZE:,} bytes), and this server checks only "
+            "single-chunk content."
+        )
+    if bmt.chunk_address(data).hex() == reference.lower():
+        return (
+            "Reference check: verified. These bytes are the single Swarm chunk "
+            "that the reference names: their BMT chunk address was recomputed "
+            "and equals the reference."
+        )
+    return (
+        _NOT_CHECKED + "The content's chunk address does not equal the "
+        "reference. The reference is probably a manifest (/bzz upload), which "
+        "this server cannot verify (datafund/swarm_connect#499)."
+    )
+
+
 async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle data download requests."""
     clean_reference = None
@@ -3186,6 +3237,7 @@ async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
 
         result_bytes = gateway_client.download_data(clean_reference)
         summary, fenced = _describe_download(clean_reference, result_bytes)
+        summary += "\n" + _reference_check(clean_reference, result_bytes)
         content = [
             TextContent(
                 type="text",

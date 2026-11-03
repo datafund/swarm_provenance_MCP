@@ -22,10 +22,10 @@ This MCP server provides tools for AI agents to interact with Swarm postage stam
 
 This MCP server is specifically designed for provenance data use cases, leveraging Swarm's decentralized network to provide:
 
-- **Immutable Records**: Once uploaded, data cannot be altered, ensuring integrity
+- **Immutable Records**: Swarm addresses content by its hash, so the data stored under a reference cannot be changed. `download_data` checks content against its reference only in the cases its [reference check](#download_data) lists
 - **Decentralized Storage**: No single point of failure or central authority
 - **Provenance Metadata**: Support for structured provenance records with creator, timestamp, and lineage information
-- **Verifiable Authenticity**: Cryptographic integrity verification for uploaded data
+- **Reference Check on Download**: `download_data` recomputes the Swarm chunk address of content up to 4 KB and reports the content as verified only when that address equals the reference. References from `/bzz` uploads name a manifest and are reported as not checked; see [datafund/swarm_connect#499](https://github.com/datafund/swarm_connect/issues/499)
 
 ## Features
 
@@ -35,7 +35,7 @@ This MCP server is specifically designed for provenance data use cases, leveragi
 - **Extend Stamps**: Extend the duration of existing stamps
 - **Data Upload**: Upload data to Swarm network with stamp validation
 - **Data Download**: Download data from Swarm network by reference
-- **Provenance Storage**: Store data with provenance metadata for immutable, verifiable records
+- **Provenance Storage**: Store data with provenance metadata as immutable records whose on-chain registration you can check with `verify_hash`
 - **Health Monitoring**: Check gateway and Swarm network connectivity
 - **Chain Diagnostics** (optional): Check on-chain wallet balance and RPC connectivity for provenance anchoring
 - **On-Chain Anchoring** (optional): Register Swarm hashes on-chain for immutable provenance records
@@ -306,10 +306,19 @@ Download data from the Swarm network using a reference hash.
 - `reference` (string): Swarm reference of the data to download: 64 hexadecimal characters, or 128 for an encrypted reference. Chain tools take only 64-character hashes
 
 **Result:** For text and JSON content, the result has two content blocks. Read both:
-1. A summary with the size, the SHA-256 of the original bytes, and the `_next` hints.
+1. A summary with the size, the SHA-256 of the original bytes, the `Reference check:` line (below), and the `_next` hints.
 2. The content, fenced as untrusted data. Control and bidirectional characters are escaped and the content is cut at about 16 KB, so this view is not byte-exact.
 
 A client that reads only the first block gets the summary, not the payload. Binary (non-UTF-8) content returns a single block that gives the size and SHA-256 and does not include the bytes. See [Safety behavior](#safety-behavior).
+
+**Reference check:** the result has one `Reference check:` line that says what was checked.
+- `verified`: the content is at most 4096 bytes, and its single-chunk Swarm address (BMT hash) equals the 64-character reference. The bytes are the chunk that the reference names.
+- `not checked`, with the reason. Nothing proves that the bytes belong to the reference:
+  - The content's chunk address does not equal the reference. The reference is then probably a manifest. A `/bzz` reference names a manifest root, whose address differs from the content's own chunk address. A Bee 2.8.2 upload recorded for the tests shows this (`tests/fixtures/bee_chunks.json`). The gateway stores data through Bee's `/bzz` endpoint, so references from `upload_data` most likely name a manifest. Only that last point comes from reading the gateway source; it was not confirmed with a live upload through the gateway. This server cannot follow a manifest to its content. A raw chunk endpoint on the gateway that would allow this is tracked in [datafund/swarm_connect#499](https://github.com/datafund/swarm_connect/issues/499).
+  - The content is larger than one chunk (4096 bytes).
+  - The reference is encrypted (128 hexadecimal characters).
+
+A `not checked` result is not a mismatch. It means the gateway's bytes are shown as received. The result also reports the SHA-256 of the bytes, which you can compare with a hash you trust.
 
 **Example:**
 ```json
@@ -643,8 +652,8 @@ The server provides workflow prompts that agents can invoke via `prompts/list` a
 
 | Prompt | Description | Arguments |
 |--------|-------------|-----------|
-| `provenance-upload` | Upload data to Swarm: health check, stamp selection, upload, verify | `data` (required), `content_type` (optional) |
-| `provenance-verify` | Download and verify existing data by reference | `reference` (required) |
+| `provenance-upload` | Upload data to Swarm: health check, stamp selection, upload, download to confirm | `data` (required), `content_type` (optional) |
+| `provenance-verify` | Download existing data by reference, inspect it, and report what the reference check covered | `reference` (required) |
 | `stamp-management` | Review stamp inventory, diagnose issues, recommend actions | none |
 | `provenance-chain-workflow` | End-to-end on-chain provenance: store, anchor, and optionally record a transformation | `data` (required), `transform_description` (optional) |
 
@@ -968,8 +977,8 @@ This MCP server is designed to work with AI agents that support the Model Contex
 2. **Monitor usage**: Check stamp status and utilization
 3. **Optimize costs**: List stamps to find the most suitable ones for tasks
 4. **Store provenance data**: Upload data with provenance metadata to immutable decentralized storage
-5. **Verify data integrity**: Retrieve and verify immutable records from Swarm network
-6. **Data lifecycle management**: Handle complete provenance workflows from creation to verification
+5. **Retrieve records**: Download records from the Swarm network by reference. Content up to 4 KB is checked against a reference that names a single chunk; see the `download_data` reference check
+6. **Data lifecycle management**: Handle complete provenance workflows from creation to retrieval and on-chain checks
 7. **Track data lineage**: Record transformations and trace the full provenance chain of derived data
 8. **Automate workflows**: Integrate stamp management and data storage into larger AI workflows
 

@@ -171,8 +171,10 @@ Inspect provenance records without a wallet.
 2. get_provenance(swarm_hash)     → full record: owner, timestamp, status, storage ref, transformations
 3. lookup_by_storage_ref(ref)     → reverse lookup by Swarm reference
 4. get_provenance_chain(hash)     → follow transformation lineage tree
-5. download_data(reference)       → retrieve the actual data from Swarm
+5. download_data(reference)       → retrieve the actual data from Swarm; read its "Reference check" line
 ```
+
+`download_data` reports content as verified only when it is at most 4096 bytes and its single-chunk Swarm address equals the reference. A reference from `upload_data` most likely names a `/bzz` manifest, so its check usually says "not checked": nothing proves the bytes belong to the reference. Following manifests needs a raw chunk endpoint on the gateway (datafund/swarm_connect#499).
 
 ---
 

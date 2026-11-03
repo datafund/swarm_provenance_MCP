@@ -2225,7 +2225,7 @@ class TestRound13:
 
         ids = [c * 64 for c in "abcde"]
         text = _no_writable_stamp_text(
-            {"pool": 0, "owned": 0, "other": 5, "spent": 0}, ids
+            {"pool": 0, "owned": 0, "other": 5, "spent": 0}, ids, other_unnamed=0
         )
         assert f"(batch IDs: {ids[0]}, {ids[1]}, {ids[2]}, and 2 more)" in text
 
@@ -2433,13 +2433,44 @@ class TestRound15:
         assert counts["other_unnamed"] == 1
 
 
+class TestRound16:
+    async def test_pending_ids_named_once(self, server):
+        body = _list_body()
+        stamp = dict(body["stamps"][0], unusableReason=None)
+        body["stamps"] = [
+            dict(stamp),
+            dict(stamp, batchID="0x" + TEST_STAMP_ID),
+            dict(stamp, batchID="c" * 64),
+        ]
+        for tool in ("health_check", "list_stamps"):
+            text = (
+                (
+                    await _run(
+                        server, tool, {"list_stamps": lambda b: copy.deepcopy(body)}
+                    )
+                )
+                .content[0]
+                .text
+            )
+            assert (
+                "3 stamps this server can write to are not usable yet, probably still "
+                f"propagating (batch IDs: {TEST_STAMP_ID}, {'c' * 64})"
+            ) in text, (tool, text)
+
+    def test_other_unnamed_is_required(self):
+        from swarm_provenance_mcp.server import _no_writable_stamp_text
+
+        with pytest.raises(TypeError):
+            _no_writable_stamp_text({"pool": 0, "owned": 0, "other": 1, "spent": 0}, [])
+
+
 class TestRound12:
     def test_undocumented_mode_count_singular_and_plural(self):
         from swarm_provenance_mcp.server import _no_writable_stamp_text
 
         a, b = "a" * 64, "b" * 64
         one = _no_writable_stamp_text(
-            {"pool": 1, "owned": 0, "other": 1, "spent": 0}, [a]
+            {"pool": 1, "owned": 0, "other": 1, "spent": 0}, [a], other_unnamed=0
         )
         assert one == (
             "No stamp this server can write to: 1 pool stamp is gateway inventory. "
@@ -2448,7 +2479,7 @@ class TestRound12:
             "so check it with check_stamp_health before you buy another stamp"
         )
         two = _no_writable_stamp_text(
-            {"pool": 0, "owned": 0, "other": 2, "spent": 0}, [a, b]
+            {"pool": 0, "owned": 0, "other": 2, "spent": 0}, [a, b], other_unnamed=0
         )
         assert two == (
             "No stamp this server can write to. 2 stamps have access modes the gateway "

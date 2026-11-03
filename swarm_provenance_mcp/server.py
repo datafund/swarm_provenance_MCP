@@ -1292,7 +1292,12 @@ def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
     writable stamp the gateway reports as expired, full or about to expire).
     Entries that are not objects are not counted. Each stamp is classified
     by _stamp_readiness. A writable or pending stamp without a valid batch ID
-    cannot be used (an upload needs the ID): it counts as ``unreadable``."""
+    cannot be used (an upload needs the ID): it counts as ``unreadable``.
+    ``pending_ids`` and ``other_ids`` (stamps with an access mode the gateway
+    does not document) hold valid batch IDs, each once in first-seen order,
+    with a 0x prefix removed, so a 0x variant counts as the same ID.
+    ``other_unnamed`` counts the undocumented-mode stamps without a valid
+    batch ID."""
     counts: Dict[str, Any] = {
         "writable": 0, "pending": 0, "unreadable": 0, "pool": 0, "owned": 0,
         "other": 0,
@@ -1324,7 +1329,9 @@ def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
             counts["unreadable"] += 1
         elif kind == "pending":
             counts["pending"] += 1
-            counts["pending_ids"].append(_clean_gateway_batch_id(stamp["batchID"]))
+            pending_id = _clean_gateway_batch_id(stamp["batchID"])
+            if pending_id not in counts["pending_ids"]:
+                counts["pending_ids"].append(pending_id)
         else:
             counts["writable"] += 1
     return counts
@@ -1348,10 +1355,12 @@ def _batch_ids_text(batch_ids: Sequence[str]) -> str:
 def _no_writable_stamp_text(
     blocked: Dict[str, int],
     other_ids: Sequence[str] = (),
-    other_unnamed: Optional[int] = None,
+    *,
+    other_unnamed: int,
 ) -> str:
-    """health_check recommendation when no stamp is writable, naming only the
-    kinds of stamps actually listed."""
+    """The recommendation health_check and list_stamps give when no stamp is
+    writable, naming only the kinds of stamps actually listed. ``other_ids``
+    and ``other_unnamed`` come from _writable_stamp_counts."""
     parts = []
     pool, owned, other = blocked["pool"], blocked["owned"], blocked["other"]
     if pool:
@@ -1382,9 +1391,7 @@ def _no_writable_stamp_text(
         )
         if other_ids:
             # Name the valid IDs; say how many of the stamps cannot be named.
-            unnamed = (
-                other - len(other_ids) if other_unnamed is None else other_unnamed
-            )
+            unnamed = other_unnamed
             ids = _batch_ids_list(other_ids)
             if unnamed:
                 ids += (
@@ -3244,7 +3251,9 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
         else:
             if stamps:
                 text = _no_writable_stamp_text(
-                    counts["blocked"], counts["other_ids"], counts["other_unnamed"]
+                    counts["blocked"],
+                    counts["other_ids"],
+                    other_unnamed=counts["other_unnamed"],
                 )
                 # The no-valid-ID text ends with the repeat sentence's period.
                 end = "" if text.endswith(".") else "."
@@ -4068,7 +4077,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                         _no_writable_stamp_text(
                             counts["blocked"],
                             counts["other_ids"],
-                            counts["other_unnamed"],
+                            other_unnamed=counts["other_unnamed"],
                         )
                     )
                     next_tool = _no_writable_stamp_next(

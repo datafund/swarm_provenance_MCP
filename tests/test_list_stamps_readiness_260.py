@@ -408,7 +408,9 @@ class TestSpentReasonsNamedEverywhere:
     def test_no_writable_stamp_text(self):
         from swarm_provenance_mcp.server import _no_writable_stamp_text
 
-        rec = _no_writable_stamp_text({"pool": 0, "owned": 0, "other": 0, "spent": 1})
+        rec = _no_writable_stamp_text(
+            {"pool": 0, "owned": 0, "other": 0, "spent": 1}, other_unnamed=0
+        )
         for text in self._reasons():
             assert text in rec, text
 

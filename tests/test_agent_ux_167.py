@@ -204,7 +204,9 @@ class TestHealthCheckCountsOnlyWritableStamps:
         # through the helper.
         from swarm_provenance_mcp.server import _no_writable_stamp_text
 
-        rec = _no_writable_stamp_text({"pool": 0, "owned": 0, "other": 0, "spent": 0})
+        rec = _no_writable_stamp_text(
+            {"pool": 0, "owned": 0, "other": 0, "spent": 0}, other_unnamed=0
+        )
         assert rec.startswith("No stamp this server can write to.")
         assert "pool" not in rec and "owned" not in rec
 

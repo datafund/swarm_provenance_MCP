@@ -603,3 +603,115 @@ class TestCombinedSameRefShowsTheLink:
             configure,
         )
         assert f"   Storage Ref: {REF}\n" in text
+
+
+class TestTrailingNewline:
+    """A "$" pattern also matches before a final newline, so a hash with a
+    trailing newline passed validation unchanged and skipped the zero and
+    equality checks; the contract layer then stripped it and sent it."""
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            {"swarm_hash": HASH + "\n"},
+            {"swarm_hash": ZERO_HASH + "\n"},
+            {"swarm_hash": HASH + "\n", "owner": OWNER},
+            {"swarm_hash": HASH, "storage_ref": REF + "\n"},
+            {"swarm_hash": HASH, "storage_ref": ZERO_HASH + "\n"},
+            {"swarm_hash": HASH, "storage_ref": HASH + "\n"},
+            {"swarm_hash": HASH + "\n", "owner": OWNER, "storage_ref": REF},
+            {"swarm_hash": HASH, "owner": OWNER, "storage_ref": REF + "\n"},
+            {"swarm_hash": HASH, "owner": OWNER, "storage_ref": HASH + "\n"},
+        ],
+    )
+    async def test_refused_as_invalid(self, arguments):
+        result, text, client = await _call(arguments)
+        assert result.isError
+        assert "Validation error: Invalid reference hash format" in text
+        client.anchor.assert_not_called()
+        client.anchor_for.assert_not_called()
+        client.fee_quote.assert_not_called()
+
+    def test_reference_hash_validator(self):
+        from swarm_provenance_mcp.server import validate_and_clean_reference_hash
+
+        with pytest.raises(ValueError):
+            validate_and_clean_reference_hash(HASH + "\n")
+        assert validate_and_clean_reference_hash("0x" + HASH) == HASH
+
+    def test_stamp_id_validator(self):
+        from swarm_provenance_mcp.server import validate_and_clean_stamp_id
+
+        with pytest.raises(ValueError):
+            validate_and_clean_stamp_id("a" * 64 + "\n")
+        assert validate_and_clean_stamp_id("a" * 64) == "a" * 64
+
+    @pytest.mark.parametrize("length", [64, 128])
+    def test_swarm_reference_validator(self, length):
+        from swarm_provenance_mcp.server import validate_and_clean_swarm_reference
+
+        with pytest.raises(ValueError):
+            validate_and_clean_swarm_reference("a" * length + "\n")
+        assert validate_and_clean_swarm_reference("a" * length) == "a" * length
+
+
+class TestDifferentRefNextStep:
+    async def test_names_how_to_link_another_reference(self):
+        def configure(c):
+            c.anchor.side_effect = _registered(WALLET, storage_ref=REF2)
+
+        _, text, _ = await _call({"swarm_hash": HASH, "storage_ref": REF}, configure)
+        assert (
+            "To link a different reference, change the content, upload it "
+            "again, and anchor the new hash." in text
+        )
+
+
+async def _chain_prompt(arguments):
+    from mcp.types import GetPromptRequest
+
+    server = create_server()
+    handler = next(
+        h for h in server.request_handlers.values() if "get_prompt" in str(h)
+    )
+    result = await handler(
+        GetPromptRequest(
+            method="prompts/get",
+            params={"name": "provenance-chain-workflow", "arguments": arguments},
+        )
+    )
+    inner = result.root if hasattr(result, "root") else result
+    return inner.messages[0].content.text
+
+
+class TestStorageRefWorkflowTexts:
+    """Agent texts must not tell the agent to pass the same hash as
+    swarm_hash and storage_ref: the contract and anchor_hash refuse it."""
+
+    async def test_chain_prompt_does_not_pair_the_reference_with_itself(self):
+        text = await _chain_prompt({"data": "x", "transform_description": "t"})
+        assert "storage_ref (the Swarm reference from step 5)" not in text
+        assert "to its Swarm reference (from step 8)" not in text
+        assert "must differ" in text
+        assert "SHA-256" in text
+
+    def test_instructions_workflow_names_both_hashes(self):
+        from swarm_provenance_mcp.server import MCP_INSTRUCTIONS
+
+        assert "with storage_ref = Swarm reference)" not in MCP_INSTRUCTIONS
+        block = MCP_INSTRUCTIONS.split(
+            "CHAIN WORKFLOW — store with storage reference linking:"
+        )[1].split("\n\n")[0]
+        assert "SHA-256" in block
+        assert "must differ" in block
+
+    def test_skills_workflow_e_names_both_hashes(self):
+        skills = (
+            Path(__file__).resolve().parents[1]
+            / "swarm_provenance_mcp"
+            / "SKILLS.md"
+        ).read_text()
+        section = skills.split("### E:")[1].split("### F:")[0]
+        assert "SHA-256" in section
+        assert "must differ" in section
+        assert "anchor_hash(swarm_hash,    → register hash" not in section

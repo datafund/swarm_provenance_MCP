@@ -438,3 +438,168 @@ class TestCombinedErrorPaths:
         )
         assert result.isError
         assert "Chain connection error" in text
+
+
+ANCHOR_PATHS = [
+    {"swarm_hash": HASH},
+    {"swarm_hash": HASH, "owner": OWNER},
+    {"swarm_hash": HASH, "storage_ref": REF},
+    {"swarm_hash": HASH, "owner": OWNER, "storage_ref": REF},
+]
+
+
+class TestDataType:
+    """The SDK's validateDataType rule, which the contract enforces: not
+    empty or whitespace only, at most 64 UTF-8 bytes, and a string."""
+
+    @pytest.mark.parametrize("path", ANCHOR_PATHS)
+    @pytest.mark.parametrize(
+        "value, phrase",
+        [
+            ("", "data_type must not be empty"),
+            ("   ", "data_type must not be empty"),
+            ("\t\n", "data_type must not be empty"),
+            ("é" * 64, "data_type is 128 bytes (UTF-8)"),
+            ("€" * 22, "data_type is 66 bytes (UTF-8)"),
+            (None, "data_type must be a string"),
+            (123, "data_type must be a string"),
+            (["x"], "data_type must be a string"),
+            (True, "data_type must be a string"),
+        ],
+    )
+    async def test_refused_before_any_chain_call(self, path, value, phrase):
+        result, text, client = await _call({**path, "data_type": value})
+        assert result.isError
+        assert text.startswith("Validation error: ")
+        assert phrase in text
+        assert "quote_id" not in text
+        client.anchor.assert_not_called()
+        client.anchor_for.assert_not_called()
+        client.fee_quote.assert_not_called()
+
+    async def test_byte_limit_message_names_the_limit(self):
+        _, text, _ = await _call({"swarm_hash": HASH, "data_type": "é" * 64})
+        assert "the contract accepts at most 64 bytes" in text
+
+    async def test_too_many_characters_keeps_its_message(self):
+        _, text, _ = await _call({"swarm_hash": HASH, "data_type": "x" * 65})
+        assert "Validation error: data_type must be 64 characters or fewer" in text
+
+    @pytest.mark.parametrize("path", ANCHOR_PATHS)
+    @pytest.mark.parametrize("value", ["é" * 32, "x" * 64, " a "])
+    async def test_values_within_the_limits_are_accepted(self, path, value):
+        result, text, client = await _call({**path, "data_type": value})
+        assert not result.isError, text
+        assert (client.anchor.call_count + client.anchor_for.call_count) == 1
+
+
+class TestMergeDataType:
+    """record_merge_transform's new_data_type has the same contract limits
+    (DataProvenance.recordMergeTransformation) and the SDK checks it with
+    the same validateDataType."""
+
+    async def _merge(self, value):
+        client = _client()
+        with (
+            patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True),
+            patch("swarm_provenance_mcp.server.chain_client", client),
+        ):
+            result = await call_tool_directly(
+                create_server(),
+                "record_merge_transform",
+                {
+                    "source_hashes": ["1" * 64, "2" * 64],
+                    "new_hash": "3" * 64,
+                    "description": "merged",
+                    "new_data_type": value,
+                },
+            )
+        return result, result.content[0].text, client
+
+    @pytest.mark.parametrize(
+        "value, phrase",
+        [
+            ("", "new_data_type must not be empty"),
+            ("  ", "new_data_type must not be empty"),
+            ("é" * 64, "new_data_type is 128 bytes (UTF-8)"),
+            (None, "new_data_type must be a string"),
+            (7, "new_data_type must be a string"),
+        ],
+    )
+    async def test_refused_before_any_chain_call(self, value, phrase):
+        result, text, client = await self._merge(value)
+        assert result.isError
+        assert text.startswith("Validation error: ")
+        assert phrase in text
+        client.merge_transform.assert_not_called()
+        client.fee_quote.assert_not_called()
+
+    async def test_too_many_characters_keeps_its_message(self):
+        _, text, _ = await self._merge("x" * 65)
+        assert "new_data_type must be 64 characters or fewer" in text
+
+
+class TestCombinedPathFailures:
+    COMBINED = {"swarm_hash": HASH, "owner": OWNER, "storage_ref": REF}
+
+    async def test_pending_transaction(self):
+        from swarm_provenance_mcp.chain.exceptions import ChainTransactionError
+
+        class TimeExhausted(Exception):
+            pass
+
+        error = ChainTransactionError(
+            "receipt wait failed", tx_hash="0x" + "ef" * 32, broadcast=True
+        )
+        error.__cause__ = TimeExhausted("receipt not found within 120 s")
+
+        def configure(c):
+            c.anchor_for.side_effect = error
+
+        result, text, client = await _call(dict(self.COMBINED), configure)
+        assert result.isError
+        assert "Transaction outcome unknown" in text
+        assert "Do not send it again" in text
+        assert "0x" + "ef" * 32 in text
+        assert "_next: verify_hash" in text
+        client.anchor_for.assert_called_once_with(
+            HASH, OWNER, "swarm-provenance", REF
+        )
+
+    async def test_insufficient_funds(self):
+        from swarm_provenance_mcp.chain.exceptions import ChainTransactionError
+
+        def configure(c):
+            c.chain = "base-sepolia"
+            c.anchor_for.side_effect = ChainTransactionError(
+                "insufficient funds for gas * price + value"
+            )
+
+        result, text, _ = await _call(dict(self.COMBINED), configure)
+        assert result.isError
+        assert "anchor_hash failed — wallet has insufficient funds for gas" in text
+        assert f"Wallet: {WALLET}" in text
+        assert "_next: chain_balance" in text
+
+
+class TestCombinedSameRefShowsTheLink:
+    async def test_storage_ref_line_on_the_owner_path(self):
+        def configure(c):
+            c.anchor_for.side_effect = _registered(OWNER, storage_ref=REF.upper())
+
+        result, text, _ = await _call(
+            {"swarm_hash": HASH, "owner": OWNER, "storage_ref": REF}, configure
+        )
+        assert not result.isError, text
+        assert f"   Storage Ref: {REF}\n" in text
+
+    async def test_ref_given_with_0x_is_printed_without_it(self):
+        # Only a 64-hex record value can match; the cleaned request is printed.
+        def configure(c):
+            c.anchor_for.side_effect = _registered(OWNER, storage_ref=REF)
+
+        _, text, _ = await _call(
+            {"swarm_hash": HASH, "owner": OWNER, "storage_ref": "0x" + REF},
+            configure,
+        )
+        assert f"   Storage Ref: {REF}\n" in text

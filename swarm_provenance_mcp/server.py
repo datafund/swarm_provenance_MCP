@@ -2006,7 +2006,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="list_stamps",
-                description=f"List postage stamps available on the gateway. Each stamp includes its access mode: shared (public, any gateway user can upload to it), owned (registered to the wallet that paid for it) or pool (gateway inventory). This server sends no wallet, so the gateway refuses its uploads to owned and pool stamps: use a shared stamp. Each stamp's Status says whether this server can upload to it and, if not, why: not usable by this server (pool, owned or another access mode), not usable yet (may still be propagating: poll check_stamp_health, do not buy another) or cannot become usable ({_SPENT_REASONS_PHRASE}). Also shows expiration.",
+                description=f"List postage stamps available on the gateway. Each stamp includes its access mode: shared (public, any gateway user can upload to it), owned (registered to the wallet that paid for it) or pool (gateway inventory). This server sends no wallet, so the gateway refuses its uploads to owned and pool stamps: use a shared stamp. Each stamp's Status says whether this server can upload to it and, if not, why: not usable by this server (pool, owned or another access mode), not usable yet (may still be propagating: poll check_stamp_health, do not buy another), cannot become usable ({_SPENT_REASONS_PHRASE}) or cannot be used because its batch ID is not in the expected format. If the stamp list is unknown or incomplete, do not buy a stamp: follow _next. Also shows expiration.",
                 inputSchema={"type": "object", "properties": {}, "required": []},
             ),
             Tool(
@@ -2572,6 +2572,7 @@ def create_server() -> Server:
                                 "   - Stamps with low TTL → extend_stamp to add time\n"
                                 "   - Stamps marked 'Not usable yet' → poll check_stamp_health; do not buy another while they propagate\n"
                                 "   - No usable stamps and none pending → purchase_stamp\n"
+                                "   - The stamp list is unknown or incomplete, or a stamp has an access mode the gateway does not document → do not buy; follow _next\n"
                                 "5. Summarize the inventory status and recommended actions"
                             ),
                         ),

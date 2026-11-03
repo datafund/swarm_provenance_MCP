@@ -1561,6 +1561,50 @@ class TestBatchIdNeededToUpload:
         assert "The stamp list is incomplete" in text
 
 
+class TestAgentTextsNeverBuyOnUnknownLists:
+    def test_stamp_management_prompt(self):
+        import asyncio
+
+        from mcp.types import GetPromptRequest, GetPromptRequestParams
+
+        result = asyncio.run(
+            create_server().request_handlers[GetPromptRequest](
+                GetPromptRequest(
+                    method="prompts/get",
+                    params=GetPromptRequestParams(name="stamp-management", arguments={}),
+                )
+            )
+        ).root
+        text = result.messages[0].content.text
+        assert "No usable stamps and none pending → purchase_stamp" in text
+        assert (
+            "The stamp list is unknown or incomplete, or a stamp has an access mode "
+            "the gateway does not document → do not buy; follow _next"
+        ) in text
+
+    def test_list_stamps_description(self):
+        import asyncio
+
+        from mcp.types import ListToolsRequest
+
+        tools = asyncio.run(
+            create_server().request_handlers[ListToolsRequest](
+                ListToolsRequest(method="tools/list")
+            )
+        ).root.tools
+        desc = next(t for t in tools if t.name == "list_stamps").description
+        assert "If the stamp list is unknown or incomplete, do not buy a stamp" in desc
+
+    def test_docs(self):
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        readme = (root / "README.md").read_text()
+        skills = (root / "swarm_provenance_mcp" / "SKILLS.md").read_text()
+        assert "an unknown or incomplete stamp list gives `_next: health_check`" in readme
+        assert "when no stamp is usable or pending and the list is complete" in skills
+
+
 class TestRound9:
     @pytest.mark.parametrize("junk", ["garbage", 7, None, [FORGED]], ids=_hostile_id)
     async def test_mixed_list_without_usable_stamp_is_incomplete(self, server, junk):

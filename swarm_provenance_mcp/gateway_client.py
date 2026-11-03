@@ -48,7 +48,9 @@ class GatewayAnswerUnreadable(requests.exceptions.InvalidJSONError):
 
 _UNREADABLE = "The gateway's answer could not be read"
 
-# Readable causes, by exception class. Any other class is named by its name.
+# Readable causes, by exception class. Any other cause reads "it is in an
+# unexpected form" (or, for a plain ValueError, "it holds a number too long
+# to convert").
 _UNREADABLE_CAUSES = {
     RecursionError: "it is nested too deeply",
     requests.exceptions.JSONDecodeError: "it is not valid JSON",

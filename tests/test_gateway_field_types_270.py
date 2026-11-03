@@ -7,6 +7,8 @@ whole body, nested objects, list entries and each field.
 """
 
 import copy
+import http.client
+import io
 from unittest.mock import patch
 
 import pytest
@@ -401,6 +403,8 @@ class TestBranchDecisionsUseCheckedValues:
             # One recommendation, which does not say both "retrying will not
             # help" and "call health_check again".
             assert "retrying will not help" not in text
+            assert "The gateway operator must fix this." in text
+            assert "until health_check shows the Swarm network as connected." in text
             assert "\u2014" not in text.split("_recommendations:", 1)[1]
 
     async def test_degraded_network_without_usable_stamp_keeps_text(self, server):
@@ -685,6 +689,238 @@ class TestUnreadable2xxWriteAnswer:
         assert _is_ambiguous_write_error(error) is True
 
 
+class _TruncatedBody(io.RawIOBase):
+    """A body that stops part way, as a chunked answer cut off by the peer."""
+
+    def __init__(self):
+        self.sent = False
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        if self.sent:
+            raise http.client.IncompleteRead(b"", 100)
+        self.sent = True
+        data = b'{"batchID": "ab'
+        buffer[: len(data)] = data
+        return len(data)
+
+
+def _raw(body, headers=None, status=200):
+    """A urllib3 response that requests reads like one from the network."""
+    from urllib3.response import HTTPResponse
+
+    return HTTPResponse(
+        body=body,
+        headers=headers or {"Content-Type": "application/json"},
+        status=status,
+        preload_content=False,
+        decode_content=True,
+    )
+
+
+# Each one a 2xx answer whose body arrives but cannot be read or parsed.
+BROKEN_BODIES = {
+    "int-over-4300-digits": lambda: _raw(io.BytesIO(b'{"batchID": 1' + b"1" * 5000 + b"}")),
+    "corrupt-gzip": lambda: _raw(
+        io.BytesIO(b"not gzip data"),
+        {"Content-Type": "application/json", "Content-Encoding": "gzip"},
+    ),
+    "truncated-chunked": lambda: _raw(
+        _TruncatedBody(),
+        {"Content-Type": "application/json", "Transfer-Encoding": "chunked"},
+    ),
+    "deep-nesting": lambda: _raw(io.BytesIO(b"[" * 100_000)),
+    "not-json": lambda: _raw(io.BytesIO(b"<html>oops</html>")),
+}
+
+
+def _base():
+    from swarm_provenance_mcp import server as srv
+
+    return srv.gateway_client.base_url
+
+
+class TestUnreadableBodyRealClientPath:
+    """Real requests.Response objects through the real client: only the
+    transport is mocked, so requests reads, decodes and parses the body."""
+
+    @pytest.mark.parametrize("kind", sorted(BROKEN_BODIES))
+    async def test_purchase(self, server, requests_mock, kind):
+        requests_mock.post(f"{_base()}/api/v1/stamps/", raw=BROKEN_BODIES[kind]())
+        result = await call_tool_directly(
+            server, "purchase_stamp", {"duration_hours": 24, "label": "run-1"}
+        )
+        text = result.content[0].text
+        assert result.isError
+        assert "Stamp purchase outcome unknown" in text, text
+        assert "retryable: false" in text
+        assert _next_lines(text) == ["_next: list_stamps"]
+        assert "Validation error" not in text
+
+    @pytest.mark.parametrize("kind", sorted(BROKEN_BODIES))
+    async def test_extend(self, server, requests_mock, kind):
+        base = _base()
+        requests_mock.get(f"{base}/api/v1/stamps/{TEST_STAMP_ID}", json={"batchTTL": 86400})
+        requests_mock.patch(
+            f"{base}/api/v1/stamps/{TEST_STAMP_ID}/extend", raw=BROKEN_BODIES[kind]()
+        )
+        result = await call_tool_directly(
+            server, "extend_stamp", {"stamp_id": TEST_STAMP_ID, "duration_hours": 24}
+        )
+        text = result.content[0].text
+        assert result.isError
+        assert "Stamp extension outcome unknown" in text, text
+        assert "retryable: false" in text
+        assert _next_lines(text) == ["_next: get_stamp_status"]
+        assert "Validation error" not in text
+
+    @pytest.mark.parametrize("kind", sorted(BROKEN_BODIES))
+    @pytest.mark.parametrize(
+        "tool,path,arguments",
+        [
+            ("get_stamp_status", f"/api/v1/stamps/{TEST_STAMP_ID}", {"stamp_id": TEST_STAMP_ID}),
+            ("check_stamp_health", f"/api/v1/stamps/{TEST_STAMP_ID}/check", {"stamp_id": TEST_STAMP_ID}),
+            ("list_stamps", "/api/v1/stamps/", {}),
+            ("get_wallet_info", "/api/v1/wallet", {}),
+            ("health_check", "/", {}),
+        ],
+    )
+    async def test_read_tools(self, server, requests_mock, kind, tool, path, arguments):
+        requests_mock.get(f"{_base()}{path}", raw=BROKEN_BODIES[kind]())
+        result = await call_tool_directly(server, tool, arguments)
+        text = result.content[0].text
+        assert result.isError, text
+        assert "answer could not be read" in text, text
+        assert "Validation error" not in text
+        assert "Connection failed" not in text
+        assert "Error executing" not in text
+        assert "retryable: true" in text
+        assert len(_next_lines(text)) <= 1
+
+    @pytest.mark.parametrize("kind", sorted(BROKEN_BODIES))
+    def test_client_raises_one_type(self, requests_mock, kind):
+        from swarm_provenance_mcp.gateway_client import (
+            GatewayAnswerUnreadable,
+            SwarmGatewayClient,
+        )
+
+        client = SwarmGatewayClient("http://gw.test")
+        requests_mock.get("http://gw.test/api/v1/stamps/", raw=BROKEN_BODIES[kind]())
+        with pytest.raises(GatewayAnswerUnreadable) as caught:
+            client.list_stamps()
+        assert isinstance(caught.value, requests.exceptions.RequestException)
+        assert not isinstance(caught.value, ValueError)
+        response = caught.value.response
+        assert response is None or response.status_code == 200
+
+    def test_error_before_sending_is_not_ambiguous(self):
+        from swarm_provenance_mcp.server import _is_ambiguous_write_error
+
+        # requests refuses to serialise NaN before it sends anything.
+        with pytest.raises(requests.exceptions.InvalidJSONError) as caught:
+            requests.Request("POST", "http://gw.test/", json={"x": float("nan")}).prepare()
+        assert caught.value.response is None
+        assert _is_ambiguous_write_error(caught.value) is False
+
+    def test_unreadable_without_status_is_ambiguous(self):
+        from swarm_provenance_mcp.gateway_client import GatewayAnswerUnreadable
+        from swarm_provenance_mcp.server import _is_ambiguous_write_error
+
+        assert _is_ambiguous_write_error(GatewayAnswerUnreadable("x")) is True
+
+
+class TestBeeNetworkSummary:
+    async def _health_text(self, server, bee):
+        def health(h):
+            h["gateway_response"]["bee_node"] = bee
+            return h
+
+        result = await _run(
+            server,
+            "health_check",
+            {"health_check": health, "list_stamps": lambda b: _list_body(usable=True)},
+        )
+        return result.content[0].text
+
+    @pytest.mark.parametrize(
+        "bee",
+        [
+            {"connected_peers": "x"},
+            {"connected_peers": False, "network_availability": ["Unavailable"]},
+            {"healthy": "yes", "warming_up": "no", "network_availability": 5},
+            {"connected_peers": float("nan"), "healthy": None},
+        ],
+    )
+    async def test_no_valid_state_is_not_reported(self, server, bee):
+        text = await self._health_text(server, bee)
+        assert "🐝 Swarm network: not reported by gateway\n" in text
+        assert "connected (" not in text
+        assert _next_lines(text) == ["_next: upload_data"]
+
+    async def test_invalid_values_are_not_printed(self, server):
+        bee = {"healthy": True, "connected_peers": False,
+               "network_availability": ["Unavailable"], "reachability": 7}
+        text = await self._health_text(server, bee)
+        assert "🐝 Swarm network: connected (no details reported)\n" in text
+        assert "False peers" not in text and "Unavailable" not in text
+
+    async def test_valid_values_still_printed(self, server):
+        bee = {"connected_peers": 5, "network_availability": "Available",
+               "reachability": "Public"}
+        text = await self._health_text(server, bee)
+        assert "connected (5 peers, availability Available, reachability Public)" in text
+
+
+class TestEstimatedReadyMustBeText:
+    @pytest.mark.parametrize("value", [True, 5, ["2026"], {"a": 1}, "   "], ids=_hostile_id)
+    async def test_check_stamp_health(self, server, value):
+        def body(b):
+            b["propagationStatus"] = "propagating"
+            b["estimatedReadyAt"] = value
+            return b
+
+        text = (await _run(server, "check_stamp_health", {"check_stamp_health": body})).content[0].text
+        assert "Estimated ready" not in text
+        assert "If recently purchased, the stamp is propagating" in text
+
+    @pytest.mark.parametrize("value", [True, 5, ["2026"], {"a": 1}, "   "], ids=_hostile_id)
+    async def test_get_stamp_status(self, server, value):
+        def body(b):
+            b["estimatedReadyAt"] = value
+            return b
+
+        text = (await _run(server, "get_stamp_status", {"get_stamp_details": body})).content[0].text
+        assert "ready at" not in text
+
+    @pytest.mark.parametrize("value", [True, 5, ["2026"], {"a": 1}, "   "], ids=_hostile_id)
+    async def test_purchase_stamp(self, server, value):
+        def body(b):
+            b["estimatedReadyAt"] = value
+            return b
+
+        text = (await _run(server, "purchase_stamp", {"purchase_stamp": body})).content[0].text
+        assert "estimated ready at" not in text
+        assert "may need" in text
+
+    async def test_text_value_unchanged(self, server):
+        text = (await _run(server, "check_stamp_health", {
+            "check_stamp_health": _with(propagationStatus="propagating")
+        })).content[0].text
+        assert "   Estimated ready: 2026-11-03T10:00:00Z\n" in text
+        assert "Estimated ready at 2026-11-03T10:00:00Z." in text
+
+    async def test_extend_prints_clean_batch_id(self, server):
+        def body(b):
+            b["batchID"] = "0x" + TEST_STAMP_ID
+            return b
+
+        text = (await _run(server, "extend_stamp", {"extend_stamp": body})).content[0].text
+        assert f"Batch ID: `{TEST_STAMP_ID}`" in text
+        assert "0x" not in text
+
+
 # Full output for valid gateway answers, captured from the code before #270
 # (one entry changed on purpose, marked below).
 GOLDEN = {
@@ -786,7 +1022,7 @@ GOLDEN = {
         '\n'
         'ready: false\n'
         '_recommendations:\n'
-        "  - The gateway's Bee node cannot reliably reach the Swarm network: uploads may never propagate and only data stored on this node can be downloaded. Operator action required. Call health_check again after the gateway operator fixes the Bee node's network connection, and do not upload until it reports the Swarm network as connected.\n"
+        "  - The gateway's Bee node cannot reliably reach the Swarm network: uploads may never propagate and only data stored on this node can be downloaded. The gateway operator must fix this. Call health_check again after the gateway operator fixes the Bee node's network connection, and do not upload until health_check shows the Swarm network as connected.\n"
         '_gateway: http://localhost:8000 (connected)\n'
         '\n'
         '_next: health_check\n'

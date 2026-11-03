@@ -34,7 +34,11 @@ from requests.exceptions import RequestException
 
 from . import bmt
 from .config import WALLET_KEY_HINT, is_plain_http_remote, settings
-from .gateway_client import PaymentRequiredError, SwarmGatewayClient
+from .gateway_client import (
+    GatewayAnswerUnreadable,
+    PaymentRequiredError,
+    SwarmGatewayClient,
+)
 from .redact import mask_literal_urls, redact_urls, rpc_host, url_without_userinfo
 from .untrusted import (
     MAX_EXCEPTION_CHARS,
@@ -62,6 +66,12 @@ def _flag_text(value: Any) -> str:
 # How a tool describes a gateway answer, or part of one, of the wrong type.
 # The value itself is never printed.
 _NOT_EXPECTED_FORMAT = "the gateway's answer is not in the expected format"
+
+
+def _ready_at(value: Any) -> str:
+    """A gateway estimatedReadyAt for printing: only text, through _gw;
+    "" for any other type, so callers fall back to their no-estimate text."""
+    return _gw(value) if isinstance(value, str) else ""
 
 
 def _number_in(value: Any, low: float, high: float) -> Optional[Union[int, float]]:
@@ -909,7 +919,8 @@ def _is_retryable_error(e: Exception) -> bool:
     """Determine if an exception represents a transient, retryable error."""
     from requests.exceptions import ConnectionError as ReqConnectionError, Timeout
 
-    if isinstance(e, (ReqConnectionError, Timeout)):
+    if isinstance(e, (ReqConnectionError, Timeout, GatewayAnswerUnreadable)):
+        # An unreadable answer may be a one-off: reading again can work.
         return True
     if (
         isinstance(e, RequestException)
@@ -946,20 +957,36 @@ def _is_ambiguous_write_error(e: Exception) -> bool:
     A read timeout or a proxy 502/504 means the request reached the gateway,
     which may have finished it (bought or topped up a batch) after the client
     stopped waiting. A connect failure means it never arrived, so it is not
-    ambiguous.
+    ambiguous. An error raised before the request is sent (for example
+    requests refusing to serialise the body, a plain InvalidJSONError with
+    no response) is not ambiguous either.
     """
     from requests.exceptions import (
         ChunkedEncodingError,
         ConnectTimeout,
-        InvalidJSONError,
+        ContentDecodingError,
+        JSONDecodeError,
         ReadTimeout,
     )
     from requests.exceptions import ConnectionError as ReqConnectionError
 
-    if isinstance(e, (ReadTimeout, ChunkedEncodingError, InvalidJSONError)):
-        # InvalidJSONError (JSONDecodeError included): the client raises it
-        # only after a 2xx, for a body it cannot parse, for example one
-        # nested too deeply. The write succeeded.
+    response = getattr(e, "response", None)
+    status = getattr(response, "status_code", None)
+    if isinstance(
+        e,
+        (
+            GatewayAnswerUnreadable,
+            JSONDecodeError,
+            ContentDecodingError,
+            ChunkedEncodingError,
+        ),
+    ):
+        # The answer arrived but its body could not be read or parsed. The
+        # gateway client raises GatewayAnswerUnreadable for every such cause;
+        # the requests classes it wraps are listed for callers that bypass
+        # it. Ambiguous unless the status is known and is an error status.
+        return not isinstance(status, int) or 200 <= status < 300
+    if isinstance(e, ReadTimeout):
         return True
     if isinstance(e, ReqConnectionError) and not isinstance(e, ConnectTimeout):
         # Dropped after sending ("Connection aborted", RemoteDisconnected), or
@@ -971,10 +998,8 @@ def _is_ambiguous_write_error(e: Exception) -> bool:
             marker in text
             for marker in ("Connection aborted", "RemoteDisconnected", "Read timed out")
         )
-    response = getattr(e, "response", None)
     if response is None:
         return False
-    status = getattr(response, "status_code", None)
     # Any error that carries a 2xx answer came after the write succeeded.
     # 500 too: the gateway returns it for errors raised after the purchase call.
     return isinstance(status, int) and (200 <= status < 300 or status in (500, 502, 504))
@@ -1435,6 +1460,10 @@ def _bee_advisories(gateway_response: Dict[str, Any]) -> List[str]:
     return [str(w) for w in warnings] if isinstance(warnings, list) else []
 
 
+# connected_peers above this is not a real count.
+MAX_BEE_PEERS = 10**6
+
+
 def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Summarise whether the gateway's Bee node can reach the Swarm network.
@@ -1452,21 +1481,26 @@ def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, 
     ``ok``.
     """
     bee = gateway_response.get("bee_node")
-    state_keys = ("healthy", "network_availability", "connected_peers", "warming_up")
-    if not isinstance(bee, dict) or not any(k in bee for k in state_keys):
+    if not isinstance(bee, dict):
+        return None
+    # Only values of the right type count, for the decision and the summary.
+    # A bee_node with none of them counts as not reported.
+    peers = _number_in(bee.get("connected_peers"), 0, MAX_BEE_PEERS)
+    availability = bee.get("network_availability")
+    if not isinstance(availability, str):
+        availability = None
+    flags = [bee.get(k) for k in ("healthy", "warming_up")]
+    if peers is None and availability is None and not any(
+        isinstance(flag, bool) for flag in flags
+    ):
         return None
 
-    peers = bee.get("connected_peers")
-    availability = bee.get("network_availability")
     problems = []
     if bee.get("healthy") is False:
         problems.append("gateway reports the Bee node unhealthy")
-    # Only a text value other than "Available" is a problem; a value of
-    # another type says nothing about the network.
-    if isinstance(availability, str) and availability != "Available":
+    if availability is not None and availability != "Available":
         problems.append(f"network availability is {_gw(availability)}")
-    # Only a real number counts: False or "0" says nothing about the peers.
-    if _number_in(peers, 0, 0) is not None:
+    if peers == 0:
         problems.append("Bee node has no connected peers")
     if bee.get("warming_up") is True:
         problems.append("Bee node is still warming up")
@@ -1477,8 +1511,9 @@ def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, 
         parts.append(f"{_gw(peers)} peers")
     if availability:
         parts.append(f"availability {_gw(availability)}")
-    if bee.get("reachability"):
-        parts.append(f"reachability {_gw(bee['reachability'])}")
+    reachability = bee.get("reachability")
+    if isinstance(reachability, str) and reachability:
+        parts.append(f"reachability {_gw(reachability)}")
     return {
         "ok": not problems,
         "summary": ", ".join(parts) or "no details reported",
@@ -2605,11 +2640,11 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"\n✅ Stamp ID: `{batch_id}`\n"
 
         propagation_status = result.get("propagationStatus")
-        estimated_ready = result.get("estimatedReadyAt")
+        estimated_ready = _ready_at(result.get("estimatedReadyAt"))
         if propagation_status == "ready":
             response_text += "⏱️  Stamp is ready immediately (from the gateway pool).\n"
         elif propagation_status == "propagating" and estimated_ready:
-            response_text += f"⏱️  Stamp is propagating — estimated ready at {_gw(estimated_ready)}.\n"
+            response_text += f"⏱️  Stamp is propagating — estimated ready at {estimated_ready}.\n"
             response_text += (
                 "   → Use check_stamp_health to confirm it's ready before uploading."
             )
@@ -2798,7 +2833,7 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         # Propagation timing (from gateway, when available)
         propagation_status = result.get("propagationStatus")
         seconds_since = result.get("secondsSincePurchase")
-        estimated_ready = result.get("estimatedReadyAt")
+        estimated_ready = _ready_at(result.get("estimatedReadyAt"))
 
         if propagation_status:
             response_text += f"Propagation: {_gw(propagation_status)}"
@@ -2807,7 +2842,7 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
                 shown = f"{age}s" if age is not None else _gw(seconds_since, 20) or "N/A"
                 response_text += f" ({shown} since purchase)"
             if estimated_ready and propagation_status == "propagating":
-                response_text += f" — ready at {_gw(estimated_ready)}"
+                response_text += f" — ready at {estimated_ready}"
             response_text += "\n"
 
         # Contextual hints based on usability
@@ -3025,8 +3060,12 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         response_text = f"✅ Stamp extended successfully!\n\n"
         response_text += f"📋 Extension Details:\n"
         batch_id = result.get("batchID")
-        if not _is_gateway_batch_id(batch_id):
-            batch_id = "N/A"
+        # Printed as 64 hexadecimal characters, without 0x.
+        batch_id = (
+            validate_and_clean_stamp_id(batch_id)
+            if _is_gateway_batch_id(batch_id)
+            else "N/A"
+        )
         response_text += f"   Batch ID: `{batch_id}`\n"
         response_text += f"   Additional Duration: {duration_hours} hours\n"
         message = result.get("message")
@@ -3678,10 +3717,10 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     # The degraded network blocks uploads to a usable stamp.
                     # One recommendation that agrees with _next.
                     recommendations[network_rec] = (
-                        _NETWORK_DEGRADED_TEXT + " Operator action required. Call "
-                        "health_check again after the gateway operator fixes the "
-                        "Bee node's network connection, and do not upload until it "
-                        "reports the Swarm network as connected."
+                        _NETWORK_DEGRADED_TEXT + " The gateway operator must fix "
+                        "this. Call health_check again after the gateway operator "
+                        "fixes the Bee node's network connection, and do not upload "
+                        "until health_check shows the Swarm network as connected."
                     )
                     next_tool = "health_check"
                 elif counts["pending"]:
@@ -3795,6 +3834,25 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
+    except GatewayAnswerUnreadable as e:
+        # The gateway answered: the connection works, the answer does not.
+        gateway_url = url_without_userinfo(settings.swarm_gateway_url)
+        error_msg = (
+            f"❌ Gateway answer unreadable\n\nError: {str(e)}\n"
+            f"Gateway: {gateway_url}\n\n"
+            "The gateway answered, but its answer could not be used. Call "
+            "health_check again; if this repeats, report it to the gateway operator."
+        )
+        logger.error(f"Health check failed: {str(e)}")
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(error_msg, retryable=True, next_tool="health_check"),
+                )
+            ],
+            isError=True,
+        )
     except RequestException as e:
         gateway_url = url_without_userinfo(settings.swarm_gateway_url)
         error_msg = f"❌ Connection failed!\n\n"
@@ -3902,7 +3960,7 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
         # Propagation timing (from gateway, when available)
         propagation_status = result.get("propagationStatus")
         seconds_since = result.get("secondsSincePurchase")
-        estimated_ready = result.get("estimatedReadyAt")
+        estimated_ready = _ready_at(result.get("estimatedReadyAt"))
 
         if propagation_status:
             response_text += f"\nPropagation:\n"
@@ -3912,7 +3970,7 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
                 shown = f"{age}s ago" if age is not None else _gw(seconds_since, 20) or "N/A"
                 response_text += f"   Purchased: {shown}\n"
             if estimated_ready:
-                response_text += f"   Estimated ready: {_gw(estimated_ready)}\n"
+                response_text += f"   Estimated ready: {estimated_ready}\n"
 
         # Contextual hints based on health
         if can_upload:
@@ -3938,7 +3996,7 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
             if is_propagating:
                 if estimated_ready:
                     response_text += (
-                        f"\n💡 Stamp is propagating. Estimated ready at {_gw(estimated_ready)}. "
+                        f"\n💡 Stamp is propagating. Estimated ready at {estimated_ready}. "
                         "Retry check_stamp_health in 15 seconds."
                     )
                 else:

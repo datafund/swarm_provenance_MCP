@@ -7033,7 +7033,7 @@ class TestSwarmNetworkStatus:
         assert "Swarm network: DEGRADED" in text
         assert "no connected peers" in text
         assert "ready: false" in text
-        assert "Operator action required" in text
+        assert "The gateway operator must fix this." in text
         assert "_next: upload_data" not in text
 
     async def test_unavailable_network_and_warnings_surface(self, server):

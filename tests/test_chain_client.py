@@ -2410,3 +2410,162 @@ class TestMergeTransformResultModel:
             new_data_type="merged",
         )
         assert result.explorer_url is None
+
+
+class TestAnchorForStorageRef167:
+    """#167: anchor_for links a storage ref through the four-argument
+    registerDataFor overload."""
+
+    OWNER = "0x1111111111111111111111111111111111111111"
+    REF = "c" * 64
+
+    def _client(self):
+        from swarm_provenance_mcp.chain.client import ChainClient
+
+        client = ChainClient.__new__(ChainClient)
+        client._wallet = MagicMock()
+        client._wallet.address = DUMMY_ADDRESS
+        client._contract = MagicMock()
+        client._contract.build_register_data_for_tx.return_value = {"data": "0x"}
+        client._contract.build_register_data_tx.return_value = {"data": "0x"}
+        client._contract.build_register_data_with_storage_ref_tx.return_value = {
+            "data": "0x"
+        }
+        client._provider = MagicMock()
+        client._receipt_to_explorer_url = MagicMock(return_value=None)
+        client.get = MagicMock(
+            side_effect=DataNotRegisteredError("not found", data_hash=DUMMY_HASH)
+        )
+        client._send_transaction = MagicMock(
+            return_value={
+                "transactionHash": DUMMY_TX_HASH_BYTES,
+                "blockNumber": 1,
+                "gasUsed": 2,
+            }
+        )
+        return client
+
+    def test_storage_ref_uses_the_overload_and_requires_the_link_event(self):
+        client = self._client()
+        result = client.anchor_for(
+            DUMMY_HASH, self.OWNER, "swarm-provenance", storage_ref=self.REF
+        )
+        client._contract.build_register_data_for_tx.assert_called_once_with(
+            data_hash=DUMMY_HASH,
+            data_type="swarm-provenance",
+            actual_owner=self.OWNER,
+            sender=DUMMY_ADDRESS,
+            storage_ref=self.REF,
+        )
+        expected = client._send_transaction.call_args.args[1]
+        assert expected == [
+            ("DataRegistered", {"dataHash": DUMMY_HASH, "owner": self.OWNER}),
+            ("StorageRefLinked", {"dataHash": DUMMY_HASH, "storageRef": self.REF}),
+        ]
+        assert result.storage_ref == self.REF
+        assert result.owner == self.OWNER
+
+    def test_without_storage_ref_the_call_is_unchanged(self):
+        client = self._client()
+        result = client.anchor_for(DUMMY_HASH, self.OWNER)
+        client._contract.build_register_data_for_tx.assert_called_once_with(
+            data_hash=DUMMY_HASH,
+            data_type="swarm-provenance",
+            actual_owner=self.OWNER,
+            sender=DUMMY_ADDRESS,
+        )
+        assert client._send_transaction.call_args.args[1] == [
+            ("DataRegistered", {"dataHash": DUMMY_HASH, "owner": self.OWNER})
+        ]
+        assert result.storage_ref is None
+
+    def test_stale_read_revert_is_already_registered(self):
+        client = self._client()
+        record = MagicMock(
+            owner=self.OWNER,
+            timestamp=1700000000,
+            data_type="t",
+            storage_ref=self.REF,
+        )
+        client.get = MagicMock(
+            side_effect=[
+                DataNotRegisteredError("not found", data_hash=DUMMY_HASH),
+                record,
+            ]
+        )
+        client._send_transaction.side_effect = ChainTransactionError(
+            "execution reverted: Data already registered"
+        )
+        with pytest.raises(DataAlreadyRegisteredError) as exc_info:
+            client.anchor_for(DUMMY_HASH, self.OWNER, storage_ref=self.REF)
+        assert exc_info.value.owner == self.OWNER
+        assert exc_info.value.storage_ref == self.REF
+
+    def test_other_revert_is_raised_unchanged(self):
+        client = self._client()
+        error = ChainTransactionError("execution reverted: Not authorized delegate")
+        client._send_transaction.side_effect = error
+        with pytest.raises(ChainTransactionError) as exc_info:
+            client.anchor_for(DUMMY_HASH, self.OWNER)
+        assert exc_info.value is error
+
+    @pytest.mark.parametrize("method", ["anchor", "anchor_for"])
+    def test_precheck_error_carries_the_records_storage_ref(self, method):
+        client = self._client()
+        record = MagicMock(
+            owner=DUMMY_ADDRESS, timestamp=1, data_type="t", storage_ref=self.REF
+        )
+        client.get = MagicMock(return_value=record)
+        args = (DUMMY_HASH,) if method == "anchor" else (DUMMY_HASH, self.OWNER)
+        with pytest.raises(DataAlreadyRegisteredError) as exc_info:
+            getattr(client, method)(*args)
+        assert exc_info.value.storage_ref == self.REF
+        client._send_transaction.assert_not_called()
+
+    def test_anchor_stale_read_revert_carries_the_storage_ref(self):
+        client = self._client()
+        record = MagicMock(
+            owner=DUMMY_ADDRESS, timestamp=1, data_type="t", storage_ref=self.REF
+        )
+        client.get = MagicMock(
+            side_effect=[
+                DataNotRegisteredError("not found", data_hash=DUMMY_HASH),
+                record,
+            ]
+        )
+        client._send_transaction.side_effect = ChainTransactionError(
+            "Data already registered"
+        )
+        with pytest.raises(DataAlreadyRegisteredError) as exc_info:
+            client.anchor(DUMMY_HASH, storage_ref=self.REF)
+        assert exc_info.value.storage_ref == self.REF
+
+    def test_contract_builds_the_four_argument_overload(self):
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract.__new__(DataProvenanceContract)
+        contract._web3 = MagicMock()
+        contract._web3.to_checksum_address = lambda a: a
+        contract._contract = MagicMock()
+        contract.build_register_data_for_tx(
+            DUMMY_HASH, "t", self.OWNER, DUMMY_ADDRESS, storage_ref=self.REF
+        )
+        contract._contract.functions.registerDataFor.assert_called_once_with(
+            DUMMY_HASH_BYTES, "t", self.OWNER, bytes.fromhex(self.REF)
+        )
+
+    def test_contract_without_storage_ref_builds_three_arguments(self):
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract.__new__(DataProvenanceContract)
+        contract._web3 = MagicMock()
+        contract._web3.to_checksum_address = lambda a: a
+        contract._contract = MagicMock()
+        contract.build_register_data_for_tx(DUMMY_HASH, "t", self.OWNER, DUMMY_ADDRESS)
+        contract._contract.functions.registerDataFor.assert_called_once_with(
+            DUMMY_HASH_BYTES, "t", self.OWNER
+        )
+
+    def test_already_registered_error_storage_ref_defaults_to_none(self):
+        e = DataAlreadyRegisteredError("x", data_hash=DUMMY_HASH)
+        assert e.storage_ref is None

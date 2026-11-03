@@ -6530,12 +6530,12 @@ class TestAnchorHashWithStorageRef:
             TEST_REFERENCE, "swarm-provenance", None
         )
 
-    async def test_anchor_with_owner_rejects_storage_ref(self, server):
-        """anchor_for has no storage_ref variant, so owner + storage_ref is
-        refused instead of silently dropping the storage ref."""
+    async def test_anchor_with_owner_keeps_storage_ref(self, server):
+        """owner + storage_ref uses the four-argument registerDataFor
+        overload, so the storage ref is linked for the owner (#167)."""
         delegate_owner = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
         mock_client = MagicMock()
-        mock_result = self._mock_anchor_result(storage_ref=None)
+        mock_result = self._mock_anchor_result(storage_ref=TEST_STORAGE_REF)
         mock_result.owner = delegate_owner
         mock_client.anchor_for.return_value = mock_result
         mock_client.balance.return_value = self._mock_wallet_info()
@@ -6554,9 +6554,13 @@ class TestAnchorHashWithStorageRef:
                 },
             )
 
-        assert result.isError
-        assert "storage_ref cannot be combined with owner" in result.content[0].text
-        mock_client.anchor_for.assert_not_called()
+        assert not result.isError
+        text = result.content[0].text
+        assert f"Storage Ref: {TEST_STORAGE_REF}" in text
+        assert f"Owner: {delegate_owner}" in text
+        mock_client.anchor_for.assert_called_once_with(
+            TEST_REFERENCE, delegate_owner, "swarm-provenance", TEST_STORAGE_REF
+        )
         mock_client.anchor.assert_not_called()
 
 

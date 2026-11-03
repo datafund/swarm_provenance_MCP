@@ -442,15 +442,43 @@ class TestConfirmation:
         )
         client.anchor.assert_not_called()
 
-    async def test_owner_with_storage_ref_rejected(self, mainnet_server):
+    async def test_owner_with_storage_ref_is_quoted_with_both(self, mainnet_server):
+        server, client = mainnet_server
+        owner = "0x" + "ab" * 20
+        args = {"swarm_hash": H1, "owner": owner, "storage_ref": H2}
+        quote = await server.handle_anchor_hash(args)
+        text = quote.content[0].text
+        assert f'owner: "{owner}"' in text
+        assert f'storage_ref: "{H2}"' in text
+        client.anchor_for.assert_not_called()
+        await server.handle_anchor_hash(
+            {**args, "confirm": True, "quote_id": _quote_id(quote)}
+        )
+        client.anchor_for.assert_called_once_with(H1, owner, "swarm-provenance", H2)
+
+    async def test_owner_only_quote_does_not_cover_storage_ref(self, mainnet_server):
+        server, client = mainnet_server
+        owner = "0x" + "ab" * 20
+        quote = await server.handle_anchor_hash({"swarm_hash": H1, "owner": owner})
+        await server.handle_anchor_hash(
+            {
+                "swarm_hash": H1,
+                "owner": owner,
+                "storage_ref": H2,
+                "confirm": True,
+                "quote_id": _quote_id(quote),
+            }
+        )
+        client.anchor_for.assert_not_called()
+
+    async def test_refused_input_gets_no_quote(self, mainnet_server):
         server, client = mainnet_server
         result = await server.handle_anchor_hash(
-            {"swarm_hash": H1, "owner": "0x" + "ab" * 20, "storage_ref": H2}
+            {"swarm_hash": H1, "owner": WALLET, "storage_ref": H2}
         )
         assert result.isError
-        assert "storage_ref cannot be combined with owner" in result.content[0].text
         assert "quote_id" not in result.content[0].text
-        client.anchor_for.assert_not_called()
+        client.fee_quote.assert_not_called()
 
     async def test_hash_case_and_empty_storage_ref_normalised(self, mainnet_server):
         server, client = mainnet_server

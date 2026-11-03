@@ -1990,15 +1990,20 @@ def create_server() -> Server:
                     Tool(
                         name="anchor_hash",
                         description=(
-                            "Register a Swarm reference hash on the blockchain, "
-                            "creating an immutable provenance record with owner, "
-                            "timestamp, and data type. Costs gas — requires a funded "
+                            "Register a hash on the blockchain, creating an "
+                            "immutable provenance record with owner, timestamp, and "
+                            "data type. Without storage_ref, swarm_hash is usually "
+                            "the Swarm reference from upload_data. With storage_ref, "
+                            "swarm_hash is the content hash (SHA-256 of the data) "
+                            "and storage_ref is the Swarm reference; the two must "
+                            "differ. Costs gas — requires a funded "
                             "wallet (check with chain_balance). If the hash is "
                             "already registered to the expected owner (owner, or the "
                             "wallet), it returns the existing record without error. "
                             "If another address owns it, the result is an error. With "
                             "storage_ref, an existing record of the expected owner "
-                            "counts only when it already links the same storage_ref; "
+                            "is a success only when it already links the same "
+                            "storage_ref; "
                             "otherwise the result is an error. owner and storage_ref "
                             "can be combined. Do not use this on hashes that will be "
                             "the new_hash in record_transform — record_transform "
@@ -2009,7 +2014,14 @@ def create_server() -> Server:
                             "properties": {
                                 "swarm_hash": {
                                     "type": "string",
-                                    "description": "64-character hexadecimal Swarm reference hash to anchor on-chain (without 0x prefix)",
+                                    "description": (
+                                        "64-character hexadecimal hash to anchor "
+                                        "on-chain (without 0x prefix). Without "
+                                        "storage_ref, usually the Swarm reference "
+                                        "from upload_data. With storage_ref, the "
+                                        "content hash (SHA-256 of the data); it must "
+                                        "differ from storage_ref."
+                                    ),
                                     "pattern": "^[a-fA-F0-9]{64}$",
                                 },
                                 "data_type": {
@@ -2040,8 +2052,9 @@ def create_server() -> Server:
                                     "type": "string",
                                     "description": (
                                         "Optional 64-character hex storage reference "
-                                        "(e.g. Swarm hash) to link bidirectionally "
-                                        "with the data hash. Enables reverse lookup "
+                                        "to link bidirectionally with swarm_hash: "
+                                        "the Swarm reference that upload_data "
+                                        "returned. Enables reverse lookup "
                                         "via lookup_by_storage_ref. Works with or "
                                         "without owner. Must differ from swarm_hash "
                                         "and must not be all zeros."
@@ -4380,9 +4393,9 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
                 msg += f"   Registered: {timestamp_str}\n"
                 msg += f"   Data Type: {quote(e.data_type)}\n\n"
                 msg += (
-                    "No transaction was sent. A storage reference is set "
-                    "once and only the record owner can set it, with "
-                    "set_storage_ref, when the record has none. Use "
+                    "No transaction was sent. Only the record owner can set "
+                    "a storage reference, and only once. If the record has "
+                    "none, the owner can set it with set_storage_ref. Use "
                     "get_provenance to see the record. To link a different "
                     "reference, change the content, upload it again, and "
                     "anchor the new hash.\n\n"

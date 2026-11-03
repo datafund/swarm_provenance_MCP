@@ -137,7 +137,7 @@ Combine multiple datasets into one with verifiable provenance linking all source
 
 Register data on Swarm and link both the content hash and Swarm reference on-chain for bidirectional lookup.
 
-The two values are different hashes. `swarm_hash` is the content hash you anchor: the SHA-256 of the data, as the SDK and CLI use it. Compute it yourself; `upload_data` does not return it. `storage_ref` is the Swarm reference that `upload_data` returns. It must differ from `swarm_hash`: `anchor_hash` refuses a `storage_ref` equal to `swarm_hash`, and so does the contract.
+The two values are different hashes. `swarm_hash` is the content hash you anchor: the SHA-256 of the data. The SDK anchors such a content hash; the CLI's `chain anchor` takes a Swarm reference hash and accepts `--storage-ref` for a linked reference. Compute the SHA-256 yourself; `upload_data` does not return it. `storage_ref` is the Swarm reference that `upload_data` returns. It must differ from `swarm_hash`: `anchor_hash` refuses a `storage_ref` equal to `swarm_hash`, and so does the contract.
 
 ```
 1. health_check              → verify gateway + chain connectivity

@@ -104,7 +104,9 @@ class TestHealthCheckCountsOnlyWritableStamps:
         assert "_next: upload_data" not in text
         # pool and owned are documented modes: buy. Any other mode is not
         # documented, so the stamp may be usable: check it first (#270).
-        expected = "purchase_stamp" if mode in ("pool", "owned") else "check_stamp_health"
+        expected = (
+            "purchase_stamp" if mode in ("pool", "owned") else "check_stamp_health"
+        )
         assert f"_next: {expected}" in text
         assert "0 usable by this server / 1 local" in text
 

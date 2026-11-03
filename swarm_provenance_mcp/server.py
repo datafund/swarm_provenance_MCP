@@ -1299,6 +1299,7 @@ def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
     }
     counts["pending_ids"] = []
     counts["other_ids"] = []
+    counts["other_unnamed"] = 0
     # Every stamp this server cannot use, usable or not, by kind.
     blocked = {"pool": 0, "owned": 0, "other": 0, "spent": 0}
     counts["blocked"] = blocked
@@ -1309,8 +1310,11 @@ def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
         if kind in ("pool", "owned", "other"):
             blocked[kind] += 1
             if kind == "other":
+                # Each valid ID once, in first-seen order.
                 other_id = _clean_gateway_batch_id(stamp.get("batchID"))
-                if other_id is not None:
+                if other_id is None:
+                    counts["other_unnamed"] += 1
+                elif other_id not in counts["other_ids"]:
                     counts["other_ids"].append(other_id)
             if stamp.get("usable") is True:
                 counts[kind] += 1
@@ -1342,7 +1346,9 @@ def _batch_ids_text(batch_ids: Sequence[str]) -> str:
 
 
 def _no_writable_stamp_text(
-    blocked: Dict[str, int], other_ids: Sequence[str] = ()
+    blocked: Dict[str, int],
+    other_ids: Sequence[str] = (),
+    other_unnamed: Optional[int] = None,
 ) -> str:
     """health_check recommendation when no stamp is writable, naming only the
     kinds of stamps actually listed."""
@@ -1376,7 +1382,9 @@ def _no_writable_stamp_text(
         )
         if other_ids:
             # Name the valid IDs; say how many of the stamps cannot be named.
-            unnamed = other - len(other_ids)
+            unnamed = (
+                other - len(other_ids) if other_unnamed is None else other_unnamed
+            )
             ids = _batch_ids_list(other_ids)
             if unnamed:
                 ids += (
@@ -3235,7 +3243,9 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += _format_hints("health_check", ["check_stamp_health"])
         else:
             if stamps:
-                text = _no_writable_stamp_text(counts["blocked"], counts["other_ids"])
+                text = _no_writable_stamp_text(
+                    counts["blocked"], counts["other_ids"], counts["other_unnamed"]
+                )
                 # The no-valid-ID text ends with the repeat sentence's period.
                 end = "" if text.endswith(".") else "."
                 response_text += f"\n💡 {text}{end}\n"
@@ -4055,7 +4065,11 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     next_tool = "list_stamps"
                 elif total_stamps > 0:
                     recommendations.append(
-                        _no_writable_stamp_text(counts["blocked"], counts["other_ids"])
+                        _no_writable_stamp_text(
+                            counts["blocked"],
+                            counts["other_ids"],
+                            counts["other_unnamed"],
+                        )
                     )
                     next_tool = _no_writable_stamp_next(
                         counts["blocked"], counts["other_ids"], "health_check"

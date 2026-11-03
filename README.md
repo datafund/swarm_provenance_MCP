@@ -636,9 +636,9 @@ The output also has a `Swarm network:` line: `connected (...)`, `DEGRADED (...)`
 `ready` is true only when the server has a usable stamp it can write to: a `shared` stamp, or one without an `accessMode` (older gateways). `pool` stamps (gateway inventory) and `owned` stamps (registered to the wallet that paid for them) are counted separately, because the gateway refuses writes from this server to them. A writable stamp that is not usable yet (still propagating) leads to `_next: check_stamp_health`, not to a purchase.
 
 Three more cases never lead to a purchase:
-- a degraded Swarm network with a usable stamp gives `_next: health_check`: call it again after the gateway operator fixes the Bee node's network connection;
-- an unknown or incomplete stamp list gives `_next: list_stamps`; if the same answer repeats, stop and report it to the gateway operator;
-- with no usable or pending stamp, a stamp with an access mode the gateway does not document gives `_next: check_stamp_health`, and the recommendation names its batch ID. If none of those stamps has a valid batch ID, no ID is named and the result does not recommend a purchase: `list_stamps` gives `_next: health_check` and `health_check` gives `_next: list_stamps`. If the same answer repeats, stop and report it to the gateway operator.
+- A degraded Swarm network with a usable stamp gives `_next: health_check`. Call it again after the gateway operator fixes the Bee node's network connection.
+- An unknown or incomplete stamp list gives `_next: list_stamps`. If the same answer repeats, stop and report it to the gateway operator.
+- An access mode the gateway does not document, with no usable or pending stamp, gives `_next: check_stamp_health`, and the recommendation names the stamp's batch ID. If none of those stamps has a valid batch ID, no ID is named and the result does not recommend a purchase: `list_stamps` gives `_next: health_check` and `health_check` gives `_next: list_stamps`. If the same answer repeats, stop and report it to the gateway operator.
 
 ### Safety behavior
 

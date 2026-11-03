@@ -330,8 +330,10 @@ class TestStampReadiness:
             "owned": 1,
             "other": 1,
             "pending_ids": [TEST_STAMP_ID],
-            # Valid batch IDs of stamps with an undocumented access mode (#270).
-            "other_ids": [TEST_STAMP_ID, TEST_STAMP_ID],
+            # Valid batch IDs of stamps with an undocumented access mode, once
+            # each, and how many such stamps have no valid batch ID (#270).
+            "other_ids": [TEST_STAMP_ID],
+            "other_unnamed": 0,
             "blocked": {"pool": 2, "owned": 2, "other": 2, "spent": 1},
         }
 
@@ -437,7 +439,10 @@ class TestRejectedAccessModeIsShown:
     @pytest.mark.parametrize(
         "mode,shown",
         # A mode that is not text is shown as N/A, never as its repr (#270).
-        [("", "(empty)"), ("   ", "(empty)"), (False, "N/A"), (0, "N/A"), ([], "N/A"), ({}, "N/A")],
+        [
+            ("", "(empty)"), ("   ", "(empty)"), (False, "N/A"), (0, "N/A"),
+            ([], "N/A"), ({}, "N/A"),
+        ],
     )
     async def test_falsy_mode_is_printed(self, server, mode, shown):
         text = await _list(server, [_stamp(mode)])

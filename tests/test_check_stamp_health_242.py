@@ -172,7 +172,9 @@ class TestGetStampStatusEveryField:
         details = dict(VALID_DETAILS)
         details[field] = FORGED
         # A non-bool usable leaves the state unknown: check it, never buy (#270).
-        expected = "_next: check_stamp_health" if field == "usable" else "_next: upload_data"
+        expected = (
+            "_next: check_stamp_health" if field == "usable" else "_next: upload_data"
+        )
         with patch("swarm_provenance_mcp.server.gateway_client") as gw:
             gw.get_stamp_details.return_value = details
             result = await call_tool_directly(

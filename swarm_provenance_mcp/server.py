@@ -1017,7 +1017,9 @@ def _is_ambiguous_write_error(e: Exception) -> bool:
         return False
     # Any error that carries a 2xx answer came after the write succeeded.
     # 500 too: the gateway returns it for errors raised after the purchase call.
-    return isinstance(status, int) and (200 <= status < 300 or status in (500, 502, 504))
+    return isinstance(status, int) and (
+        200 <= status < 300 or status in (500, 502, 504)
+    )
 
 
 def _as_sentence(reason: Any) -> str:
@@ -1229,7 +1231,9 @@ def _unreadable_entries_note(entries: int, no_id: int) -> str:
     parts = []
     if entries:
         verb = "are" if entries != 1 else "is"
-        parts.append(f"{_entries(entries)} in the stamp list {verb} not in the expected format")
+        parts.append(
+            f"{_entries(entries)} in the stamp list {verb} not in the expected format"
+        )
     if no_id:
         parts.append(_no_id_text(no_id))
     return "; ".join(parts)
@@ -2639,7 +2643,9 @@ def create_server() -> Server:
                                 "   - Stamps with low TTL → extend_stamp to add time\n"
                                 "   - Stamps marked 'Not usable yet' → poll check_stamp_health; do not buy another while they propagate\n"
                                 "   - No usable stamps and none pending → purchase_stamp\n"
-                                "   - The stamp list is unknown or incomplete, or a stamp has an access mode the gateway does not document → do not buy; follow _next\n"
+                                "   - The stamp list is unknown or incomplete, or a stamp "
+                                "has an access mode the gateway does not document → do "
+                                "not buy; follow _next\n"
                                 "5. Summarize the inventory status and recommended actions"
                             ),
                         ),
@@ -2810,7 +2816,9 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         if propagation_status == "ready":
             response_text += "⏱️  Stamp is ready immediately (from the gateway pool).\n"
         elif propagation_status == "propagating" and has_estimate:
-            response_text += f"⏱️  Stamp is propagating — estimated ready at {estimated_ready}.\n"
+            response_text += (
+                f"⏱️  Stamp is propagating — estimated ready at {estimated_ready}.\n"
+            )
             response_text += (
                 "   → Use check_stamp_health to confirm it's ready before uploading."
             )
@@ -2956,7 +2964,8 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         for name, key in (("Depth", "depth"), ("Bucket Depth", "bucketDepth")):
             depth = _plain_depth(result.get(key))
             if depth is None:
-                depth = _gw(result.get(key), 20) if _is_plain_int(result.get(key)) else "N/A"
+                raw = result.get(key)
+                depth = _gw(raw, 20) if _is_plain_int(raw) else "N/A"
             response_text += f"{name}: {depth}\n"
         block = _number_in(result.get("blockNumber"), 0, MAX_BLOCK_NUMBER)
         if block is None:
@@ -3202,14 +3211,14 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
         elif unreadable or no_id:
             # An entry it cannot read may be the stamp to use: never buy.
             response_text += (
-                f"\n💡 {_stamp_list_incomplete(unreadable, no_id)} {_REPEAT_TO_OPERATOR}\n"
+                f"\n💡 {_stamp_list_incomplete(unreadable, no_id)} "
+                f"{_REPEAT_TO_OPERATOR}\n"
             )
             response_text += _format_hints("health_check", ["check_stamp_health"])
         else:
             if stamps:
-                response_text += (
-                    f"\n💡 {_no_writable_stamp_text(counts['blocked'], counts['other_ids'])}.\n"
-                )
+                text = _no_writable_stamp_text(counts["blocked"], counts["other_ids"])
+                response_text += f"\n💡 {text}.\n"
             response_text += _format_hints(
                 _no_writable_stamp_next(
                     counts["blocked"], counts["other_ids"], "list_stamps"
@@ -3373,7 +3382,9 @@ def _upload_outcome_unknown(
         content=[
             TextContent(
                 type="text",
-                text=_format_error(msg, retryable=False, next_tool="check_stamp_health"),
+                text=_format_error(
+                    msg, retryable=False, next_tool="check_stamp_health"
+                ),
             )
         ],
         isError=True,
@@ -4017,7 +4028,8 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 elif unreadable or no_id:
                     # An entry it cannot read may be the stamp to use: never buy.
                     recommendations.append(
-                        f"{_stamp_list_incomplete(unreadable, no_id)} Call list_stamps to "
+                        f"{_stamp_list_incomplete(unreadable, no_id)} Call "
+                        "list_stamps to "
                         f"check the stamps. {_REPEAT_TO_OPERATOR}"
                     )
                     next_tool = "list_stamps"
@@ -4034,7 +4046,10 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     )
                     next_tool = "purchase_stamp"
             except _StampListUnknown:
-                stamps_info += "\n📋 Stamps: unknown (the gateway's answer is not in the expected format)\n"
+                stamps_info += (
+                    "\n📋 Stamps: unknown (the gateway's answer is not in the "
+                    "expected format)\n"
+                )
                 recommendations.append(
                     f"{_STAMP_LIST_UNKNOWN} Call list_stamps to check the stamps. "
                     f"{_REPEAT_TO_OPERATOR}"
@@ -4152,7 +4167,9 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
             content=[
                 TextContent(
                     type="text",
-                    text=_format_error(error_msg, retryable=True, next_tool="health_check"),
+                    text=_format_error(
+                        error_msg, retryable=True, next_tool="health_check"
+                    ),
                 )
             ],
             isError=True,
@@ -4358,7 +4375,8 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
             elif is_propagating:
                 if has_estimate:
                     response_text += (
-                        f"\n💡 Stamp is propagating. Estimated ready at {estimated_ready}. "
+                        "\n💡 Stamp is propagating. Estimated ready at "
+                        f"{estimated_ready}. "
                         "Retry check_stamp_health in 15 seconds."
                     )
                 else:

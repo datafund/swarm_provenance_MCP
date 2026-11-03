@@ -2873,7 +2873,7 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                 # What identifies a batch from an unanswered purchase
                 identity = []
                 if stamp.get("label"):
-                    identity.append(f"Label: {quote(stamp['label'])}")
+                    identity.append(f"Label: {_label(stamp['label'])}")
                 depth = _plain_depth(stamp.get("depth"))
                 if depth is not None:
                     identity.append(f"Depth: {depth}")

@@ -553,3 +553,17 @@ class TestHostileNumbersNeverRaise:
                 server, "get_stamp_status", {"stamp_id": TEST_STAMP_ID}
             )
         assert "Batch TTL: 172,800 seconds (2.0 days)" in result.content[0].text
+
+
+class TestLabelPrintedLikePurchaseHint:
+    """list_stamps prints a label through _label, the form _new_batch_hint
+    tells the agent to look for."""
+
+    @pytest.mark.parametrize(
+        "label", ["run-42", "a\n\nb  c", "x" * 5000, 'say "hi"', 7, ["x"]]
+    )
+    async def test_label_matches_label_helper(self, server, label):
+        from swarm_provenance_mcp.server import _label
+
+        text = await _list(server, [_stamp("shared", label=label)])
+        assert f"Label: {_label(label)}" in text

@@ -559,7 +559,8 @@ def validate_and_clean_stamp_id(stamp_id: str) -> str:
         stamp_id = stamp_id[2:]
 
     # Validate format
-    if not STAMP_ID_PATTERN.match(stamp_id):
+    # fullmatch: "$" also matches before a final newline.
+    if not STAMP_ID_PATTERN.fullmatch(stamp_id):
         raise ValueError(
             f"Invalid stamp ID format. Expected 64-character hexadecimal string (without 0x prefix), got: {stamp_id}"
         )
@@ -569,14 +570,19 @@ def validate_and_clean_stamp_id(stamp_id: str) -> str:
 
 def _is_gateway_batch_id(value: Any) -> bool:
     """Whether a gateway batch ID is a string that validate_and_clean_stamp_id
-    accepts: 64 hexadecimal characters, with or without 0x."""
+    accepts: exactly 64 hexadecimal characters, with or without 0x."""
+    return _clean_gateway_batch_id(value) is not None
+
+
+def _clean_gateway_batch_id(value: Any) -> Optional[str]:
+    """A gateway batch ID as 64 hexadecimal characters without 0x, or None
+    when it is not one. Every reader of a gateway batchID uses this."""
     if not isinstance(value, str):
-        return False
+        return None
     try:
-        validate_and_clean_stamp_id(value)
+        return validate_and_clean_stamp_id(value)
     except ValueError:
-        return False
-    return True
+        return None
 
 
 def validate_and_clean_reference_hash(reference: str) -> str:
@@ -599,7 +605,7 @@ def validate_and_clean_reference_hash(reference: str) -> str:
         reference = reference[2:]
 
     # Validate format
-    if not REFERENCE_HASH_PATTERN.match(reference):
+    if not REFERENCE_HASH_PATTERN.fullmatch(reference):
         raise ValueError(
             f"Invalid reference hash format. Expected 64-character hexadecimal string (without 0x prefix), got: {reference}"
         )
@@ -619,7 +625,7 @@ def validate_and_clean_swarm_reference(reference: str) -> str:
         raise ValueError("Reference cannot be empty")
     if reference.startswith(("0x", "0X")):
         reference = reference[2:]
-    if not SWARM_REFERENCE_PATTERN.match(reference):
+    if not SWARM_REFERENCE_PATTERN.fullmatch(reference):
         raise ValueError(
             "Invalid Swarm reference format. Expected 64 or 128 hexadecimal "
             "characters (128 for an encrypted reference), without 0x prefix; "
@@ -1211,8 +1217,8 @@ def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
             blocked["spent"] += 1
         elif kind == "pending":
             counts["pending"] += 1
-            batch_id = stamp.get("batchID")
-            if isinstance(batch_id, str) and STAMP_ID_PATTERN.match(batch_id):
+            batch_id = _clean_gateway_batch_id(stamp.get("batchID"))
+            if batch_id is not None:
                 counts["pending_ids"].append(batch_id)
         else:
             counts["writable"] += 1
@@ -2638,7 +2644,7 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
                 "Stamp purchase", reason, "list_stamps", _new_batch_hint(label, depth)
             )
         # 64 hexadecimal characters, as the tool description says: no 0x.
-        batch_id = validate_and_clean_stamp_id(batch_id)
+        batch_id = _clean_gateway_batch_id(batch_id)
 
         response_text = f"🎉 Stamp purchased successfully!\n\n"
         response_text += f"📋 Your Stamp Details:\n"
@@ -2958,9 +2964,7 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
             response_text = f"📋 Found {len(stamps)} stamp(s):\n\n"
 
             for stamp in stamps:
-                batch_id = stamp.get("batchID")
-                if not (isinstance(batch_id, str) and STAMP_ID_PATTERN.match(batch_id)):
-                    batch_id = "N/A"
+                batch_id = _clean_gateway_batch_id(stamp.get("batchID")) or "N/A"
                 expiration = _gw_text(stamp.get("expectedExpiration"), 40) or "N/A"
                 kind = _stamp_readiness(stamp)
                 status = _stamp_status(stamp, kind)
@@ -3076,11 +3080,7 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"📋 Extension Details:\n"
         batch_id = result.get("batchID")
         # Printed as 64 hexadecimal characters, without 0x.
-        batch_id = (
-            validate_and_clean_stamp_id(batch_id)
-            if _is_gateway_batch_id(batch_id)
-            else "N/A"
-        )
+        batch_id = _clean_gateway_batch_id(batch_id) or "N/A"
         response_text += f"   Batch ID: `{batch_id}`\n"
         response_text += f"   Additional Duration: {duration_hours} hours\n"
         message = result.get("message")
@@ -4040,11 +4040,12 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
                 # Missing: "unknown"; null (a valid Optional) prints as before:
                 # empty. Any other type: "unknown".
                 util_status = status.get("utilizationStatus", "unknown")
-                if util_status is not None:
-                    util_status = (
-                        _gw(util_status) if isinstance(util_status, str) else "unknown"
-                    )
-                util_status = _gw(util_status)
+                if util_status is None:
+                    util_status = ""
+                elif isinstance(util_status, str):
+                    util_status = _gw(util_status)
+                else:
+                    util_status = "unknown"
                 response_text += f"   Utilization: {shown} ({util_status})\n"
             # Left out when it fails validation, as when it is missing.
             ttl = _number_in(status.get("batchTTL"), 0, MAX_TTL_SECONDS)

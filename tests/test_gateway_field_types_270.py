@@ -25,12 +25,16 @@ HOSTILE = [
     10**400, -10**400, -1, "7", "", True, False,
     float("nan"), float("inf"), float("-inf"), None, [], {},
     FORGED, [FORGED], {"k": FORGED},
+    # A valid ID plus a final newline: "$" in a regex matches before it.
+    "c" * 64 + "\n",
 ]
 
 HINT_PREFIXES = ("_next:", "_related:", "retryable:", "ready:", "_recommendations", "_gateway:")
 
 
 def _hostile_id(value):
+    if isinstance(value, str) and value.endswith("\n") and value.startswith("c" * 64):
+        return "hex-newline"
     if isinstance(value, int) and not isinstance(value, bool):
         return _value_id(value)
     if value is FORGED:
@@ -287,6 +291,9 @@ class TestHostileFieldMatrix:
             # The valid answer gives check_stamp_health. An error list the
             # server cannot read must not lead to a purchase.
             assert _next_lines(text) == ["_next: check_stamp_health"], text
+        if path[-1:] == ("batchID",) and isinstance(value, str) and value.endswith("\n"):
+            # Not a valid batch ID: never printed or listed.
+            assert "c" * 64 not in text, text
         if path[-1:] == ("label",) and tool in ("get_stamp_status", "list_stamps"):
             # A label is printed only when it is text.
             assert ("Label:" in text) is (isinstance(value, str) and bool(value)), text
@@ -1301,6 +1308,73 @@ class TestRound5:
         assert result.content[0].text.startswith(
             "Upload outcome unknown. The gateway's answer has no valid reference.\n"
         )
+
+
+class TestBatchIdRules:
+    """One rule for a batch ID from the gateway: 64 hex characters, with or
+    without 0x, matched in full; printed without 0x."""
+
+    async def test_list_stamps_0x_id_printed_clean(self, server):
+        def body(b):
+            b["stamps"][0]["batchID"] = "0x" + "c" * 64
+            return b
+
+        text = (await _run(server, "list_stamps", {"list_stamps": body})).content[0].text
+        assert f"Batch ID: {'c' * 64}\n" in text
+        assert "0x" not in text
+
+    @pytest.mark.parametrize("batch_id", ["0x" + "c" * 64, "0X" + "c" * 64])
+    async def test_pending_0x_id_listed_clean(self, server, batch_id):
+        def body(b):
+            b["stamps"][0]["batchID"] = batch_id
+            return b
+
+        for tool in ("health_check", "list_stamps"):
+            overrides = {"list_stamps": body} if tool == "health_check" else {
+                "list_stamps": lambda b: body(_list_body())}
+            text = (await _run(server, tool, overrides)).content[0].text
+            assert f"(batch ID: {'c' * 64})" in text, text
+            assert "0x" not in text and "0X" not in text
+
+    @pytest.mark.parametrize("batch_id", ["c" * 64 + "\n", "0x" + "c" * 64 + "\n", "c" * 63, "0x" + "c" * 65])
+    async def test_bad_ids_everywhere(self, server, batch_id):
+        def stamps(b):
+            b["stamps"][0]["batchID"] = batch_id
+            return b
+
+        for tool, overrides in (
+            ("health_check", {"list_stamps": stamps}),
+            ("list_stamps", {"list_stamps": lambda b: stamps(_list_body())}),
+            ("purchase_stamp", {"purchase_stamp": _with(batchID=batch_id)}),
+            ("extend_stamp", {"extend_stamp": _with(batchID=batch_id)}),
+        ):
+            text = (await _run(server, tool, overrides)).content[0].text
+            assert "c" * 63 not in text, (tool, text)
+
+    @pytest.mark.parametrize(
+        "tool,arguments",
+        [
+            ("get_stamp_status", {"stamp_id": "a" * 64 + "\n"}),
+            ("check_stamp_health", {"stamp_id": "a" * 64 + "\n"}),
+            ("extend_stamp", {"stamp_id": "a" * 64 + "\n", "duration_hours": 24}),
+            ("download_data", {"reference": "b" * 64 + "\n"}),
+        ],
+    )
+    async def test_user_input_with_final_newline_is_refused(self, server, tool, arguments):
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            result = await call_tool_directly(server, tool, arguments)
+        assert result.isError
+        assert "Validation error" in result.content[0].text or "Invalid" in result.content[0].text
+        assert not gw.get_stamp_details.called
+        assert not gw.check_stamp_health.called
+        assert not gw.extend_stamp.called
+        assert not gw.download_data.called
+
+    def test_reference_hash_with_final_newline_is_refused(self):
+        from swarm_provenance_mcp.server import validate_and_clean_reference_hash
+
+        with pytest.raises(ValueError):
+            validate_and_clean_reference_hash("b" * 64 + "\n")
 
 
 # Full output for valid gateway answers, captured from the code before #270

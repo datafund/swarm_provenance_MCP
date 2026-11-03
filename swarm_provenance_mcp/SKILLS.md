@@ -251,6 +251,8 @@ If the output starts with `INCOMPLETE`, the lineage is partial. Do not treat it 
 | Error | Cause | Recovery |
 |-------|-------|----------|
 | "Not usable" / "NOT_FOUND" | Stamp not yet propagated | Check `propagationStatus` and `estimatedReadyAt` in the response. Poll `check_stamp_health` every 15s until `propagationStatus: "ready"` |
+| `list_stamps` Status "Not usable by this server" | The stamp is a `pool` or `owned` stamp, or has another access mode. This server sends no wallet, so the gateway refuses its uploads | Use a stamp marked "Usable", or `purchase_stamp`. `list_stamps` gives `_next: purchase_stamp` when no stamp is usable or pending |
+| `list_stamps` Status "Cannot become usable" | The stamp is expired, full, about to expire, or not found or unreadable on the node | `purchase_stamp`. Waiting does not help |
 | "insufficient funds" | Wallet ETH too low for gas | Run `chain_balance` for funding guidance (faucet/bridge URLs) |
 | "already registered" | Hash was already anchored | Not an error when the record owner is the expected owner: `anchor_hash` returns the existing record. An error when another address owns it: change the content, upload it again, and anchor the new hash |
 | "already exists" / "already registered" revert on `record_transform` | `new_hash` was pre-anchored via `anchor_hash` | Do NOT anchor `new_hash` before `record_transform` — it auto-registers. Re-upload the data to get a fresh hash. |

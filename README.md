@@ -244,6 +244,14 @@ Get detailed information about a specific stamp.
 #### `list_stamps`
 List all available postage stamps.
 
+Each stamp's `Status` uses the same rule as `health_check`:
+- `Usable`: usable, and its `accessMode` is `shared` or absent. Only these stamps work with `upload_data`.
+- `Not usable by this server`: a `pool` stamp (gateway inventory), an `owned` stamp (registered to the wallet that paid for it) or another access mode. This server sends no wallet, so the gateway refuses its uploads.
+- `Not usable yet`: a writable stamp that may still be propagating. Poll `check_stamp_health`; do not buy another.
+- `Cannot become usable`: expired, full, about to expire, or not found or unreadable on the node.
+
+`_next` is `upload_data` when a stamp is usable, `check_stamp_health` when a stamp is still propagating, and `purchase_stamp` otherwise.
+
 **Parameters:** None
 
 **Example:**
@@ -593,7 +601,7 @@ _next: <recommended_tool>        # The logical next tool to call
 _related: <tool1>, <tool2>       # Other relevant tools
 ```
 
-Hints are contextual — for example, `list_stamps` suggests `_next: upload_data` when usable stamps exist, but `_next: purchase_stamp` when none are available.
+Hints are contextual. For example, `list_stamps` suggests `_next: upload_data` when a stamp this server can write to is usable, `_next: check_stamp_health` when such a stamp is still propagating, and `_next: purchase_stamp` otherwise.
 
 #### Error Responses
 

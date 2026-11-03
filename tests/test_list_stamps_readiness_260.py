@@ -319,3 +319,47 @@ class TestStampReadiness:
             "pending_ids": [TEST_STAMP_ID],
             "blocked": {"pool": 2, "owned": 2, "other": 2, "spent": 1},
         }
+
+
+class TestAgentTextsDescribeTheRule:
+    """The texts an agent reads before calling list_stamps match its output."""
+
+    def test_tool_description(self):
+        import asyncio
+
+        from mcp.types import ListToolsRequest
+
+        tools = asyncio.run(
+            create_server().request_handlers[ListToolsRequest](
+                ListToolsRequest(method="tools/list")
+            )
+        ).root.tools
+        desc = next(t for t in tools if t.name == "list_stamps").description
+        assert "not usable by this server" in desc
+        assert "not usable yet" in desc and "check_stamp_health" in desc
+        assert "cannot become usable" in desc
+
+    def test_instructions(self):
+        from swarm_provenance_mcp.server import MCP_INSTRUCTIONS
+
+        assert '"Not usable by this server"' in MCP_INSTRUCTIONS
+        assert 'marks "Usable"' in MCP_INSTRUCTIONS
+
+    async def test_stamp_management_prompt(self, server):
+        from mcp.types import GetPromptRequest
+
+        result = await server.request_handlers[GetPromptRequest](
+            GetPromptRequest(method="prompts/get", params={"name": "stamp-management"})
+        )
+        text = result.root.messages[0].content.text
+        assert "'Not usable yet' → poll check_stamp_health" in text
+        assert "No usable stamps and none pending → purchase_stamp" in text
+
+    def test_skills(self):
+        from pathlib import Path
+
+        skills = (
+            Path(__file__).resolve().parents[1] / "swarm_provenance_mcp" / "SKILLS.md"
+        ).read_text()
+        assert '"Not usable by this server"' in skills
+        assert '"Cannot become usable"' in skills

@@ -362,7 +362,7 @@ This server uses the free tier by default (rate limit: 3 write requests/minute, 
 STAMP OWNERSHIP:
 - purchase_stamp creates public stamps (accessMode: "shared"). Any gateway user can upload to them, so utilization is unpredictable. Suitable for testing and small workloads.
 - This server sends no wallet, so it can upload only to "shared" stamps and stamps without an access mode. The gateway refuses its uploads to "owned" stamps (registered to the wallet that paid for them) and "pool" stamps (gateway inventory).
-- list_stamps can also show "owned" and "pool" stamps. Do not pick them for upload_data. For capacity that other users cannot fill, run your own Bee node or gateway.
+- list_stamps can also show "owned" and "pool" stamps and marks them "Not usable by this server". Do not pick them for upload_data. Upload only to a stamp it marks "Usable". For capacity that other users cannot fill, run your own Bee node or gateway.
 
 TYPICAL WORKFLOW:
 1. health_check — verify gateway is reachable
@@ -1811,7 +1811,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="list_stamps",
-                description="List postage stamps available on the gateway. Each stamp includes its access mode: shared (public, any gateway user can upload to it), owned (registered to the wallet that paid for it) or pool (gateway inventory). This server sends no wallet, so the gateway refuses its uploads to owned and pool stamps: use a shared stamp. Also shows usability status and expiration.",
+                description="List postage stamps available on the gateway. Each stamp includes its access mode: shared (public, any gateway user can upload to it), owned (registered to the wallet that paid for it) or pool (gateway inventory). This server sends no wallet, so the gateway refuses its uploads to owned and pool stamps: use a shared stamp. Each stamp's Status says whether this server can upload to it and, if not, why: not usable by this server (pool, owned or another access mode), not usable yet (may still be propagating: poll check_stamp_health, do not buy another) or cannot become usable (expired, full, about to expire, or not found or unreadable on the node). Also shows expiration.",
                 inputSchema={"type": "object", "properties": {}, "required": []},
             ),
             Tool(
@@ -2314,7 +2314,7 @@ def create_server() -> Server:
                                 f"Follow these steps:\n"
                                 f"1. Call health_check to verify the gateway is reachable\n"
                                 f"2. Call purchase_stamp (size 'small' for small data) to get a stamp, "
-                                f"or reuse a usable 'shared' stamp from list_stamps (this server "
+                                f"or reuse a stamp that list_stamps marks 'Usable' (this server "
                                 f"cannot upload to 'owned' or 'pool' stamps).\n"
                                 f"3. Poll check_stamp_health every 15 seconds until ready (up to 2 minutes)\n"
                                 f"4. Call upload_data with the data and your stamp_id\n"
@@ -2369,13 +2369,14 @@ def create_server() -> Server:
                                 "Review my Swarm stamp inventory and recommend actions:\n\n"
                                 "list_stamps shows public stamps (accessMode 'shared'), which any gateway user can upload to, and can also show 'owned' and 'pool' stamps. This server sends no wallet, so the gateway refuses its uploads to 'owned' stamps (registered to the wallet that paid for them) and 'pool' stamps (gateway inventory). Only 'shared' stamps and stamps without an access mode are usable here. For production use with predictable capacity, recommend running your own Bee node or gateway.\n\n"
                                 "Steps:\n"
-                                "1. Call list_stamps to see all stamps\n"
+                                "1. Call list_stamps to see all stamps. Its Status field says whether this server can upload to each stamp, and why not\n"
                                 "2. For stamps this server can use, check if usable, utilization, and TTL\n"
                                 "3. Call check_stamp_health on any stamp that looks concerning\n"
                                 "4. Recommend actions:\n"
                                 "   - Stamps with high utilization → purchase a new one\n"
                                 "   - Stamps with low TTL → extend_stamp to add time\n"
-                                "   - No usable stamps → purchase_stamp\n"
+                                "   - Stamps marked 'Not usable yet' → poll check_stamp_health; do not buy another while they propagate\n"
+                                "   - No usable stamps and none pending → purchase_stamp\n"
                                 "5. Summarize the inventory status and recommended actions"
                             ),
                         ),
@@ -2394,7 +2395,7 @@ def create_server() -> Server:
                 f"1. Call health_check — verify gateway and chain connectivity\n"
                 f"2. Call chain_balance — confirm wallet has ETH for gas\n"
                 f"3. Call purchase_stamp (size 'small' for small data) to get a stamp, "
-                f"or reuse a usable 'shared' stamp from list_stamps (this server "
+                f"or reuse a stamp that list_stamps marks 'Usable' (this server "
                 f"cannot upload to 'owned' or 'pool' stamps).\n"
                 f"4. Poll check_stamp_health every 15 seconds until can_upload is true (up to 2 minutes)\n"
                 f"5. Call upload_data with the data and your stamp_id — save the reference hash\n"

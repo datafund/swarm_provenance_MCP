@@ -146,7 +146,7 @@ ignored, the server logs a warning at start-up.
 
 - `CHAIN_ENABLED`: Enable on-chain provenance anchoring (default: `false`)
 - `CHAIN_NAME`: Blockchain network — `base-sepolia` (testnet), `base` (mainnet), or `localhost` (local hardhat, chain 31337) (default: `base-sepolia`)
-- `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x prefix). A key that is set but invalid is logged as an error at start-up; the server still starts with chain writes disabled, and the write tools, `chain_health` and `health_check` say why. Read-only chain tools keep working
+- `PROVENANCE_WALLET_KEY`: Private key for chain transactions (hex, with or without 0x prefix). A key that is set but invalid is logged as an error at start-up; the server still starts with chain writes disabled, and the write tools, `chain_health` and `health_check` say why. Read-only chain tools keep working. Use each key in one server process at a time. Two server processes that sign with the same key, for example one started by a desktop client and one by a command-line tool, can pick the same nonce, and one of the transactions then fails
 - `CHAIN_RPC_URL`: Custom RPC endpoint (uses chain preset if not set). For `base-sepolia` and `base` the endpoint must report the preset's chain ID, or the server refuses it; see [Safety behavior](#safety-behavior)
 - `CHAIN_RPC_URLS`: Comma-separated fallback RPC URLs, tried in order after `CHAIN_RPC_URL`. The same chain ID check applies to each one; see [Safety behavior](#safety-behavior)
 - `CHAIN_CONTRACT`: Custom DataProvenance contract address (uses chain preset if not set). `CHAIN_CONTRACT_ADDRESS` is accepted too; `CHAIN_CONTRACT` wins if both are set

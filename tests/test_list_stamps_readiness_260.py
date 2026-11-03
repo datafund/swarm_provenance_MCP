@@ -140,9 +140,9 @@ class TestListStampsBranchHintsAgree:
          [_stamp("shared", usable=False, unusableReason="not_found", secondsSincePurchase=600)],
          "purchase_stamp", "No stamp this server can write to"),
         ("expired writable", [_stamp("shared", usable=False, unusableReason="expired")],
-         "purchase_stamp", "expired, full or about to expire"),
+         "purchase_stamp", "cannot become usable (expired, about to expire, full, invalid depth"),
         ("full writable", [_stamp("shared", usable=False, unusableReason="full")],
-         "purchase_stamp", "expired, full or about to expire"),
+         "purchase_stamp", "cannot become usable (expired, about to expire, full, invalid depth"),
         ("pool only", [_stamp("pool")], "purchase_stamp", "1 pool stamp is gateway inventory"),
         ("owned only", [_stamp("owned")], "purchase_stamp",
          "1 owned stamp belongs to the wallet that paid for it"),
@@ -363,3 +363,43 @@ class TestAgentTextsDescribeTheRule:
         ).read_text()
         assert '"Not usable by this server"' in skills
         assert '"Cannot become usable"' in skills
+
+
+class TestSpentReasonsNamedEverywhere:
+    """Every lasting unusableReason is named wherever the reasons are listed."""
+
+    def _reasons(self):
+        from swarm_provenance_mcp.server import _SPENT_REASON_TEXT, _SPENT_REASONS
+
+        assert set(_SPENT_REASON_TEXT) == set(_SPENT_REASONS) | {"not_found"}
+        return [_SPENT_REASON_TEXT[r] for r in _SPENT_REASONS + ("not_found",)]
+
+    def test_tool_description(self):
+        import asyncio
+
+        from mcp.types import ListToolsRequest
+
+        tools = asyncio.run(
+            create_server().request_handlers[ListToolsRequest](
+                ListToolsRequest(method="tools/list")
+            )
+        ).root.tools
+        desc = next(t for t in tools if t.name == "list_stamps").description
+        for text in self._reasons():
+            assert text in desc, text
+
+    def test_no_writable_stamp_text(self):
+        from swarm_provenance_mcp.server import _no_writable_stamp_text
+
+        rec = _no_writable_stamp_text({"pool": 0, "owned": 0, "other": 0, "spent": 1})
+        for text in self._reasons():
+            assert text in rec, text
+
+    def test_docs(self):
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        for doc in (root / "README.md", root / "swarm_provenance_mcp" / "SKILLS.md"):
+            content = doc.read_text()
+            for text in self._reasons():
+                assert text in content, (doc.name, text)

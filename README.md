@@ -248,7 +248,7 @@ Each stamp's `Status` uses the same rule as `health_check`:
 - `Usable`: usable, and its `accessMode` is `shared` or absent. Only these stamps work with `upload_data`.
 - `Not usable by this server`: a `pool` stamp (gateway inventory), an `owned` stamp (registered to the wallet that paid for it) or another access mode. This server sends no wallet, so the gateway refuses its uploads.
 - `Not usable yet`: a writable stamp that may still be propagating. Poll `check_stamp_health`; do not buy another.
-- `Cannot become usable`: expired, full, about to expire, or not found or unreadable on the node.
+- `Cannot become usable`: expired, about to expire, full, invalid depth, unreadable on the node, or not found on the node.
 
 `_next` is `upload_data` when a stamp is usable, `check_stamp_health` when a stamp is still propagating, and `purchase_stamp` otherwise.
 

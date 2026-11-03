@@ -1037,6 +1037,23 @@ _SPENT_REASONS = ("expired", "expiring_soon", "full", "invalid_depth", "unreadab
 # ago (its secondsSincePurchase) may not have reached the node yet: wait for
 # it. Older, or of unknown age, it will not appear.
 NOT_FOUND_GRACE_SECONDS = 180
+# How list_stamps and health_check name a lasting unusableReason. Only these known values
+# are printed; the gateway's text is never echoed.
+_SPENT_REASON_TEXT = {
+    "expired": "expired",
+    "expiring_soon": "about to expire",
+    "full": "full",
+    "invalid_depth": "invalid depth",
+    "unreadable": "unreadable on the node",
+    "not_found": "not found on the node",
+}
+# Every lasting reason in one phrase, for the list_stamps description and
+# the health_check recommendation.
+_SPENT_REASONS_PHRASE = (
+    ", ".join(list(_SPENT_REASON_TEXT.values())[:-1])
+    + ", or "
+    + list(_SPENT_REASON_TEXT.values())[-1]
+)
 
 
 def _recently_purchased(stamp: Dict[str, Any]) -> bool:
@@ -1138,8 +1155,7 @@ def _no_writable_stamp_text(blocked: Dict[str, int]) -> str:
     if spent:
         parts.append(
             f"{spent} stamp{'s' if spent != 1 else ''} cannot become usable "
-            "(expired, full or about to expire, or not found or unreadable on "
-            "the node)"
+            f"({_SPENT_REASONS_PHRASE})"
         )
     detail = f": {'; '.join(parts)}." if parts else "."
     return f"No stamp this server can write to{detail} Purchase a stamp with purchase_stamp"
@@ -1811,7 +1827,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="list_stamps",
-                description="List postage stamps available on the gateway. Each stamp includes its access mode: shared (public, any gateway user can upload to it), owned (registered to the wallet that paid for it) or pool (gateway inventory). This server sends no wallet, so the gateway refuses its uploads to owned and pool stamps: use a shared stamp. Each stamp's Status says whether this server can upload to it and, if not, why: not usable by this server (pool, owned or another access mode), not usable yet (may still be propagating: poll check_stamp_health, do not buy another) or cannot become usable (expired, full, about to expire, or not found or unreadable on the node). Also shows expiration.",
+                description=f"List postage stamps available on the gateway. Each stamp includes its access mode: shared (public, any gateway user can upload to it), owned (registered to the wallet that paid for it) or pool (gateway inventory). This server sends no wallet, so the gateway refuses its uploads to owned and pool stamps: use a shared stamp. Each stamp's Status says whether this server can upload to it and, if not, why: not usable by this server (pool, owned or another access mode), not usable yet (may still be propagating: poll check_stamp_health, do not buy another) or cannot become usable ({_SPENT_REASONS_PHRASE}). Also shows expiration.",
                 inputSchema={"type": "object", "properties": {}, "required": []},
             ),
             Tool(
@@ -2767,16 +2783,6 @@ _STAMP_STATUS = {
         "that paid for it)"
     ),
     "other": "⛔ Not usable by this server (access mode it cannot use)",
-}
-# How list_stamps names a lasting unusableReason. Only these known values
-# are printed; the gateway's text is never echoed.
-_SPENT_REASON_TEXT = {
-    "expired": "expired",
-    "expiring_soon": "about to expire",
-    "full": "full",
-    "invalid_depth": "invalid depth",
-    "unreadable": "unreadable on the node",
-    "not_found": "not found on the node",
 }
 # secondsSincePurchase above this (ten years) is not printed.
 MAX_STAMP_AGE_SECONDS = 10 * 365 * 86400

@@ -287,6 +287,9 @@ class TestHostileFieldMatrix:
             # The valid answer gives check_stamp_health. An error list the
             # server cannot read must not lead to a purchase.
             assert _next_lines(text) == ["_next: check_stamp_health"], text
+        if path[-1:] == ("label",) and tool in ("get_stamp_status", "list_stamps"):
+            # A label is printed only when it is text.
+            assert ("Label:" in text) is (isinstance(value, str) and bool(value.strip())), text
         if path == () and not isinstance(value, dict):
             # A body that is not an object is described, never echoed.
             assert SENTINEL not in text, text
@@ -951,7 +954,12 @@ class TestUploadOutcomeUnknown:
         assert "Upload outcome unknown" in text, text
         assert "may have completed" in text
         assert "reference is unknown" in text
-        assert "Do not upload the same data again" in text
+        # Unsigned: a repeat returns the same reference, so it is not
+        # forbidden. Signed: a repeat creates a second signed document.
+        assert ("Do not upload the same data again" in text) is bool(sign)
+        assert "uses stamp capacity again" in text
+        if not sign:
+            assert "returns the same reference" in text
         assert "retryable: false" in text
         assert _next_lines(text) == ["_next: check_stamp_health"]
         assert "Validation error" not in text
@@ -1179,6 +1187,111 @@ class TestUnreadableErrorList:
 
         text = (await _run(server, "check_stamp_health", {"check_stamp_health": body})).content[0].text
         assert _next_lines(text) == [f"_next: {expected}"]
+
+
+class TestRound5:
+    @pytest.mark.parametrize("label", [7, True, [FORGED], {"k": FORGED}, "", "   "], ids=_hostile_id)
+    async def test_get_stamp_status_label_only_text(self, server, label):
+        from swarm_provenance_mcp.untrusted import QUOTED_NOTE
+
+        text = (await _run(server, "get_stamp_status", {"get_stamp_details": _with(label=label)})).content[0].text
+        assert "Label:" not in text
+        assert QUOTED_NOTE not in text
+
+    @pytest.mark.parametrize("label", [7, True, [FORGED], {"k": FORGED}, "", "   "], ids=_hostile_id)
+    async def test_list_stamps_label_only_text(self, server, label):
+        from swarm_provenance_mcp.untrusted import QUOTED_NOTE
+
+        def body(b):
+            b["stamps"][0]["label"] = label
+            return b
+
+        text = (await _run(server, "list_stamps", {"list_stamps": body})).content[0].text
+        assert "Label:" not in text
+        assert QUOTED_NOTE not in text
+
+    @pytest.mark.parametrize("value", [True, [1], {"k": FORGED}, float("nan"), -1, 10**400], ids=_hostile_id)
+    @pytest.mark.parametrize(
+        "field,name",
+        [("amount", "Amount"), ("depth", "Depth"), ("bucketDepth", "Bucket Depth"),
+         ("blockNumber", "Block Number"), ("batchTTL", "Batch TTL")],
+    )
+    async def test_get_stamp_status_bad_number_is_na(self, server, field, name, value):
+        text = (await _run(server, "get_stamp_status", {"get_stamp_details": _with(**{field: value})})).content[0].text
+        assert f"\n{name}: N/A\n" in text, text
+
+    async def test_get_stamp_status_text_amount_unchanged(self, server):
+        text = (await _run(server, "get_stamp_status", {"get_stamp_details": _with(amount="2000000000")})).content[0].text
+        assert "\nAmount: 2000000000\n" in text
+
+    @pytest.mark.parametrize("value", [True, "30", [1], float("nan"), -1, 10**400], ids=_hostile_id)
+    async def test_seconds_since_left_out(self, server, value):
+        text = (await _run(server, "get_stamp_status", {"get_stamp_details": _with(secondsSincePurchase=value)})).content[0].text
+        assert "Propagation: propagating — ready at 2026-11-03T10:00:00Z\n" in text
+
+        def body(b):
+            b["secondsSincePurchase"] = value
+            b["status"]["batchTTL"] = value
+            return b
+
+        text = (await _run(server, "check_stamp_health", {"check_stamp_health": body})).content[0].text
+        assert "Purchased:" not in text
+        assert "   TTL:" not in text
+
+    @pytest.mark.parametrize("batch_id", ["abc", 7, ["a" * 64], {"k": FORGED}], ids=_hostile_id)
+    async def test_list_stamps_bad_batch_id_is_na(self, server, batch_id):
+        def body(b):
+            b["stamps"][0]["batchID"] = batch_id
+            return b
+
+        text = (await _run(server, "list_stamps", {"list_stamps": body})).content[0].text
+        assert "Batch ID: N/A\n" in text
+
+    @pytest.mark.parametrize("mode", [False, 0, [], {}, ["pool"]], ids=_hostile_id)
+    async def test_list_stamps_non_text_access_mode_is_na(self, server, mode):
+        def body(b):
+            b["stamps"][0]["accessMode"] = mode
+            return b
+
+        text = (await _run(server, "list_stamps", {"list_stamps": body})).content[0].text
+        assert "| Access: N/A |" in text
+        assert SENTINEL not in text
+
+    async def test_outcome_unknown_is_one_sentence(self, server, requests_mock):
+        requests_mock.post(f"{_base()}/api/v1/stamps/", raw=BROKEN_BODIES["deep-nesting"]())
+        result = await call_tool_directly(
+            server, "purchase_stamp", {"duration_hours": 24, "label": "run-1"}
+        )
+        text = result.content[0].text
+        assert text.startswith(
+            "Stamp purchase outcome unknown. The gateway's answer could not be read: "
+            "it is nested too deeply.\n"
+        ), text
+
+    async def test_outcome_unknown_string_reason(self, server):
+        def body(b):
+            del b["batchID"]
+            return b
+
+        text = (await _run(server, "purchase_stamp", {"purchase_stamp": body})).content[0].text
+        assert text.startswith("Stamp purchase outcome unknown. The gateway's answer has no batch ID.\n"), text
+
+    async def test_extend_outcome_unknown_is_one_sentence(self, server):
+        text = (await _run(server, "extend_stamp", {"extend_stamp": lambda b: []})).content[0].text
+        assert text.startswith(
+            "Stamp extension outcome unknown. The gateway's answer is not in the expected format.\n"
+        ), text
+
+    async def test_upload_unknown_is_one_sentence(self, server):
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.get_stamp_details.return_value = {"usable": True}
+            gw.upload_data.return_value = {"reference": 7}
+            result = await call_tool_directly(
+                server, "upload_data", {"data": "{}", "stamp_id": TEST_STAMP_ID}
+            )
+        assert result.content[0].text.startswith(
+            "Upload outcome unknown. The gateway's answer has no valid reference.\n"
+        )
 
 
 # Full output for valid gateway answers, captured from the code before #270

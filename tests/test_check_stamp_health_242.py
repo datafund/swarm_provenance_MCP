@@ -224,7 +224,8 @@ class TestGetStampStatusEveryField:
             assert "Ready for uploads" not in text
 
     @pytest.mark.parametrize("value", [-1, 256, 17.0, True, "17"])
-    async def test_bad_depth_printed_through_gw(self, server, value):
+    async def test_bad_depth_is_na(self, server, value):
+        # A depth that fails validation is N/A, never its repr (#270).
         text = await _status(server, depth=value)
-        assert f"\nDepth: {value}\n" in text
+        assert "\nDepth: N/A\n" in text
         assert len(_lines(text, "_next:")) == 1

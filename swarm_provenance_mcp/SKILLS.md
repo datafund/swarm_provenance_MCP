@@ -265,6 +265,8 @@ If the output starts with `INCOMPLETE`, the lineage is partial. Do not treat it 
 | "not owner" / "unauthorized" | Wrong wallet for this data | Only the anchoring wallet (or delegate) can transform |
 | Size exceeded (4KB) | Upload payload too large | Split or compress data before upload |
 | Gateway unreachable | Network or gateway issue | Run `health_check`, check `SWARM_GATEWAY_URL` config |
+| "outcome unknown" on `purchase_stamp`, `extend_stamp` or `upload_data` | The request reached the gateway, but no usable answer came back. The write may already have happened (`retryable: false`) | Do not repeat the write. Follow `_next`: `list_stamps` for a purchase, `get_stamp_status` for an extension, `check_stamp_health` for an upload. For an unsigned upload, the same data normally gets the same reference; never repeat a signed upload |
+| "Gateway answer unreadable" on `health_check` | The gateway answered, but this server cannot read the answer | Call `health_check` again later. If it repeats, report it to the gateway operator |
 | RPC timeout | Blockchain node unresponsive | Run `chain_health`, try again or check `CHAIN_RPC_URL` |
 
 ---

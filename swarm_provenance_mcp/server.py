@@ -74,6 +74,11 @@ def _gw_text(value: Any, max_chars: int = 100) -> str:
     return _gw(value, max_chars) if isinstance(value, str) else ""
 
 
+def _has_label(value: Any) -> bool:
+    """Whether a gateway label is printed: only text that is not blank."""
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _ready_at(value: Any) -> str:
     """A gateway estimatedReadyAt for printing: only text, through _gw;
     "" for any other type, so callers fall back to their no-estimate text."""
@@ -1011,6 +1016,14 @@ def _is_ambiguous_write_error(e: Exception) -> bool:
     return isinstance(status, int) and (200 <= status < 300 or status in (500, 502, 504))
 
 
+def _as_sentence(reason: Any) -> str:
+    """A reason (an exception or text) as one sentence: capital first
+    letter, final period."""
+    text = flatten(str(reason), MAX_EXCEPTION_CHARS).strip() or "No details"
+    text = text[0].upper() + text[1:]
+    return text if text.endswith((".", "!", "?")) else text + "."
+
+
 def _ambiguous_write_result(
     action: str, e: Union[Exception, str], check_tool: str, how_to_check: str = ""
 ) -> CallToolResult:
@@ -1020,7 +1033,7 @@ def _ambiguous_write_result(
     does not apply to it; a blind retry buys (or extends) a second time.
     """
     msg = (
-        f"{action} outcome unknown: {e}\n\n"
+        f"{action} outcome unknown. {_as_sentence(e)}\n\n"
         "The request reached the gateway but no usable answer came back, so "
         "it may have completed. Do not repeat it yet: call "
         f"{check_tool} first and only retry if the change is not there."
@@ -2789,30 +2802,23 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
             return CallToolResult(
                 content=[TextContent(type="text", text=response_text)]
             )
-        # Each gateway value is printed only after a check, or through _gw,
-        # so no value can start a hint line (#242).
+        # Each gateway value is printed only after a check (#242). A value
+        # that fails it is N/A, as a missing one is, never its repr (#270).
+        # The amount may also be text, as Bee sends it.
         amount = _number_in(result.get("amount"), 0, MAX_STAMP_AMOUNT)
         if amount is None:
-            amount = _gw(result.get("amount"), 40) or "N/A"
+            amount = _gw_text(result.get("amount"), 40) or "N/A"
         response_text += f"Amount: {amount}\n"
         for name, key in (("Depth", "depth"), ("Bucket Depth", "bucketDepth")):
             depth = _plain_depth(result.get(key))
-            if depth is None:
-                depth = _gw(result.get(key), 20) or "N/A"
-            response_text += f"{name}: {depth}\n"
+            response_text += f"{name}: {'N/A' if depth is None else depth}\n"
         block = _number_in(result.get("blockNumber"), 0, MAX_BLOCK_NUMBER)
-        if block is None:
-            block = _gw(result.get("blockNumber"), 20) or "N/A"
-        response_text += f"Block Number: {block}\n"
+        response_text += f"Block Number: {'N/A' if block is None else block}\n"
 
         # Enhanced TTL information
-        batch_ttl = result.get("batchTTL")
-        ttl = _number_in(batch_ttl, 0, MAX_TTL_SECONDS)
-        if ttl is not None:
-            response_text += f"Batch TTL: {_ttl_text(ttl)}\n"
-        else:
-            shown = "N/A" if batch_ttl is None else _gw(batch_ttl, 40) or "N/A"
-            response_text += f"Batch TTL: {shown}\n"
+        ttl = _number_in(result.get("batchTTL"), 0, MAX_TTL_SECONDS)
+        shown = "N/A" if ttl is None else _ttl_text(ttl)
+        response_text += f"Batch TTL: {shown}\n"
 
         expiry = result.get("expectedExpiration")
         expiry = _gw(expiry) if isinstance(expiry, str) else "N/A"
@@ -2832,7 +2838,7 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"Immutable: {_flag_text(result.get('immutableFlag'))}\n"
         response_text += f"Local: {_flag_text(result.get('local'))}\n"
 
-        if result.get("label"):
+        if _has_label(result.get("label")):
             response_text += f"Label: {quote(result['label'])}\n"
             response_text += f"{QUOTED_NOTE}\n"
 
@@ -2843,10 +2849,10 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
 
         if isinstance(propagation_status, str) and propagation_status:
             response_text += f"Propagation: {_gw(propagation_status)}"
-            if seconds_since is not None:
-                age = _stamp_age(seconds_since)
-                shown = f"{age}s" if age is not None else _gw(seconds_since, 20) or "N/A"
-                response_text += f" ({shown} since purchase)"
+            # Left out when it fails validation, as when it is missing.
+            age = _stamp_age(seconds_since)
+            if age is not None:
+                response_text += f" ({age}s since purchase)"
             if estimated_ready and propagation_status == "propagating":
                 response_text += f" — ready at {estimated_ready}"
             response_text += "\n"
@@ -2955,7 +2961,7 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
             for stamp in stamps:
                 batch_id = stamp.get("batchID")
                 if not (isinstance(batch_id, str) and STAMP_ID_PATTERN.match(batch_id)):
-                    batch_id = _gw(batch_id, 70) if batch_id is not None else "N/A"
+                    batch_id = "N/A"
                 expiration = _gw_text(stamp.get("expectedExpiration"), 40) or "N/A"
                 kind = _stamp_readiness(stamp)
                 status = _stamp_status(stamp, kind)
@@ -2967,7 +2973,11 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                 # mode is always shown, even an empty one.
                 access_mode = stamp.get("accessMode")
                 if access_mode or kind == "other":
-                    shown = _gw(access_mode, 30) or "(empty)"
+                    shown = (
+                        _gw(access_mode, 30) or "(empty)"
+                        if isinstance(access_mode, str)
+                        else "N/A"
+                    )
                     detail_line += f" | Access: {shown}"
 
                 # Surface propagation status when provided
@@ -2977,7 +2987,7 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
 
                 # What identifies a batch from an unanswered purchase
                 identity = []
-                if stamp.get("label"):
+                if _has_label(stamp.get("label")):
                     identity.append(f"Label: {_label(stamp['label'])}")
                 depth = _plain_depth(stamp.get("depth"))
                 if depth is not None:
@@ -2995,7 +3005,7 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += "\n💡 All stamps are public (shared): other gateway users can fill them. For production use with predictable capacity, run your own Bee node or gateway. This server sends no wallet, so it cannot upload to wallet-owned stamps.\n"
 
         # Labels of shared stamps are written by other gateway users.
-        if any(s.get("label") for s in stamps):
+        if any(_has_label(s.get("label")) for s in stamps):
             response_text += f"\n{QUOTED_NOTE}\n"
 
         # Contextual hints, in health_check's order. Each recommendation
@@ -3142,19 +3152,26 @@ def _upload_outcome_unknown(
     so and does not tell the agent to upload again: a second upload uses
     stamp capacity again, and a signed one makes a second signed document."""
     if isinstance(cause, (GatewayAnswerUnreadable, str)):
-        reason = str(cause)
+        reason = cause
     else:
         reason = "The gateway's answer could not be read: it is not valid JSON"
-    cost = "it uses stamp capacity again"
-    if sign:
-        cost += ", and a signed upload creates a second signed document"
     msg = (
-        f"Upload outcome unknown. {reason}.\n\n"
+        f"Upload outcome unknown. {_as_sentence(reason)}\n\n"
         "The request reached the gateway, so the upload may have completed, "
-        "but the reference is unknown. Do not upload the same data again: "
-        f"{cost}. Call check_stamp_health to confirm the stamp before you "
-        "upload other data."
+        "but the reference is unknown. "
     )
+    if sign:
+        msg += (
+            "Do not upload the same data again: a signed upload creates a "
+            "second signed document, and it uses stamp capacity again. "
+        )
+    else:
+        msg += (
+            "Swarm addresses content by its hash, so uploading the same data "
+            "again normally returns the same reference; it uses stamp "
+            "capacity again. "
+        )
+    msg += "Call check_stamp_health to confirm the stamp first."
     logger.error(msg)
     return CallToolResult(
         content=[
@@ -4025,10 +4042,10 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
                 util_status = status.get("utilizationStatus", "unknown")
                 util_status = _gw(util_status) if isinstance(util_status, str) else "unknown"
                 response_text += f"   Utilization: {shown} ({util_status})\n"
-            if status.get("batchTTL") is not None:
-                ttl = _number_in(status["batchTTL"], 0, MAX_TTL_SECONDS)
-                shown = _ttl_text(ttl) if ttl is not None else _gw(status["batchTTL"], 40)
-                response_text += f"   TTL: {shown}\n"
+            # Left out when it fails validation, as when it is missing.
+            ttl = _number_in(status.get("batchTTL"), 0, MAX_TTL_SECONDS)
+            if ttl is not None:
+                response_text += f"   TTL: {_ttl_text(ttl)}\n"
             expires = _gw_text(status.get("expectedExpiration"))
             if expires:
                 response_text += f"   Expires: {expires}\n"
@@ -4041,10 +4058,9 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
         if isinstance(propagation_status, str) and propagation_status:
             response_text += f"\nPropagation:\n"
             response_text += f"   Status: {_gw(propagation_status, 40)}\n"
-            if seconds_since is not None:
-                age = _stamp_age(seconds_since)
-                shown = f"{age}s ago" if age is not None else _gw(seconds_since, 20) or "N/A"
-                response_text += f"   Purchased: {shown}\n"
+            age = _stamp_age(seconds_since)
+            if age is not None:
+                response_text += f"   Purchased: {age}s ago\n"
             if estimated_ready:
                 response_text += f"   Estimated ready: {estimated_ready}\n"
 

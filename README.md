@@ -614,7 +614,9 @@ _next: <recovery_tool>           # Tool to call for recovery
 
 - **retryable: true** — transient errors (timeouts, rate limits, 502/503/504). Wait and retry. An answer from the gateway that this server cannot read (not valid JSON, incomplete, or with a corrupt encoding) is also `retryable: true` for read tools.
 - **retryable: false** — permanent errors (validation failures, unknown tools). Fix input and try a different approach.
-- **Outcome unknown** (`purchase_stamp`, `extend_stamp`, `upload_data`): the request reached the gateway, but no usable answer came back, so the write may already have happened. These results are `retryable: false`. Do not repeat the write. For a purchase or an extension, follow `_next` to check whether it happened. For an upload, the reference is unknown and a second upload uses stamp capacity again.
+- **Outcome unknown**: the request reached the gateway, but no usable answer came back, so the write may already have happened. These results are `retryable: false`. They cover these cases:
+  - `purchase_stamp` and `extend_stamp`: an answer that cannot be read (not valid JSON, a number too long to convert, nested too deeply, a corrupt content encoding, or an incomplete body), a read timeout, a connection dropped after the request was sent, HTTP 500, 502 or 504, and an answer that is not an object. For `purchase_stamp`, also an answer without a valid batch ID. Do not repeat the write: follow `_next` (`list_stamps` or `get_stamp_status`) to check whether it happened.
+  - `upload_data`: only an answer that cannot be read, or an answer without a valid reference. The reference is unknown. Uploading the same data again normally returns the same reference and uses stamp capacity again; for a signed upload (`sign: "notary"`), do not upload again, because it creates a second signed document.
 - **Payment required (HTTP 402)** — the gateway has x402 payment enabled and refused a write (`purchase_stamp`, `upload_data`, `extend_stamp`). The error shows the gateway's payment details (amount, asset, network, recipient) and the options. This server cannot pay x402 requests yet.
 
 #### Adaptive Health Check

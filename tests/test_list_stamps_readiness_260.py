@@ -429,7 +429,8 @@ class TestRejectedAccessModeIsShown:
 
     @pytest.mark.parametrize(
         "mode,shown",
-        [("", "(empty)"), ("   ", "(empty)"), (False, "False"), (0, "0"), ([], "[]"), ({}, "{}")],
+        # A mode that is not text is shown as N/A, never as its repr (#270).
+        [("", "(empty)"), ("   ", "(empty)"), (False, "N/A"), (0, "N/A"), ([], "N/A"), ({}, "N/A")],
     )
     async def test_falsy_mode_is_printed(self, server, mode, shown):
         text = await _list(server, [_stamp(mode)])
@@ -560,7 +561,8 @@ class TestLabelPrintedLikePurchaseHint:
     tells the agent to look for."""
 
     @pytest.mark.parametrize(
-        "label", ["run-42", "a\n\nb  c", "x" * 5000, 'say "hi"', 7, ["x"]]
+        # Only text labels are printed (#270); see test_gateway_field_types_270.
+        "label", ["run-42", "a\n\nb  c", "x" * 5000, 'say "hi"']
     )
     async def test_label_matches_label_helper(self, server, label):
         from swarm_provenance_mcp.server import _label

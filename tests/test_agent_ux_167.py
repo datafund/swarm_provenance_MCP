@@ -102,7 +102,10 @@ class TestHealthCheckCountsOnlyWritableStamps:
         text = await self._health(server, [_stamp(mode)])
         assert "ready: false" in text
         assert "_next: upload_data" not in text
-        assert "_next: purchase_stamp" in text
+        # pool and owned are documented modes: buy. Any other mode is not
+        # documented, so the stamp may be usable: check it first (#270).
+        expected = "purchase_stamp" if mode in ("pool", "owned") else "check_stamp_health"
+        assert f"_next: {expected}" in text
         assert "0 usable by this server / 1 local" in text
 
     @pytest.mark.parametrize("mode", ["shared", None, "absent"])
@@ -202,11 +205,12 @@ class TestHealthCheckCountsOnlyWritableStamps:
         assert rec.startswith("No stamp this server can write to.")
         assert "pool" not in rec and "owned" not in rec
 
-    async def test_non_object_entries_count_as_no_stamps(self, server):
+    async def test_non_object_entries_make_the_list_unknown(self, server):
+        # Only entries that are not objects: the list is unknown (#270).
         text = await self._health(server, ["junk", 5])
-        assert "0 usable by this server / 0 local" in text
-        assert "No stamps found" in text
-        assert "_next: purchase_stamp" in text
+        assert "The stamp list is unknown" in text
+        assert "No stamps found" not in text
+        assert "_next: list_stamps" in text
 
     async def test_unusable_unwritable_stamp_leads_to_purchase(self, server):
         text = await self._health(server, [_stamp("pool", usable=False)])
@@ -1151,9 +1155,16 @@ class TestNotFoundAndUnreadableStamps:
 
     @pytest.mark.parametrize(
         "age",
-        [180, 10_000, None, "absent", -1, True, False, 1.5, "30", float("nan"),
-         float("inf"), 10**30, [5], {"s": 5}],
+        [-1, True, False, 1.5, "30", float("nan"), float("inf"), 10**30, [5], {"s": 5}],
     )
+    async def test_unreadable_age_not_found_is_pending(self, server, age):
+        # The age cannot be read, so the stamp may be new: wait, do not buy (#270).
+        extra = {"secondsSincePurchase": age}
+        nxt, text = await self._health(server, self._stamp("not_found", **extra))
+        assert nxt == ["_next: check_stamp_health"], age
+        assert "not usable yet" in text
+
+    @pytest.mark.parametrize("age", [180, 10_000, None, "absent"])
     async def test_old_or_unknown_not_found_is_spent(self, server, age):
         extra = {} if age == "absent" else {"secondsSincePurchase": age}
         nxt, text = await self._health(server, self._stamp("not_found", **extra))

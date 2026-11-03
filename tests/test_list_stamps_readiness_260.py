@@ -266,12 +266,14 @@ class TestHostileGatewayValues:
 
     @pytest.mark.parametrize("value", [None, "abc", {"a": 1}, 5])
     async def test_non_list_stamps(self, server, value):
+        # A malformed stamp list is unknown, not empty: never a purchase (#270).
         with patch("swarm_provenance_mcp.server.gateway_client") as gw:
             gw.list_stamps.return_value = {"stamps": value, "total_count": 3}
             result = await call_tool_directly(server, "list_stamps", {})
         text = result.content[0].text
-        assert "No stamps found" in text
-        assert _next_lines(text) == ["_next: purchase_stamp"]
+        assert "No stamps found" not in text
+        assert "The stamp list is unknown" in text
+        assert _next_lines(text) == ["_next: health_check"]
 
 
 class TestStampReadiness:

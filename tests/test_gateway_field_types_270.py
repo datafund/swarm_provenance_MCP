@@ -245,6 +245,35 @@ def _next_lines(text):
     return [line for line in text.splitlines() if line.startswith("_next:")]
 
 
+_VALID_NEXT = {}
+
+
+def _valid_alternative(tool, path, value):
+    """Whether a matrix value is still a valid answer for its position, so
+    that a different _next is the valid behaviour, not a malformed one."""
+    if path == ("errors",) and value == []:
+        return True  # no errors
+    if path[-1:] == ("code",) and isinstance(value, str):
+        return True  # another error code
+    if tool == "get_stamp_status" and path == ("usable",) and value in (False, None):
+        return value is False or value is None  # Optional[bool]
+    if tool == "get_stamp_status" and path == () and isinstance(value, dict):
+        return True  # usable missing: the Optional default, None
+    if path[-1:] == ("stamps",) and value == []:
+        return True  # a valid empty list
+    if path[-1:] == ("secondsSincePurchase",) and value is None:
+        return True  # Optional[int]: not bought through this gateway
+    return False
+
+
+async def _valid_next(server, tool):
+    """The _next line a tool gives for the valid answers."""
+    if tool not in _VALID_NEXT:
+        text = (await _run(server, tool)).content[0].text
+        _VALID_NEXT[tool] = _next_lines(text)[0]
+    return _VALID_NEXT[tool]
+
+
 def _outcome_unknown_next(tool, method, path, value):
     """The _next of the outcome-unknown result a write gives when its 2xx
     answer has no usable batch ID or is not an object; None when the write
@@ -282,6 +311,12 @@ class TestHostileFieldMatrix:
             assert _next_lines(text) == [f"_next: {unknown_next}"], text
         assert len(_next_lines(text)) == 1, text
         assert not [line for line in _hint_lines(text) if SENTINEL in line], text
+        # A malformed value never leads to a spending step that the valid
+        # answer does not lead to.
+        if await _valid_next(server, tool) != "_next: purchase_stamp" and not _valid_alternative(
+            tool, path, value
+        ):
+            assert _next_lines(text) != ["_next: purchase_stamp"], text
         if (
             tool == "check_stamp_health"
             and path[:1] == ("errors",)
@@ -311,7 +346,56 @@ class TestBranchDecisionsUseCheckedValues:
 
         text = (await _run(server, "check_stamp_health", {"check_stamp_health": body})).content[0].text
         assert "is healthy" not in text
-        assert _next_lines(text) != ["_next: upload_data"]
+        assert "cannot be used for uploads" not in text
+        assert "upload readiness is unknown" in text
+        assert _next_lines(text) == ["_next: check_stamp_health"]
+
+    @pytest.mark.parametrize("errors", [[], [{"code": "EXPIRED", "message": "x"}]])
+    async def test_missing_can_upload_is_unknown(self, server, errors):
+        def body(b):
+            del b["can_upload"]
+            b["errors"] = errors
+            return b
+
+        text = (await _run(server, "check_stamp_health", {"check_stamp_health": body})).content[0].text
+        assert _next_lines(text) == ["_next: check_stamp_health"]
+        assert "If the same answer repeats, call get_stamp_status" in text
+
+    @pytest.mark.parametrize("usable", ["true", 1, "False", [True], {"a": 1}, float("nan")], ids=_hostile_id)
+    async def test_get_stamp_status_non_bool_usable_is_unknown(self, server, usable):
+        text = (await _run(server, "get_stamp_status", {"get_stamp_details": _with(usable=usable)})).content[0].text
+        assert _next_lines(text) == ["_next: check_stamp_health"]
+        assert "usable value is not in the expected format" in text
+
+    @pytest.mark.parametrize("usable,expected", [(True, "upload_data"), (False, "purchase_stamp"), (None, "purchase_stamp")])
+    async def test_get_stamp_status_valid_usable_unchanged(self, server, usable, expected):
+        text = (await _run(server, "get_stamp_status", {"get_stamp_details": _with(usable=usable)})).content[0].text
+        assert _next_lines(text) == [f"_next: {expected}"]
+
+    @pytest.mark.parametrize("mode", ["weird", "", 7, [], {"a": 1}, True], ids=_hostile_id)
+    async def test_unknown_access_mode_never_leads_to_purchase(self, server, mode):
+        def stamps(b):
+            b["stamps"][0]["accessMode"] = mode
+            return b
+
+        for tool, overrides in (
+            ("health_check", {"list_stamps": stamps}),
+            ("health_check[usable]", {"list_stamps": lambda b: stamps(_list_body(usable=True))}),
+            ("list_stamps", {"list_stamps": stamps}),
+        ):
+            text = (await _run(server, tool, overrides)).content[0].text
+            assert _next_lines(text) == ["_next: check_stamp_health"], (tool, text)
+            assert "purchase_stamp" not in text.split("_next:")[0].split("_related")[0], text
+            assert "check the stamp with check_stamp_health before you buy another" in text
+
+    @pytest.mark.parametrize("age", [-1, True, 1.5, "30", float("nan"), 10**30, [5]], ids=_hostile_id)
+    async def test_unreadable_purchase_age_is_pending(self, server, age):
+        def stamps(b):
+            b["stamps"][0]["secondsSincePurchase"] = age
+            return b
+
+        text = (await _run(server, "health_check", {"list_stamps": stamps})).content[0].text
+        assert _next_lines(text) == ["_next: check_stamp_health"]
 
     async def test_can_upload_true_is_healthy(self, server):
         def body(b):
@@ -616,14 +700,38 @@ class TestNonObjectAnswers:
         assert "free tier (3" not in text
         assert _next_lines(text) == ["_next: check_stamp_health"]
 
-    @pytest.mark.parametrize("value", NOT_OBJECT, ids=_hostile_id)
-    async def test_health_check_non_object_stamp_list(self, server, value):
-        # The list_stamps rule: an answer that is not an object lists no stamps.
+    @pytest.mark.parametrize(
+        "value",
+        NOT_OBJECT + [{}, {"stamps": None}, {"stamps": "x"}, {"stamps": {"a": 1}}, {"stamps": ["junk", 5]}],
+        ids=_hostile_id,
+    )
+    async def test_health_check_malformed_stamp_list_is_unknown(self, server, value):
+        # Malformed: never "No stamps found" and never a purchase.
         result = await _run(server, "health_check", {"list_stamps": lambda b: value})
         text = result.content[0].text
         assert not result.isError, text
-        assert "0 usable by this server / 0 local" in text
-        assert _next_lines(text) == ["_next: purchase_stamp"]
+        assert "The stamp list is unknown: the gateway's answer is not in the expected format." in text
+        assert "No stamps found" not in text
+        assert _next_lines(text) == ["_next: list_stamps"]
+
+    @pytest.mark.parametrize(
+        "value",
+        NOT_OBJECT + [{}, {"stamps": None}, {"stamps": "x"}, {"stamps": {"a": 1}}, {"stamps": ["junk", 5]}],
+        ids=_hostile_id,
+    )
+    async def test_list_stamps_malformed_list_is_unknown(self, server, value):
+        result = await _run(server, "list_stamps", {"list_stamps": lambda b: value})
+        text = result.content[0].text
+        assert not result.isError, text
+        assert "The stamp list is unknown: the gateway's answer is not in the expected format." in text
+        assert "No stamps found" not in text
+        assert _next_lines(text) == ["_next: health_check"]
+
+    async def test_valid_empty_list_unchanged(self, server):
+        for tool, expected in (("health_check", "No stamps found — purchase one"), ("list_stamps", "No stamps found")):
+            text = (await _run(server, tool, {"list_stamps": lambda b: {"stamps": [], "total_count": 0}})).content[0].text
+            assert expected in text
+            assert _next_lines(text) == ["_next: purchase_stamp"]
 
     async def test_health_check_skips_non_object_stamps(self, server):
         def stamps(b):
@@ -637,12 +745,13 @@ class TestNonObjectAnswers:
         assert _next_lines(text) == ["_next: check_stamp_health"]
 
     async def test_health_check_only_non_object_stamps(self, server):
+        # Only entries that are not objects: the list is unknown.
         text = (
             await _run(server, "health_check", {"list_stamps": lambda b: {"stamps": ["junk", 5]}})
         ).content[0].text
-        assert "0 usable by this server / 0 local" in text
-        assert "No stamps found" in text
-        assert _next_lines(text) == ["_next: purchase_stamp"]
+        assert "The stamp list is unknown" in text
+        assert "No stamps found" not in text
+        assert _next_lines(text) == ["_next: list_stamps"]
 
 
 def _deep_response(status=200):

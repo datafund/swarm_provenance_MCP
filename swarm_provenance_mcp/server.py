@@ -2741,9 +2741,11 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         if propagation_status:
             response_text += f"Propagation: {_gw(propagation_status)}"
             if seconds_since is not None:
-                response_text += f" ({seconds_since}s since purchase)"
+                age = _stamp_age(seconds_since)
+                shown = f"{age}s" if age is not None else _gw(seconds_since, 20) or "N/A"
+                response_text += f" ({shown} since purchase)"
             if estimated_ready and propagation_status == "propagating":
-                response_text += f" — ready at {estimated_ready}"
+                response_text += f" — ready at {_gw(estimated_ready)}"
             response_text += "\n"
 
         # Contextual hints based on usability
@@ -3762,8 +3764,11 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
 
         if status:
             response_text += f"\nStatus:\n"
-            if status.get("utilizationPercent") is not None:
-                response_text += f"   Utilization: {status['utilizationPercent']}% ({_gw(status.get('utilizationStatus', 'unknown'))})\n"
+            utilization = status.get("utilizationPercent")
+            if utilization is not None:
+                percent = _number_in(utilization, 0, 100)
+                shown = f"{percent}%" if percent is not None else _gw(utilization, 20) or "N/A"
+                response_text += f"   Utilization: {shown} ({_gw(status.get('utilizationStatus', 'unknown'))})\n"
             if status.get("batchTTL") is not None:
                 ttl = _number_in(status["batchTTL"], 0, MAX_TTL_SECONDS)
                 shown = _ttl_text(ttl) if ttl is not None else _gw(status["batchTTL"], 40)
@@ -3778,9 +3783,11 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
 
         if propagation_status:
             response_text += f"\nPropagation:\n"
-            response_text += f"   Status: {propagation_status}\n"
+            response_text += f"   Status: {_gw(propagation_status, 40)}\n"
             if seconds_since is not None:
-                response_text += f"   Purchased: {seconds_since}s ago\n"
+                age = _stamp_age(seconds_since)
+                shown = f"{age}s ago" if age is not None else _gw(seconds_since, 20) or "N/A"
+                response_text += f"   Purchased: {shown}\n"
             if estimated_ready:
                 response_text += f"   Estimated ready: {_gw(estimated_ready)}\n"
 
@@ -3801,7 +3808,7 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
             if is_propagating:
                 if estimated_ready:
                     response_text += (
-                        f"\n💡 Stamp is propagating. Estimated ready at {estimated_ready}. "
+                        f"\n💡 Stamp is propagating. Estimated ready at {_gw(estimated_ready)}. "
                         "Retry check_stamp_health in 15 seconds."
                     )
                 else:

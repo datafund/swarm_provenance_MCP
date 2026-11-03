@@ -274,6 +274,28 @@ class TestWriteRequiresEvent:
         with pytest.raises(ChainTransactionError, match="StorageRefLinked"):
             client.anchor(H1, "t", storage_ref=H2)
 
+    def test_anchor_for_storage_ref_event_missing_is_failure(self):
+        """#167: the real receipt check on anchor_for with storage_ref.
+        DataRegistered for the owner alone does not prove the link."""
+        w3 = _web3()
+        w3.eth.wait_for_transaction_receipt.return_value = _receipt(
+            _log("DataRegistered", H1, NEW_OWNER)
+        )
+        client = _client(w3)
+        with pytest.raises(ChainTransactionError, match="StorageRefLinked") as e:
+            client.anchor_for(H1, NEW_OWNER, "t", storage_ref=H2)
+        assert e.value.broadcast is True
+
+    def test_anchor_for_storage_ref_with_both_events_succeeds(self):
+        w3 = _web3()
+        w3.eth.wait_for_transaction_receipt.return_value = _receipt(
+            _log("DataRegistered", H1, NEW_OWNER), _log("StorageRefLinked", H1, H2)
+        )
+        client = _client(w3)
+        result = client.anchor_for(H1, NEW_OWNER, "t", storage_ref=H2)
+        assert result.owner == NEW_OWNER
+        assert result.storage_ref == H2
+
     def test_error_message_carries_tx_hash(self):
         w3 = _web3()
         client = _client(w3)
@@ -723,3 +745,44 @@ def test_tx_hash_not_repeated_when_already_in_message():
     assert str(e) == "failed: 0xabc"
     assert str(ChainTransactionError("failed", tx_hash="0xabc")) == "failed (tx 0xabc)"
     assert str(ChainTransactionError("failed")) == "failed"
+
+
+class TestRegisterDataForSelectors:
+    """#167: the real ABI picks the registerDataFor overload by argument
+    count. A real Web3 without a provider encodes the call; build_transaction
+    is replaced by the encoding alone, so no RPC call is made."""
+
+    def _data(self, monkeypatch, **kwargs) -> str:
+        from web3.contract.contract import ContractFunction
+
+        monkeypatch.setattr(
+            ContractFunction,
+            "build_transaction",
+            lambda self, transaction=None: {"data": self._encode_transaction_data()},
+        )
+        contract = DataProvenanceContract(web3=Web3(), contract_address=CONTRACT)
+        tx = contract.build_register_data_for_tx(H1, "t", NEW_OWNER, WALLET, **kwargs)
+        data = tx["data"]
+        return data if isinstance(data, str) else "0x" + bytes(data).hex()
+
+    def test_selectors_match_the_signatures(self):
+        sig4 = "registerDataFor(bytes32,string,address,bytes32)"
+        sig3 = "registerDataFor(bytes32,string,address)"
+        assert "0x" + Web3.keccak(text=sig4)[:4].hex().removeprefix("0x") == (
+            "0x7880f59b"
+        )
+        assert "0x" + Web3.keccak(text=sig3)[:4].hex().removeprefix("0x") == (
+            "0x05e939a8"
+        )
+
+    def test_with_storage_ref_encodes_the_four_argument_overload(self, monkeypatch):
+        data = self._data(monkeypatch, storage_ref=H2)
+        assert data.startswith("0x7880f59b")
+        assert H2 in data
+
+    def test_without_storage_ref_encodes_the_three_argument_overload(
+        self, monkeypatch
+    ):
+        data = self._data(monkeypatch)
+        assert data.startswith("0x05e939a8")
+        assert H2 not in data

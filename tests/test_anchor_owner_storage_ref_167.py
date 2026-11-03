@@ -715,3 +715,40 @@ class TestStorageRefWorkflowTexts:
         assert "SHA-256" in section
         assert "must differ" in section
         assert "anchor_hash(swarm_hash,    → register hash" not in section
+
+
+class TestAnchorHashSchemaTexts:
+    """The tool description and schema say which hash goes where."""
+
+    async def _tool(self):
+        from mcp.types import ListToolsRequest
+
+        server = create_server()
+        with patch("swarm_provenance_mcp.server.CHAIN_AVAILABLE", True), patch(
+            "swarm_provenance_mcp.server.settings.chain_enabled", True
+        ):
+            result = await server.request_handlers[ListToolsRequest](
+                ListToolsRequest(method="tools/list")
+            )
+        return next(t for t in result.root.tools if t.name == "anchor_hash")
+
+    async def test_description_and_schema_name_both_hashes(self):
+        tool = await self._tool()
+        props = tool.inputSchema["properties"]
+        for text in (tool.description, props["swarm_hash"]["description"]):
+            assert "SHA-256" in text
+            assert "must differ" in text
+        swarm_hash_text = props["swarm_hash"]["description"]
+        assert "Swarm reference hash to anchor" not in swarm_hash_text
+        assert "e.g. Swarm hash" not in props["storage_ref"]["description"]
+        assert "upload_data" in props["storage_ref"]["description"]
+        assert "is a success only when" in tool.description
+
+    def test_skills_does_not_claim_the_cli_anchors_a_content_hash(self):
+        skills = (
+            Path(__file__).resolve().parents[1]
+            / "swarm_provenance_mcp"
+            / "SKILLS.md"
+        ).read_text()
+        assert "as the SDK and CLI use it" not in skills
+        assert "--storage-ref" in skills

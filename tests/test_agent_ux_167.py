@@ -193,7 +193,8 @@ class TestHealthCheckCountsOnlyWritableStamps:
         rec = self._recommendation(await self._health(server, stamps))
         assert "1 pool stamp is gateway inventory" in rec
         assert "2 owned stamps belong to the wallet that paid for them" in rec
-        assert "1 stamp has an access mode this server cannot use" in rec
+        # Named once, with what to do: check it before buying (#270).
+        assert "1 stamp has an access mode the gateway does not document" in rec
 
     def test_recommendation_without_known_kinds(self):
         # health_check and list_stamps skip entries that are not objects, and

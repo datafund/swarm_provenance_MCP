@@ -1331,11 +1331,6 @@ def _no_writable_stamp_text(blocked: Dict[str, int]) -> str:
             f"{owned} owned stamp{'s belong' if owned != 1 else ' belongs'} to the "
             f"wallet that paid for {'them' if owned != 1 else 'it'}"
         )
-    if other:
-        parts.append(
-            f"{other} stamp{'s have' if other != 1 else ' has'} an access mode "
-            "this server cannot use"
-        )
     spent = blocked["spent"]
     if spent:
         parts.append(
@@ -1346,11 +1341,17 @@ def _no_writable_stamp_text(blocked: Dict[str, int]) -> str:
     if other:
         # An access mode outside the documented set: the stamp may be one
         # this server can use, so a purchase could duplicate it.
-        return (
-            f"No stamp this server can write to{detail} That access mode is not "
-            "one the gateway documents, so check the stamp with check_stamp_health "
-            "before you buy another"
-        )
+        if other == 1:
+            check = (
+                "1 stamp has an access mode the gateway does not document, so "
+                "check it with check_stamp_health before you buy another stamp"
+            )
+        else:
+            check = (
+                f"{other} stamps have access modes the gateway does not document, "
+                "so check them with check_stamp_health before you buy another stamp"
+            )
+        return f"No stamp this server can write to{detail} {check}"
     return f"No stamp this server can write to{detail} Purchase a stamp with purchase_stamp"
 
 
@@ -3322,13 +3323,14 @@ def _upload_outcome_unknown(
     if sign:
         msg += (
             "Do not upload the same data again: a signed upload creates a "
-            "second signed document, and it uses stamp capacity again. "
+            "second signed document, and a second upload also uses stamp "
+            "capacity again. "
         )
     else:
         msg += (
             "Swarm addresses content by its hash, so uploading the same data "
-            "again normally returns the same reference; it uses stamp "
-            "capacity again. "
+            "again normally returns the same reference. A second upload also "
+            "uses stamp capacity again. "
         )
     msg += "Call check_stamp_health to confirm the stamp first."
     logger.error(msg)
@@ -4193,8 +4195,13 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
         # value that is not a bool (missing included) leaves it unknown.
         can_upload = result.get("can_upload") is True
         readiness_unknown = not isinstance(result.get("can_upload"), bool)
+        # Null lists count as empty, as before #270.
         errors = result.get("errors", [])
+        if errors is None:
+            errors = []
         warnings = result.get("warnings", [])
+        if warnings is None:
+            warnings = []
         status = result.get("status", {})
 
         if can_upload:

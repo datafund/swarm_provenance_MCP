@@ -265,8 +265,8 @@ _VALID_NEXT = {}
 def _valid_alternative(tool, path, value):
     """Whether a matrix value is still a valid answer for its position, so
     that a different _next is the valid behaviour, not a malformed one."""
-    if path == ("errors",) and value == []:
-        return True  # no errors
+    if path in (("errors",), ("warnings",)) and (value == [] or value is None):
+        return True  # no errors (null was treated as none before #270)
     if path[-1:] == ("code",) and isinstance(value, str):
         return True  # another error code
     if tool == "get_stamp_status" and path == ("usable",) and value in (False, None):
@@ -349,6 +349,7 @@ class TestHostileFieldMatrix:
             tool == "check_stamp_health"
             and path[:1] == ("errors",)
             and value != []
+            and value is not None
             and not (path[-1] == "code" and isinstance(value, str))
         ):
             # The valid answer gives check_stamp_health. An error list the
@@ -414,7 +415,11 @@ class TestBranchDecisionsUseCheckedValues:
             text = (await _run(server, tool, overrides)).content[0].text
             assert _next_lines(text) == ["_next: check_stamp_health"], (tool, text)
             assert "purchase_stamp" not in text.split("_next:")[0].split("_related")[0], text
-            assert "check the stamp with check_stamp_health before you buy another" in text
+            assert (
+                "1 stamp has an access mode the gateway does not document, so check it "
+                "with check_stamp_health before you buy another stamp"
+            ) in text
+            assert "this server cannot use" not in text.split("_next:")[0].split("_recommendations")[-1]
 
     # Not an int: the age is unknown. Any int keeps the earlier rule.
     @pytest.mark.parametrize("age", [True, 1.5, "30", float("nan"), [5]], ids=_hostile_id)
@@ -1119,7 +1124,16 @@ class TestUploadOutcomeUnknown:
         # Unsigned: a repeat returns the same reference, so it is not
         # forbidden. Signed: a repeat creates a second signed document.
         assert ("Do not upload the same data again" in text) is bool(sign)
-        assert "uses stamp capacity again" in text
+        if sign:
+            assert (
+                "Do not upload the same data again: a signed upload creates a second "
+                "signed document, and a second upload also uses stamp capacity again."
+            ) in text
+        else:
+            assert (
+                "normally returns the same reference. A second upload also uses stamp "
+                "capacity again."
+            ) in text
         if not sign:
             assert "returns the same reference" in text
         assert "retryable: false" in text
@@ -1327,7 +1341,7 @@ class TestTextFieldsPrintOnlyText:
 class TestUnreadableErrorList:
     @pytest.mark.parametrize(
         "errors",
-        [None, {}, "x", 7, [7], [None], [{"message": "no code"}],
+        [{}, "x", 7, [7], [None], [{"message": "no code"}],
          [{"code": 7}], [{"code": ["NOT_FOUND"]}],
          [{"code": "NOT_USABLE", "message": "x"}, "junk"]],
         ids=_hostile_id,
@@ -1345,7 +1359,8 @@ class TestUnreadableErrorList:
 
     @pytest.mark.parametrize(
         "errors,expected",
-        [([], "purchase_stamp"), ([{"code": "EXPIRED", "message": "x"}], "purchase_stamp"),
+        [([], "purchase_stamp"), (None, "purchase_stamp"),
+         ([{"code": "EXPIRED", "message": "x"}], "purchase_stamp"),
          ([{"code": "NOT_FOUND", "message": "x"}], "check_stamp_health")],
     )
     async def test_valid_lists_unchanged(self, server, errors, expected):
@@ -1642,6 +1657,38 @@ class TestAgentTextsNeverBuyOnUnknownLists:
         skills = (root / "swarm_provenance_mcp" / "SKILLS.md").read_text()
         assert "an unknown or incomplete stamp list gives `_next: health_check`" in readme
         assert "when no stamp is usable or pending and the list is complete" in skills
+
+
+class TestRound12:
+    def test_undocumented_mode_count_singular_and_plural(self):
+        from swarm_provenance_mcp.server import _no_writable_stamp_text
+
+        one = _no_writable_stamp_text({"pool": 1, "owned": 0, "other": 1, "spent": 0})
+        assert one == (
+            "No stamp this server can write to: 1 pool stamp is gateway inventory. "
+            "1 stamp has an access mode the gateway does not document, so check it "
+            "with check_stamp_health before you buy another stamp"
+        )
+        two = _no_writable_stamp_text({"pool": 0, "owned": 0, "other": 2, "spent": 0})
+        assert two == (
+            "No stamp this server can write to. 2 stamps have access modes the gateway "
+            "does not document, so check them with check_stamp_health before you buy "
+            "another stamp"
+        )
+
+    @pytest.mark.parametrize("field", ["errors", "warnings"])
+    async def test_null_list_prints_nothing(self, server, field):
+        def body(b):
+            b[field] = None
+            b["status"]["utilizationPercent"] = 50
+            return b
+
+        text = (await _run(server, "check_stamp_health", {"check_stamp_health": body})).content[0].text
+        assert "list is not in the expected format" not in text
+        assert ("Errors:" in text) is (field != "errors")
+        assert ("Warnings:" in text) is (field != "warnings")
+        # Null counts as no entries, as before #270.
+        assert _next_lines(text) == ["_next: purchase_stamp"]
 
 
 class TestRound9:

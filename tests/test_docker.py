@@ -7,7 +7,9 @@ Requires Docker to be running. Tests are skipped if Docker is unavailable.
 """
 
 import json
+import queue
 import subprocess
+import threading
 import time
 
 import pytest
@@ -87,26 +89,70 @@ def send_mcp_messages(messages, env_vars=None, timeout=30):
             cmd.extend(["-e", f"{key}={value}"])
     cmd.append(IMAGE_NAME)
 
-    input_data = "\n".join(json.dumps(m) for m in messages) + "\n"
-
-    result = subprocess.run(
+    # Keep stdin open until each request is answered: the server exits on EOF
+    # and can drop a request that is still in flight (#199). Same approach as
+    # scripts/mcp_stdio_smoke.py.
+    proc = subprocess.Popen(
         cmd,
-        input=input_data,
-        capture_output=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout,
+        bufsize=1,
     )
-
+    lines = queue.Queue()
+    stderr_chunks = []
+    threading.Thread(
+        target=lambda: [lines.put(line) for line in proc.stdout] + [lines.put(None)],
+        daemon=True,
+    ).start()
+    stderr_reader = threading.Thread(
+        target=lambda: stderr_chunks.extend(proc.stderr), daemon=True
+    )
+    stderr_reader.start()
+    deadline = time.monotonic() + timeout
     responses = []
-    for line in result.stdout.strip().split("\n"):
-        line = line.strip()
-        if line:
-            try:
-                responses.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
 
-    return responses, result.stderr
+    def wait_for(msg_id):
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            try:
+                line = lines.get(timeout=remaining)
+            except queue.Empty:
+                return
+            if line is None:  # server closed stdout
+                return
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            responses.append(msg)
+            if isinstance(msg, dict) and msg.get("id") == msg_id:
+                return
+
+    try:
+        for message in messages:
+            proc.stdin.write(json.dumps(message) + "\n")
+            proc.stdin.flush()
+            if "id" in message:  # a request, not a notification
+                wait_for(message["id"])
+    except (BrokenPipeError, OSError):
+        pass
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        stderr_reader.join(timeout=5)
+
+    return responses, "".join(stderr_chunks)
 
 
 @pytest.fixture(scope="module", autouse=True)

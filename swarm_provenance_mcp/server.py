@@ -1326,16 +1326,19 @@ def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
     return counts
 
 
-def _batch_ids_text(batch_ids: Sequence[str]) -> str:
-    """' (batch ID: ...)' for valid batch IDs, at most MAX_PENDING_IDS_SHOWN
-    of them; '' when there are none."""
-    if not batch_ids:
-        return ""
+def _batch_ids_list(batch_ids: Sequence[str]) -> str:
+    """'batch ID(s): ...' for valid batch IDs, at most MAX_PENDING_IDS_SHOWN
+    of them, then 'and N more' for the named IDs not shown."""
     shown = ", ".join(batch_ids[:MAX_PENDING_IDS_SHOWN])
     more = len(batch_ids) - MAX_PENDING_IDS_SHOWN
-    return f" (batch ID{'s' if len(batch_ids) != 1 else ''}: {shown}" + (
-        f", and {more} more)" if more > 0 else ")"
+    return f"batch ID{'s' if len(batch_ids) != 1 else ''}: {shown}" + (
+        f", and {more} more" if more > 0 else ""
     )
+
+
+def _batch_ids_text(batch_ids: Sequence[str]) -> str:
+    """' (batch ID: ...)' for valid batch IDs; '' when there are none."""
+    return f" ({_batch_ids_list(batch_ids)})" if batch_ids else ""
 
 
 def _no_writable_stamp_text(
@@ -1372,10 +1375,25 @@ def _no_writable_stamp_text(
             else f"{other} stamps have access modes"
         )
         if other_ids:
+            # Name the valid IDs; say how many of the stamps cannot be named.
+            unnamed = other - len(other_ids)
+            ids = _batch_ids_list(other_ids)
+            if unnamed:
+                ids += (
+                    f"; {unnamed} of them {'have' if unnamed != 1 else 'has'} a batch "
+                    "ID that is not in the expected format"
+                )
+            if one:
+                target = "it"
+            elif unnamed:
+                target = (
+                    "the named stamp" if len(other_ids) == 1 else "the named stamps"
+                )
+            else:
+                target = "them"
             check = (
-                f"{stamps} the gateway does not document{_batch_ids_text(other_ids)}, "
-                f"so check {'it' if one else 'them'} with check_stamp_health "
-                "before you buy another stamp"
+                f"{stamps} the gateway does not document ({ids}), so check "
+                f"{target} with check_stamp_health before you buy another stamp"
             )
         else:
             check = (
@@ -1383,7 +1401,7 @@ def _no_writable_stamp_text(
                 f"{'its batch ID is' if one else 'their batch IDs are'} not in the "
                 "expected format, so this server cannot check "
                 f"{'it' if one else 'them'}. Do not buy another stamp yet. "
-                f"{_REPEAT_TO_OPERATOR[:-1]}"
+                f"{_REPEAT_TO_OPERATOR}"
             )
         return f"No stamp this server can write to{detail} {check}"
     return f"No stamp this server can write to{detail} Purchase a stamp with purchase_stamp"
@@ -3218,7 +3236,9 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
         else:
             if stamps:
                 text = _no_writable_stamp_text(counts["blocked"], counts["other_ids"])
-                response_text += f"\n💡 {text}.\n"
+                # The no-valid-ID text ends with the repeat sentence's period.
+                end = "" if text.endswith(".") else "."
+                response_text += f"\n💡 {text}{end}\n"
             response_text += _format_hints(
                 _no_writable_stamp_next(
                     counts["blocked"], counts["other_ids"], "list_stamps"

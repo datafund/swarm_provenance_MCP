@@ -251,7 +251,7 @@ Each stamp's `Status` uses the same rule as `health_check`:
 - `Cannot become usable`: expired, about to expire, full, invalid depth, unreadable on the node, or not found on the node.
 - `Cannot be used: the batch ID is not in the expected format`: a usable or pending stamp without a valid batch ID. An upload needs the ID, so the server counts it as an entry it cannot read.
 
-`_next` is `upload_data` when a stamp is usable, `check_stamp_health` when a stamp is still propagating, and `purchase_stamp` otherwise. If the stamp list is unknown or incomplete (some entries are not in the expected format, or a usable or pending stamp has a batch ID that is not in the expected format), `_next` is `health_check`, never `purchase_stamp`. If no stamp is usable or pending and a stamp has an access mode the gateway does not document, `_next` is `check_stamp_health`, and the recommendation names that stamp's batch ID.
+`_next` is `upload_data` when a stamp is usable, `check_stamp_health` when a stamp is still propagating, and `purchase_stamp` otherwise. If the stamp list is unknown or incomplete (some entries are not in the expected format, or a usable or pending stamp has a batch ID that is not in the expected format), `_next` is `health_check`, never `purchase_stamp`. If no stamp is usable or pending and a stamp has an access mode the gateway does not document, `_next` is `check_stamp_health`, and the recommendation names that stamp's batch ID. If none of those stamps has a valid batch ID, no ID is named and the result does not recommend a purchase: `list_stamps` gives `_next: health_check` and `health_check` gives `_next: list_stamps`. If the same answer repeats, stop and report it to the gateway operator.
 
 **Parameters:** None
 
@@ -602,7 +602,7 @@ _next: <recommended_tool>        # The logical next tool to call
 _related: <tool1>, <tool2>       # Other relevant tools
 ```
 
-Hints are contextual. For example, `list_stamps` suggests `_next: upload_data` when a stamp this server can write to is usable, `_next: check_stamp_health` when such a stamp is still propagating, and `_next: purchase_stamp` otherwise. Two cases never suggest a purchase: an unknown or incomplete stamp list gives `_next: health_check`, and a stamp with an access mode the gateway does not document gives `_next: check_stamp_health`.
+Hints are contextual. For example, `list_stamps` suggests `_next: upload_data` when a stamp this server can write to is usable, `_next: check_stamp_health` when such a stamp is still propagating, and `_next: purchase_stamp` otherwise. Two cases never suggest a purchase: an unknown or incomplete stamp list gives `_next: health_check`, and a stamp with an access mode the gateway does not document gives `_next: check_stamp_health` and names its batch ID. If none of those stamps has a valid batch ID, no ID is named and the result does not recommend a purchase: `list_stamps` gives `_next: health_check` and `health_check` gives `_next: list_stamps`. If the same answer repeats, stop and report it to the gateway operator.
 
 #### Error Responses
 
@@ -638,7 +638,7 @@ The output also has a `Swarm network:` line: `connected (...)`, `DEGRADED (...)`
 Three more cases never lead to a purchase:
 - a degraded Swarm network with a usable stamp gives `_next: health_check`: call it again after the gateway operator fixes the Bee node's network connection;
 - an unknown or incomplete stamp list gives `_next: list_stamps`; if the same answer repeats, stop and report it to the gateway operator;
-- with no usable or pending stamp, a stamp with an access mode the gateway does not document gives `_next: check_stamp_health`, and the recommendation names its batch ID.
+- with no usable or pending stamp, a stamp with an access mode the gateway does not document gives `_next: check_stamp_health`, and the recommendation names its batch ID. If none of those stamps has a valid batch ID, no ID is named and the result does not recommend a purchase: `list_stamps` gives `_next: health_check` and `health_check` gives `_next: list_stamps`. If the same answer repeats, stop and report it to the gateway operator.
 
 ### Safety behavior
 

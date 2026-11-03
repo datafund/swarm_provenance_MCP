@@ -1742,6 +1742,60 @@ class TestRound13:
         assert "a degraded Swarm network with a usable stamp gives `_next: health_check`" in readme
         assert "an unknown or incomplete stamp list gives `_next: list_stamps`" in readme
         assert "an access mode the gateway does not document gives `_next: check_stamp_health`" in readme
+        root = Path(__file__).resolve().parents[1]
+        no_id = (
+            "If none of those stamps has a valid batch ID, no ID is named and the result does not "
+            "recommend a purchase: `list_stamps` gives `_next: health_check` and `health_check` gives "
+            "`_next: list_stamps`. If the same answer repeats, stop and report it to the gateway operator."
+        )
+        assert readme.count(no_id) == 3  # list_stamps section, hints, Adaptive Health Check
+        assert no_id in (root / "swarm_provenance_mcp" / "SKILLS.md").read_text()
+        assert no_id in (root / "CLAUDE.md").read_text()
+
+
+class TestRound14:
+    @staticmethod
+    def _stamps(modes_ids):
+        body = _list_body()
+        template = body["stamps"][0]
+        body["stamps"] = [
+            dict(template, accessMode="weird", batchID=batch_id, unusableReason="full")
+            for batch_id in modes_ids
+        ]
+        return body
+
+    @pytest.mark.parametrize(
+        "ids,expected",
+        [
+            (["a" * 64, "abc", "xyz"],
+             f"3 stamps have access modes the gateway does not document (batch ID: {'a' * 64}; "
+             "2 of them have a batch ID that is not in the expected format), so check the "
+             "named stamp with check_stamp_health before you buy another stamp"),
+            (["a" * 64, "b" * 64, "xyz"],
+             f"3 stamps have access modes the gateway does not document (batch IDs: {'a' * 64}, "
+             f"{'b' * 64}; 1 of them has a batch ID that is not in the expected format), so "
+             "check the named stamps with check_stamp_health before you buy another stamp"),
+            (["a" * 64, "b" * 64, "c" * 64, "d" * 64, "xyz"],
+             f"5 stamps have access modes the gateway does not document (batch IDs: {'a' * 64}, "
+             f"{'b' * 64}, {'c' * 64}, and 1 more; 1 of them has a batch ID that is not in the "
+             "expected format), so check the named stamps with check_stamp_health before you "
+             "buy another stamp"),
+        ],
+        ids=["1-of-3", "2-of-3", "4-of-5-capped"],
+    )
+    async def test_mixed_ids(self, server, ids, expected):
+        body = self._stamps(ids)
+        for tool in ("health_check", "list_stamps"):
+            text = (await _run(server, tool, {"list_stamps": lambda b: copy.deepcopy(body)})).content[0].text
+            assert expected in text, (tool, text)
+            assert _next_lines(text) == ["_next: check_stamp_health"]
+
+    async def test_no_valid_id_ends_with_one_period(self, server):
+        body = self._stamps(["abc"])
+        for tool in ("health_check", "list_stamps"):
+            text = (await _run(server, tool, {"list_stamps": lambda b: copy.deepcopy(body)})).content[0].text
+            assert "report it to the gateway operator.\n" in text, (tool, text)
+            assert "operator.." not in text
 
 
 class TestRound12:

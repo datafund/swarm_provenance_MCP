@@ -2063,7 +2063,7 @@ def create_server() -> Server:
                     ),
                     Tool(
                         name="get_provenance_chain",
-                        description="Follow the transformation lineage for a Swarm hash. Walks both directions — from any node it finds parents (originals) and children (derived versions). Can be called on a leaf, middle, or root hash. Read-only, no gas or wallet key required.",
+                        description="Follow the transformation lineage for a Swarm hash. Walks both directions — from any node it finds parents (originals) and children (derived versions). Can be called on a leaf, middle, or root hash. Each node lists its parent hashes, and each edge is shown as 'parent_hash -> child_hash'. If a node could not be read, max_depth stopped the walk, or the event index could not be built (links then come from per-node queries that cover only recent blocks and no merges), the output starts with an INCOMPLETE banner that names those hashes, gives the reason and ends with a Retry line. Read-only, no gas or wallet key required.",
                         inputSchema={
                             "type": "object",
                             "properties": {
@@ -2398,7 +2398,9 @@ def create_server() -> Server:
                     f"10. Call record_transform with original_hash (from step 5), "
                     f'new_hash (from step 8), and description: "{transform_desc}"\n'
                     f"11. Optionally call set_storage_ref to link the new hash to its Swarm reference (from step 8)\n"
-                    f"12. Call get_provenance_chain on the original hash to verify the lineage"
+                    f"12. Call get_provenance_chain on the original hash to verify the lineage. "
+                    f"If the output starts with INCOMPLETE, the lineage is partial: "
+                    f"follow its Retry line before you rely on it"
                 )
 
             return GetPromptResult(
@@ -3116,6 +3118,90 @@ def _more_note(items: Sequence[Any], indent: str = "     ") -> str:
     """Say how many entries of a capped list were left out."""
     extra = len(items) - _MAX_LISTED
     return f"\n{indent}... and {extra} more not shown" if extra > 0 else ""
+
+
+def _is_chain_hash(value: Any) -> bool:
+    """Whether a chain-supplied value is a 64-character hex hash string."""
+    return (
+        isinstance(value, str) and REFERENCE_HASH_PATTERN.fullmatch(value) is not None
+    )
+
+
+def _chain_hash(value: Any) -> str:
+    """A chain-supplied hash for printing: as is when it is 64 hex
+    characters, otherwise flattened to one capped line."""
+    return value if _is_chain_hash(value) else _gw(value, 80)
+
+
+def _lineage_banner(result: Any, queried_hash: str, max_depth: int) -> str:
+    """The INCOMPLETE banner for a get_provenance_chain result, or "".
+
+    It names each node that could not be read and each node the depth limit
+    stopped at, and ends with a "Retry:" line. A plain list (no traversal
+    status) is read from the records' own fields.
+    """
+    failed = getattr(result, "failed", None)
+    failed = dict(failed) if isinstance(failed, dict) else {}
+    for record in result:
+        read_error = getattr(record, "read_error", None)
+        if isinstance(read_error, str) and record.data_hash not in failed:
+            failed[record.data_hash] = read_error
+    unexpanded = [
+        r.data_hash for r in result if getattr(r, "expanded", True) is False
+    ]
+    scan_note = getattr(result, "scan_note", None)
+    if not isinstance(scan_note, str):
+        scan_note = None
+    if not failed and not unexpanded and scan_note is None:
+        return ""
+
+    summary = []
+    if failed:
+        n = len(failed)
+        summary.append(f"{n} {'node' if n == 1 else 'nodes'} could not be read")
+    if unexpanded:
+        n = len(unexpanded)
+        summary.append(
+            f"{n} {'node' if n == 1 else 'nodes'} not expanded (max_depth reached)"
+        )
+    if scan_note:
+        summary.append("links were read from a limited block range")
+    lines = [
+        "INCOMPLETE: this lineage is partial: " + "; ".join(summary) + ".",
+        "   Do not treat the entries below as the full provenance.",
+    ]
+    if scan_note:
+        lines.append(f"   {_gw(scan_note, 300)}")
+    items = [f"   {_chain_hash(h)}: {_gw(label, 120)}" for h, label in failed.items()]
+    items += [
+        f"   {_chain_hash(h)}: not expanded (max_depth reached)" for h in unexpanded
+    ]
+    lines.extend(items[:_MAX_LISTED])
+    more = _more_note(items, "   ")
+    if more:
+        lines.append(more.lstrip("\n"))
+
+    # Retry on a failing node, else deeper from the queried hash, else (at
+    # the max_depth ceiling) from a node the depth limit stopped at.
+    retry = "   Retry: call get_provenance_chain with swarm_hash {}"
+    if failed or scan_note:
+        retry_hash = next((h for h in failed if _is_chain_hash(h)), queried_hash)
+        lines.append(retry.format(retry_hash))
+    elif max_depth < 50:
+        retry_hash = queried_hash
+        lines.append(
+            f"   Retry: call get_provenance_chain with swarm_hash {retry_hash} "
+            f"and a max_depth larger than {max_depth}"
+        )
+    else:
+        retry_hash = next((h for h in unexpanded if _is_chain_hash(h)), queried_hash)
+        lines.append(retry.format(retry_hash))
+    if scan_note:
+        lines.append(
+            "   A retry may return the same result while the event index cannot "
+            "be built; check chain_health."
+        )
+    return "\n".join(lines)
 
 
 def _describe_download(reference: str, data: bytes) -> Tuple[str, Optional[str]]:
@@ -4912,11 +4998,16 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
                 content=[TextContent(type="text", text=response_text)]
             )
 
-        from datetime import datetime, timezone
+        banner = _lineage_banner(chain_records, clean_hash, max_depth)
 
         response_text = f"⛓️  Provenance Chain ({len(chain_records)} "
         response_text += f"{'entry' if len(chain_records) == 1 else 'entries'})\n"
 
+        status_labels = {
+            0: "ACTIVE",
+            1: "RESTRICTED",
+            2: "DELETED",
+        }
         for i, record in enumerate(chain_records):
             if len(response_text) > _MAX_CHAIN_TEXT:
                 response_text += (
@@ -4925,41 +5016,57 @@ async def handle_get_provenance_chain(arguments: Dict[str, Any]) -> CallToolResu
                     "hash for its full record."
                 )
                 break
-            indent = "  " * i
-            prefix = "└─ " if i > 0 else ""
 
-            timestamp_str = "unknown"
-            if record.timestamp:
-                try:
-                    dt = datetime.fromtimestamp(record.timestamp, tz=timezone.utc)
-                    timestamp_str = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-                except (ValueError, OSError):
-                    timestamp_str = str(record.timestamp)
-
-            status_labels = {
-                0: "ACTIVE",
-                1: "RESTRICTED",
-                2: "DELETED",
-            }
+            node = _chain_hash(record.data_hash)
             status_text = status_labels.get(
-                record.status.value, f"UNKNOWN ({record.status.value})"
+                record.status.value, f"UNKNOWN ({_gw(record.status.value, 20)})"
             )
 
-            response_text += f"\n{indent}{prefix}{record.data_hash}\n"
-            response_text += f"{indent}   Owner: {record.owner}\n"
-            response_text += f"{indent}   Registered: {timestamp_str}\n"
-            response_text += f"{indent}   Type: {quote(record.data_type)}\n"
-            response_text += f"{indent}   Status: {status_text}"
+            response_text += f"\n\n{node}\n" if i else f"\n{node}\n"
+            response_text += f"   Owner: {_chain_address(record.owner)}\n"
+            response_text += (
+                f"   Registered: {_format_chain_timestamp(record.timestamp)}\n"
+            )
+            response_text += f"   Type: {quote(record.data_type)}\n"
+            response_text += f"   Status: {status_text}"
+
+            parents = getattr(record, "parents", None)
+            if isinstance(parents, list):
+                shown = ", ".join(_chain_hash(p) for p in parents[:_MAX_LISTED])
+                response_text += f"\n   Parents: {shown or 'none'}"
+                response_text += _more_note(parents, "   ")
 
             if record.transformations:
                 for t in record.transformations[:_MAX_LISTED]:
-                    response_text += f"\n{indent}   Transform: {quote(t.description)}"
-                response_text += _more_note(record.transformations, indent + "   ")
+                    child = getattr(t, "new_data_hash", None)
+                    if isinstance(child, str) and child:
+                        response_text += (
+                            f"\n   Edge: {node} -> {_chain_hash(child)}: "
+                            f"{quote(t.description)}"
+                        )
+                    else:
+                        response_text += (
+                            f"\n   Transform (child hash not recorded): "
+                            f"{quote(t.description)}"
+                        )
+                response_text += _more_note(record.transformations, "   ")
+
+            read_error = getattr(record, "read_error", None)
+            if isinstance(read_error, str):
+                response_text += f"\n   Read error: {_gw(read_error, 120)}"
+            if getattr(record, "expanded", True) is False:
+                response_text += "\n   Not expanded: max_depth reached"
 
         response_text += f"\n\n{QUOTED_NOTE}"
-        response_text += _format_hints(
-            "get_provenance", ["download_data", "record_transform"]
-        )
+        if banner:
+            response_text = banner + "\n\n" + response_text
+            response_text += _format_hints(
+                "get_provenance_chain", ["get_provenance", "chain_health"]
+            )
+        else:
+            response_text += _format_hints(
+                "get_provenance", ["download_data", "record_transform"]
+            )
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
 

@@ -6,7 +6,7 @@ blockchain features are enabled.
 """
 
 from enum import IntEnum
-from typing import List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -46,6 +46,63 @@ class ChainProvenanceRecord(BaseModel):
     transformations: List[ChainTransformation] = Field(
         default_factory=list, description="Transformations derived from this data"
     )
+    parents: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Hashes this data was derived from, as found by get_provenance_chain. "
+            "None when they were not read or the read failed."
+        ),
+    )
+    expanded: bool = Field(
+        default=True,
+        description=(
+            "False when get_provenance_chain stopped at max_depth and did not "
+            "visit some of this node's parents or children"
+        ),
+    )
+    read_error: Optional[str] = Field(
+        default=None,
+        description=(
+            "Why get_provenance_chain could not read this node's links: a fixed "
+            "label plus the exception class name, never the exception text"
+        ),
+    )
+
+
+class ProvenanceChain(list):
+    """Records returned by ``ChainClient.get_provenance_chain``, with the
+    traversal status.
+
+    It is a ``list`` of ChainProvenanceRecord, so callers that index or
+    iterate the result keep working.
+
+    Attributes:
+        failed: Hash -> label for every node whose record or links could not
+            be read (non-transport errors). A node whose record could not be
+            read has no entry in the list.
+        scan_note: Set when the event index could not be built and the
+            traversal fell back to per-node event queries.
+    """
+
+    def __init__(
+        self,
+        records: Iterable[ChainProvenanceRecord] = (),
+        failed: Optional[Dict[str, str]] = None,
+        scan_note: Optional[str] = None,
+    ):
+        super().__init__(records)
+        self.failed: Dict[str, str] = dict(failed or {})
+        self.scan_note: Optional[str] = scan_note
+
+    @property
+    def unexpanded(self) -> List[str]:
+        """Hashes of the nodes the depth limit stopped at."""
+        return [r.data_hash for r in self if r.expanded is False]
+
+    @property
+    def complete(self) -> bool:
+        """Whether every reachable node was read and expanded."""
+        return not self.failed and self.scan_note is None and not self.unexpanded
 
 
 class AnchorResult(BaseModel):

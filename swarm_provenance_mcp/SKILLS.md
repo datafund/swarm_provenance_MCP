@@ -229,10 +229,20 @@ Inspect provenance records without a wallet.
                                                    │  anchored: block P│
                                                    └───────────────────┘
 
-  get_provenance_chain(hash_0) returns: hash_0 → hash_1 → hash_2
-  get_provenance_chain(hash_2) returns: hash_0 → hash_1 → hash_2  (walks backward to root)
-  get_provenance_chain(hash_1) returns: hash_0 → hash_1 → hash_2  (walks both directions)
+  get_provenance_chain on hash_0, hash_1 or hash_2 returns all three nodes,
+  because it walks both directions. The first entry is the hash you queried.
+  The output shows the same parents and edges in each case:
+
+    hash_0   Parents: none
+             Edge: hash_0 -> hash_1: "Removed duplicates"
+    hash_1   Parents: hash_0
+             Edge: hash_1 -> hash_2: "Anonymized PII"
+    hash_2   Parents: hash_1
 ```
+
+Each node lists its parent hashes, and each edge prints as `Edge: <parent_hash> -> <child_hash>: "<description>"`.
+
+If the output starts with `INCOMPLETE`, the lineage is partial. Do not treat it as the full provenance. The banner names each node that could not be read and each node that `max_depth` stopped at ("not expanded"). Follow its `Retry:` line: call `get_provenance_chain` on the named hash, or with a larger `max_depth`.
 
 ---
 
@@ -245,6 +255,7 @@ Inspect provenance records without a wallet.
 | "already registered" | Hash was already anchored | Not an error when the record owner is the expected owner: `anchor_hash` returns the existing record. An error when another address owns it: change the content, upload it again, and anchor the new hash |
 | "already exists" / "already registered" revert on `record_transform` | `new_hash` was pre-anchored via `anchor_hash` | Do NOT anchor `new_hash` before `record_transform` — it auto-registers. Re-upload the data to get a fresh hash. |
 | "Transformation already recorded" on `record_transform` | Same `(original → new)` pair was already recorded | Not an error — `record_transform` returns the existing link without spending gas. Use `get_provenance_chain` to verify. |
+| `get_provenance_chain` output starts with `INCOMPLETE` | A node's record or links could not be read, `max_depth` stopped the walk, or the event index could not be built | Follow the `Retry:` line in the banner: call `get_provenance_chain` on the named hash, or with a larger `max_depth` |
 | "data not registered" | `original_hash` not anchored | Call `anchor_hash` on the original first, then retry `record_transform` |
 | "too few sources" on `record_merge_transform` | Fewer than 2 source hashes provided | Provide at least 2 source hashes |
 | "too many sources" on `record_merge_transform` | More than 50 source hashes provided | Split into multiple merge operations |

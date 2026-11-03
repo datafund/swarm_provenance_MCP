@@ -11,6 +11,7 @@ Dependencies (web3, eth-account) are included in the default install.
 import contextlib
 import functools
 import logging
+import re
 import threading
 from typing import List, Optional
 
@@ -36,6 +37,7 @@ from .models import (
     ChainWalletInfo,
     DataStatusEnum,
     MergeTransformResult,
+    ProvenanceChain,
     TransformResult,
 )
 
@@ -75,6 +77,45 @@ def _should_fail_over(e: Exception) -> bool:
         # already exhausted the fallbacks.
         return False
     return is_transport_error(e)
+
+
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+
+# get_provenance_chain: why the result is incomplete after the event index
+# build failed. Per-node queries look back a fixed window and skip merges.
+EVENT_INDEX_FALLBACK_NOTE = (
+    "The event index could not be built ({cls}). Links were read with "
+    "per-node event queries, which cover only the last 50,000 blocks and do "
+    "not include merges, so older links and merge links can be missing."
+)
+
+
+def _exc_class_name(e: BaseException) -> str:
+    """The exception class name if it is a plain identifier, else "Exception"."""
+    name = type(e).__name__
+    return name if _IDENTIFIER.fullmatch(name) else "Exception"
+
+
+def _read_failure_label(label: str, e: BaseException) -> str:
+    """A fixed traversal failure label plus the exception class name.
+
+    The exception text is left out: it can carry RPC URLs or chain data.
+    """
+    return f"{label} ({_exc_class_name(e)})"
+
+
+def _traversal_must_raise(e: BaseException) -> bool:
+    """Whether a read error during get_provenance_chain must end the call
+    instead of being reported as a partial result: the endpoint is
+    unavailable (failover can retry), or the client is on the wrong chain."""
+    return is_transport_error(e) or isinstance(
+        e, (ChainConnectionError, ChainConfigurationError)
+    )
+
+
+def _hash_hex(value) -> str:
+    """A hash from the contract as hex: bytes are hex-encoded, others str()."""
+    return value.hex() if isinstance(value, bytes) else str(value)
 
 
 def _rpc_failover(method):
@@ -1436,8 +1477,19 @@ class ChainClient:
             max_depth: Maximum traversal depth. None means no limit (capped at 50).
 
         Returns:
-            List of ChainProvenanceRecord forming the provenance chain,
-            starting with the given hash.
+            ProvenanceChain: a list of ChainProvenanceRecord, starting with
+            the given hash, that also says whether the lineage is complete.
+            A non-transport read failure does not end the call: the node is
+            named in ``failed`` (and in its record's ``read_error`` when the
+            record was read). This includes the root's child-link and parent
+            reads; only an error reading the root record raises. A node the
+            depth limit stopped at has ``expanded=False``. ``scan_note`` is
+            set when the event index could not be built.
+
+        Raises:
+            Transport errors (so ``_rpc_failover`` can retry on another
+            endpoint), a chain id mismatch, and an error reading the root
+            record.
         """
         logger.debug(
             "Get provenance chain: hash=%s max_depth=%s", swarm_hash, max_depth
@@ -1461,6 +1513,7 @@ class ChainClient:
         reverse = {}  # new_hex -> [(original_hex, desc)]
         deploy_block = self._provider.deploy_block
         use_local_index = False
+        scan_note = None
 
         if not use_state_reads and deploy_block is not None:
             try:
@@ -1477,10 +1530,28 @@ class ChainClient:
                     "Full event scan failed, falling back to per-node queries: %s",
                     redact_urls(e),
                 )
+                # Per-node queries cannot see older links or merges: say so.
+                scan_note = EVENT_INDEX_FALLBACK_NOTE.format(cls=_exc_class_name(e))
 
         chain = []
         visited = set()
         to_visit = [(swarm_hash, 0)]
+        failed = {}  # hash -> label, for every node with a read failure
+        cut = {}  # hash -> neighbours not visited because of max_depth
+
+        def note_failure(node, label, e):
+            text = _read_failure_label(label, e)
+            failed[node] = f"{failed[node]}; {text}" if node in failed else text
+            return failed[node]
+
+        def follow(node, neighbour, depth):
+            """Queue a neighbour, or note it as cut off by the depth limit."""
+            if neighbour in visited:
+                return
+            if depth + 1 > effective_max:
+                cut.setdefault(node, set()).add(neighbour)
+            else:
+                to_visit.append((neighbour, depth + 1))
 
         while to_visit:
             current_hash, current_depth = to_visit.pop(0)
@@ -1496,6 +1567,18 @@ class ChainClient:
             except DataNotRegisteredError:
                 logger.debug("Hash %s not registered, skipping", current_hash)
                 continue
+            except Exception as e:
+                # The root is the caller's own hash: no partial result there.
+                if current_hash == swarm_hash or _traversal_must_raise(e):
+                    raise
+                logger.warning(
+                    "Record read failed for %s: %s", current_hash, redact_urls(e)
+                )
+                note_failure(current_hash, "record read failed", e)
+                continue
+
+            parents = []
+            parents_ok = True
 
             if use_state_reads:
                 # V2 contract: state-based traversal
@@ -1504,39 +1587,38 @@ class ChainClient:
                     if links:
                         record.transformations = [
                             ChainTransformation(
-                                description=desc,
-                                new_data_hash=(
-                                    nh.hex() if isinstance(nh, bytes) else str(nh)
-                                ),
+                                description=desc, new_data_hash=_hash_hex(nh)
                             )
                             for nh, desc in links
                         ]
                         for nh, _ in links:
-                            nh_hex = nh.hex() if isinstance(nh, bytes) else str(nh)
-                            if nh_hex not in visited:
-                                to_visit.append((nh_hex, current_depth + 1))
+                            follow(current_hash, _hash_hex(nh), current_depth)
                 except Exception as e:
-                    if is_transport_error(e):
+                    if _traversal_must_raise(e):
                         raise  # retry on another endpoint, don't truncate
                     logger.warning(
                         "State-based forward read failed for %s: %s",
                         current_hash,
                         redact_urls(e),
                     )
+                    record.read_error = note_failure(
+                        current_hash, "child link read failed", e
+                    )
                 # Reverse: parents via state
                 try:
-                    parents = self._contract.get_transformation_parents(current_hash)
-                    for p in parents:
-                        p_hex = p.hex() if isinstance(p, bytes) else str(p)
-                        if p_hex not in visited:
-                            to_visit.append((p_hex, current_depth + 1))
+                    for p in self._contract.get_transformation_parents(current_hash):
+                        parents.append(_hash_hex(p))
                 except Exception as e:
-                    if is_transport_error(e):
+                    if _traversal_must_raise(e):
                         raise  # retry on another endpoint, don't truncate
                     logger.warning(
                         "State-based reverse read failed for %s: %s",
                         current_hash,
                         redact_urls(e),
+                    )
+                    parents_ok = False
+                    record.read_error = note_failure(
+                        current_hash, "parent read failed", e
                     )
             elif use_local_index:
                 # V1 contract: use pre-built event cache index
@@ -1547,64 +1629,69 @@ class ChainClient:
                         for nh, desc in fwd
                     ]
                     for nh, _ in fwd:
-                        if nh not in visited:
-                            to_visit.append((nh, current_depth + 1))
+                        follow(current_hash, nh, current_depth)
                 # Reverse links (parents)
                 for orig_hex, _ in reverse.get(current_hash, []):
-                    if orig_hex not in visited:
-                        to_visit.append((orig_hex, current_depth + 1))
+                    parents.append(orig_hex)
             else:
-                # Per-node event scanning (fallback when deploy_block unknown)
+                # Per-node event scanning (no deploy block, or the index failed)
                 try:
                     events = self._contract.get_transformations_from(current_hash)
                     enriched = []
                     for orig_bytes, new_bytes, desc in events:
-                        new_hash = (
-                            new_bytes.hex()
-                            if isinstance(new_bytes, bytes)
-                            else str(new_bytes)
-                        )
+                        new_hash = _hash_hex(new_bytes)
                         enriched.append(
                             ChainTransformation(
                                 description=desc,
                                 new_data_hash=new_hash,
                             )
                         )
-                        if new_hash not in visited:
-                            to_visit.append((new_hash, current_depth + 1))
+                        follow(current_hash, new_hash, current_depth)
                     if enriched:
                         record.transformations = enriched
                 except Exception as e:
-                    if is_transport_error(e):
+                    if _traversal_must_raise(e):
                         raise  # retry on another endpoint, don't truncate
                     logger.warning(
                         "Event query failed for %s: %s", current_hash, redact_urls(e)
                     )
+                    record.read_error = note_failure(
+                        current_hash, "child link read failed", e
+                    )
                     for t in record.transformations:
-                        if t.new_data_hash and t.new_data_hash not in visited:
-                            to_visit.append((t.new_data_hash, current_depth + 1))
+                        if t.new_data_hash:
+                            follow(current_hash, t.new_data_hash, current_depth)
 
                 try:
                     reverse_events = self._contract.get_transformations_to(current_hash)
                     for orig_bytes, new_bytes, desc in reverse_events:
-                        orig_hash = (
-                            orig_bytes.hex()
-                            if isinstance(orig_bytes, bytes)
-                            else str(orig_bytes)
-                        )
-                        if orig_hash not in visited:
-                            to_visit.append((orig_hash, current_depth + 1))
+                        parents.append(_hash_hex(orig_bytes))
                 except Exception as e:
-                    if is_transport_error(e):
+                    if _traversal_must_raise(e):
                         raise  # retry on another endpoint, don't truncate
                     logger.warning(
                         "Reverse event query failed for %s: %s",
                         current_hash,
                         redact_urls(e),
                     )
+                    parents_ok = False
+                    record.read_error = note_failure(
+                        current_hash, "parent read failed", e
+                    )
+
+            if parents_ok:
+                record.parents = list(dict.fromkeys(parents))  # de-duplicated
+                for p in record.parents:
+                    follow(current_hash, p, current_depth)
 
             chain.append(record)
 
+        # A node is not expanded when the depth limit cut off a neighbour
+        # that no other path reached.
+        for record in chain:
+            if cut.get(record.data_hash, set()) - visited:
+                record.expanded = False
+
         logger.debug("Chain length: %d", len(chain))
 
-        return chain
+        return ProvenanceChain(chain, failed=failed, scan_note=scan_note)

@@ -245,27 +245,36 @@ class DataProvenanceContract:
         data_type: str,
         actual_owner: str,
         sender: str,
+        storage_ref: Optional[str] = None,
     ) -> dict:
         """
         Build transaction to register data on behalf of another owner.
 
-        The sender must be an authorized delegate of the actual owner.
+        The sender must be an authorized delegate of the actual owner. With
+        storage_ref, calls the 4-param registerDataFor(bytes32, string,
+        address, bytes32) overload, which also links the storage reference.
 
         Args:
             data_hash: 64-char hex hash of the data.
             data_type: Category/type string (max 64 chars).
             actual_owner: Address of the actual data owner.
             sender: Address of the delegate sending the transaction.
+            storage_ref: Optional 64-char hex storage reference.
 
         Returns:
             Unsigned transaction dict.
         """
         hash_bytes = _normalize_hash(data_hash)
         _validate_data_type(data_type)
-        return self._contract.functions.registerDataFor(
+        args = [
             hash_bytes,
             data_type,
             self._web3.to_checksum_address(actual_owner),
+        ]
+        if storage_ref:
+            args.append(_normalize_hash(storage_ref))
+        return self._contract.functions.registerDataFor(
+            *args
         ).build_transaction(
             {
                 "from": self._web3.to_checksum_address(sender),

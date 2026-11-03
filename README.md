@@ -420,13 +420,13 @@ Test blockchain RPC connectivity for on-chain provenance. Returns connection sta
 ```
 
 #### `anchor_hash` *(optional — requires `CHAIN_ENABLED=true` and `PROVENANCE_WALLET_KEY`)*
-Register a Swarm reference hash on the blockchain, creating an immutable provenance record with owner, timestamp, and data type. Costs gas. If the hash is already registered to the expected owner (`owner`, or the wallet address), it returns the existing record without error. If another address owns the record, it returns an error that shows both addresses, and it sends no transaction.
+Register a Swarm reference hash on the blockchain, creating an immutable provenance record with owner, timestamp, and data type. Costs gas. If the hash is already registered to the expected owner (`owner`, or the wallet address), it returns the existing record without error. With `storage_ref`, this holds only when the record already links the same storage reference; otherwise it returns an error that shows the existing reference. If another address owns the record, it returns an error that shows both addresses, and it sends no transaction.
 
 **Parameters:**
 - `swarm_hash` (string, required): 64-character hex Swarm reference hash to anchor
 - `data_type` (string): Data type/category (default: `swarm-provenance`, max 64 chars)
-- `owner` (string): Ethereum address to register as owner (defaults to wallet address; requires delegate authorization for other addresses)
-- `storage_ref` (string): Optional 64-character hex storage reference to link bidirectionally. Enables reverse lookup via `lookup_by_storage_ref`. Cannot be combined with `owner`
+- `owner` (string): Ethereum address to register as owner (defaults to wallet address; requires delegate authorization for other addresses). The wallet's own address and the zero address are refused; a mixed-case address must have a valid EIP-55 checksum
+- `storage_ref` (string): Optional 64-character hex storage reference to link bidirectionally. Enables reverse lookup via `lookup_by_storage_ref`. Works with or without `owner` (with `owner`, the contract's `registerDataFor` overload that takes a storage reference). A reference equal to `swarm_hash` or all zeros is refused
 - `confirm` (boolean): Set to `true`, together with `quote_id`, to send the transaction. See [Safety behavior](#safety-behavior)
 - `quote_id` (string): The `quote_id` from the quote for exactly these arguments (single use, valid for 10 minutes)
 

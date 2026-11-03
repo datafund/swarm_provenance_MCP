@@ -408,7 +408,7 @@ TOOL RELATIONSHIPS:
 - upload_data → returns reference hash → use with download_data
 - check_stamp_health gives detailed diagnostics; get_stamp_status gives raw stamp data
 - extend_stamp increases TTL via duration_hours (not capacity)
-- anchor_hash → optionally accepts storage_ref → use lookup_by_storage_ref to reverse-lookup
+- anchor_hash → optional storage_ref (with or without owner) → lookup_by_storage_ref
 - set_storage_ref → links storage ref to an already-anchored hash (set-once) → use lookup_by_storage_ref to verify
 
 ERRORS:
@@ -1982,7 +1982,21 @@ def create_server() -> Server:
                     ),
                     Tool(
                         name="anchor_hash",
-                        description="Register a Swarm reference hash on the blockchain, creating an immutable provenance record with owner, timestamp, and data type. Costs gas — requires a funded wallet (check with chain_balance). If the hash is already registered to the expected owner (owner, or the wallet), it returns the existing record without error. If another address owns it, the result is an error. Do not use this on hashes that will be the new_hash in record_transform — record_transform auto-registers them.",
+                        description=(
+                            "Register a Swarm reference hash on the blockchain, "
+                            "creating an immutable provenance record with owner, "
+                            "timestamp, and data type. Costs gas — requires a funded "
+                            "wallet (check with chain_balance). If the hash is "
+                            "already registered to the expected owner (owner, or the "
+                            "wallet), it returns the existing record without error. "
+                            "If another address owns it, the result is an error. With "
+                            "storage_ref, an existing record of the expected owner "
+                            "counts only when it already links the same storage_ref; "
+                            "otherwise the result is an error. owner and storage_ref "
+                            "can be combined. Do not use this on hashes that will be "
+                            "the new_hash in record_transform — record_transform "
+                            "auto-registers them."
+                        ),
                         inputSchema={
                             "type": "object",
                             "properties": {
@@ -1999,12 +2013,28 @@ def create_server() -> Server:
                                 },
                                 "owner": {
                                     "type": "string",
-                                    "description": "Ethereum address to register as the data owner. If omitted, the wallet address is used. Use this to register data on behalf of another address (requires delegate authorization).",
+                                    "description": (
+                                        "Ethereum address to register as the data "
+                                        "owner. If omitted, the wallet address is "
+                                        "used. Use this to register data on behalf of "
+                                        "another address (requires delegate "
+                                        "authorization). Not the wallet's own address "
+                                        "(omit owner instead) and not the zero "
+                                        "address. A mixed-case address must have a "
+                                        "valid EIP-55 checksum."
+                                    ),
                                     "pattern": "^0x[a-fA-F0-9]{40}$",
                                 },
                                 "storage_ref": {
                                     "type": "string",
-                                    "description": "Optional 64-character hex storage reference (e.g. Swarm hash) to link bidirectionally with the data hash. Enables reverse lookup via lookup_by_storage_ref.",
+                                    "description": (
+                                        "Optional 64-character hex storage reference "
+                                        "(e.g. Swarm hash) to link bidirectionally "
+                                        "with the data hash. Enables reverse lookup "
+                                        "via lookup_by_storage_ref. Works with or "
+                                        "without owner. Must differ from swarm_hash "
+                                        "and must not be all zeros."
+                                    ),
                                     "pattern": "^[a-fA-F0-9]{64}$",
                                 },
                             },
@@ -4056,6 +4086,59 @@ async def handle_chain_health(arguments: Dict[str, Any]) -> CallToolResult:
         )
 
 
+ZERO_HASH_HEX = "0" * 64
+ZERO_ADDRESS_HEX = "0x" + "0" * 40
+
+
+def _same_hash(value: Any, expected: str) -> bool:
+    """Whether a chain-supplied hash equals ``expected``, ignoring case. A
+    value that is not a 64-hex string never matches."""
+    return _is_chain_hash(value) and value.lower() == expected.lower()
+
+
+def _check_anchor_inputs(
+    swarm_hash: str, owner: Optional[str], storage_ref: Optional[str]
+) -> None:
+    """Refuse anchor_hash input the contract reverts on or that registers
+    something else than asked, before any quote or transaction. These are
+    the rules of the SDK's anchor and anchorFor (#167), plus the zero
+    storage ref, which the contract accepts without linking anything.
+
+    Raises:
+        ValueError: With the reason, for the "Validation error" result.
+    """
+    if swarm_hash.lower() == ZERO_HASH_HEX:
+        raise ValueError("swarm_hash is the zero hash, which cannot be registered")
+    if owner is not None:
+        if owner.lower() == ZERO_ADDRESS_HEX:
+            raise ValueError(
+                "owner is the zero address, which cannot own a record"
+            )
+        digits = owner[2:]
+        if digits != digits.lower() and digits != digits.upper():
+            from eth_utils import is_checksum_address
+
+            if not is_checksum_address(owner):
+                raise ValueError(
+                    "owner is mixed case but its EIP-55 checksum is wrong. "
+                    "Use the checksummed form or all lowercase."
+                )
+        wallet = chain_client.address if chain_client else None
+        if _owner_matches(owner, wallet):
+            raise ValueError(
+                "owner is this server's wallet address, which cannot be its "
+                "own delegate. Use anchor_hash without owner."
+            )
+    if storage_ref is not None:
+        if storage_ref.lower() == ZERO_HASH_HEX:
+            raise ValueError(
+                "storage_ref is the zero hash, which links nothing. Omit "
+                "storage_ref or pass a real storage reference."
+            )
+        if storage_ref.lower() == swarm_hash.lower():
+            raise ValueError("storage_ref must differ from swarm_hash")
+
+
 async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle anchor_hash requests — register a Swarm hash on-chain."""
     if not CHAIN_AVAILABLE:
@@ -4109,14 +4192,7 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
         storage_ref = arguments.get("storage_ref") or None
         if storage_ref:
             storage_ref = validate_and_clean_reference_hash(storage_ref)
-        if owner and storage_ref:
-            # anchor_for has no storage ref variant: it would be dropped.
-            raise ValueError(
-                "storage_ref cannot be combined with owner: registering on "
-                "behalf of another owner does not link a storage reference. "
-                "Anchor without storage_ref, then have the owner call "
-                "set_storage_ref."
-            )
+        _check_anchor_inputs(clean_hash, owner, storage_ref)
 
         gate = await _spend_confirmation(
             "anchor_hash",
@@ -4131,7 +4207,11 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
         if gate:
             return gate
 
-        if owner:
+        if owner and storage_ref:
+            result = await asyncio.to_thread(
+                chain_client.anchor_for, clean_hash, owner, data_type, storage_ref
+            )
+        elif owner:
             result = await asyncio.to_thread(
                 chain_client.anchor_for, clean_hash, owner, data_type
             )
@@ -4223,6 +4303,42 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
                     "record, so owner-only tools for this hash fail for the "
                     "expected owner. To anchor a record you own, change the "
                     "content, upload it again, and anchor the new hash.\n\n"
+                )
+                msg += QUOTED_NOTE
+                return CallToolResult(
+                    content=[
+                        TextContent(
+                            type="text",
+                            text=_format_error(
+                                msg, retryable=False, next_tool="get_provenance"
+                            ),
+                        )
+                    ],
+                    isError=True,
+                )
+
+            if storage_ref and not _same_hash(e.storage_ref, storage_ref):
+                # The record is the expected owner's, but the requested
+                # storage ref is not linked to it: reporting success would
+                # drop the storage ref without a word (#167).
+                msg = (
+                    "Hash already registered on-chain, but the storage "
+                    "reference was not linked\n\n"
+                )
+                msg += f"   Swarm Hash: {clean_hash}\n"
+                msg += f"   Owner: {_chain_address(e.owner)}\n"
+                msg += f"   Requested storage ref: {storage_ref}\n"
+                msg += (
+                    "   Existing storage ref: "
+                    f"{_chain_hash(e.storage_ref) if e.storage_ref else 'none'}\n"
+                )
+                msg += f"   Registered: {timestamp_str}\n"
+                msg += f"   Data Type: {quote(e.data_type)}\n\n"
+                msg += (
+                    "No transaction was sent. A storage reference is set "
+                    "once and only the record owner can set it, with "
+                    "set_storage_ref, when the record has none. Use "
+                    "get_provenance to see the record.\n\n"
                 )
                 msg += QUOTED_NOTE
                 return CallToolResult(

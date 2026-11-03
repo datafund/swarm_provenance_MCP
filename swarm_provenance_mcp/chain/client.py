@@ -655,6 +655,7 @@ class ChainClient:
                 owner=record.owner,
                 timestamp=record.timestamp,
                 data_type=record.data_type,
+                storage_ref=record.storage_ref,
             )
         except DataNotRegisteredError:
             pass  # Not registered -- proceed with anchoring
@@ -696,6 +697,7 @@ class ChainClient:
                         owner=record.owner,
                         timestamp=record.timestamp,
                         data_type=record.data_type,
+                        storage_ref=record.storage_ref,
                     ) from e
                 except DataNotRegisteredError:
                     pass  # Still not visible — re-raise original
@@ -718,6 +720,7 @@ class ChainClient:
         swarm_hash: str,
         owner: str,
         data_type: str = "swarm-provenance",
+        storage_ref: Optional[str] = None,
     ) -> AnchorResult:
         """
         Anchor a Swarm hash on behalf of another owner.
@@ -728,11 +731,18 @@ class ChainClient:
             swarm_hash: Swarm reference hash.
             owner: Address of the actual data owner.
             data_type: Data type/category.
+            storage_ref: Optional storage reference (64 hex chars) to link
+                with the data hash, through the 4-param registerDataFor.
 
         Returns:
             AnchorResult with transaction details.
         """
-        logger.debug("Anchor for: hash=%s owner=%s", swarm_hash, owner)
+        logger.debug(
+            "Anchor for: hash=%s owner=%s storage_ref=%s",
+            swarm_hash,
+            owner,
+            storage_ref,
+        )
 
         # Pre-check: avoid wasting gas on already-registered hashes
         try:
@@ -743,19 +753,46 @@ class ChainClient:
                 owner=record.owner,
                 timestamp=record.timestamp,
                 data_type=record.data_type,
+                storage_ref=record.storage_ref,
             )
         except DataNotRegisteredError:
             pass  # Not registered -- proceed with anchoring
 
-        tx = self._contract.build_register_data_for_tx(
-            data_hash=swarm_hash,
-            data_type=data_type,
-            actual_owner=owner,
-            sender=self._wallet.address,
-        )
-        receipt = self._send_transaction(
-            tx, [("DataRegistered", {"dataHash": swarm_hash, "owner": owner})]
-        )
+        build_args = {
+            "data_hash": swarm_hash,
+            "data_type": data_type,
+            "actual_owner": owner,
+            "sender": self._wallet.address,
+        }
+        expected = [("DataRegistered", {"dataHash": swarm_hash, "owner": owner})]
+        if storage_ref:
+            build_args["storage_ref"] = storage_ref
+            expected.append(
+                (
+                    "StorageRefLinked",
+                    {"dataHash": swarm_hash, "storageRef": storage_ref},
+                )
+            )
+        tx = self._contract.build_register_data_for_tx(**build_args)
+        try:
+            receipt = self._send_transaction(tx, expected)
+        except ChainTransactionError as e:
+            # Detect "already registered" revert that the pre-check missed
+            # (can happen when public RPC serves stale reads)
+            if "already registered" in str(e).lower():
+                try:
+                    record = self.get(swarm_hash)
+                    raise DataAlreadyRegisteredError(
+                        f"Data hash {swarm_hash} is already registered on-chain",
+                        data_hash=swarm_hash,
+                        owner=record.owner,
+                        timestamp=record.timestamp,
+                        data_type=record.data_type,
+                        storage_ref=record.storage_ref,
+                    ) from e
+                except DataNotRegisteredError:
+                    pass  # Still not visible — re-raise original
+            raise
 
         return AnchorResult(
             tx_hash=receipt["transactionHash"].hex(),
@@ -765,6 +802,7 @@ class ChainClient:
             swarm_hash=swarm_hash,
             data_type=data_type,
             owner=owner,
+            storage_ref=storage_ref,
         )
 
     @_rpc_failover

@@ -2842,15 +2842,18 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                 if not (isinstance(batch_id, str) and STAMP_ID_PATTERN.match(batch_id)):
                     batch_id = _gw(batch_id, 70) if batch_id is not None else "N/A"
                 expiration = _gw(stamp.get("expectedExpiration"), 40) or "N/A"
-                status = _stamp_status(stamp, _stamp_readiness(stamp))
+                kind = _stamp_readiness(stamp)
+                status = _stamp_status(stamp, kind)
 
                 response_text += f"Batch ID: {batch_id}\n"
                 detail_line = f"  Expiration: {expiration} | Status: {status}"
 
-                # Surface access mode when provided by gateway
+                # Surface access mode when provided by gateway. A rejected
+                # mode is always shown, even an empty one.
                 access_mode = stamp.get("accessMode")
-                if access_mode:
-                    detail_line += f" | Access: {_gw(access_mode, 30)}"
+                if access_mode or kind == "other":
+                    shown = _gw(access_mode, 30) or "(empty)"
+                    detail_line += f" | Access: {shown}"
 
                 # Surface propagation status when provided
                 propagation_status = stamp.get("propagationStatus")

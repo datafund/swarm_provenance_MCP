@@ -414,3 +414,20 @@ class TestMissingExpiration:
     async def test_missing_expiration_prints_na(self, server):
         text = await _list(server, [_stamp("shared")])
         assert "Expiration: N/A |" in text
+
+
+class TestRejectedAccessModeIsShown:
+    """A stamp refused for its access mode shows that mode, even an empty one."""
+
+    @pytest.mark.parametrize(
+        "mode,shown",
+        [("", "(empty)"), ("   ", "(empty)"), (False, "False"), (0, "0"), ([], "[]"), ({}, "{}")],
+    )
+    async def test_falsy_mode_is_printed(self, server, mode, shown):
+        text = await _list(server, [_stamp(mode)])
+        assert "Not usable by this server (access mode it cannot use)" in text
+        assert f"| Access: {shown}" in text
+
+    async def test_writable_without_mode_has_no_access_field(self, server):
+        text = await _list(server, [_stamp("absent"), _stamp(None, batch_id=OTHER_ID)])
+        assert "Access:" not in text

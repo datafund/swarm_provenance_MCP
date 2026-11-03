@@ -424,9 +424,9 @@ Register a Swarm reference hash on the blockchain, creating an immutable provena
 
 **Parameters:**
 - `swarm_hash` (string, required): 64-character hex Swarm reference hash to anchor
-- `data_type` (string): Data type/category (default: `swarm-provenance`, max 64 chars)
+- `data_type` (string): Data type/category (default: `swarm-provenance`). Must not be empty or only whitespace; at most 64 characters and 64 UTF-8 bytes
 - `owner` (string): Ethereum address to register as owner (defaults to wallet address; requires delegate authorization for other addresses). The wallet's own address and the zero address are refused; a mixed-case address must have a valid EIP-55 checksum
-- `storage_ref` (string): Optional 64-character hex storage reference to link bidirectionally. Enables reverse lookup via `lookup_by_storage_ref`. Works with or without `owner` (with `owner`, the contract's `registerDataFor` overload that takes a storage reference). A reference equal to `swarm_hash` or all zeros is refused
+- `storage_ref` (string): Optional 64-character hex storage reference to link bidirectionally. Enables reverse lookup via `lookup_by_storage_ref`. Works with or without `owner`. With `owner`, the server calls the `registerDataFor` overload that takes a storage reference. A reference equal to `swarm_hash` or all zeros is refused
 - `confirm` (boolean): Set to `true`, together with `quote_id`, to send the transaction. See [Safety behavior](#safety-behavior)
 - `quote_id` (string): The `quote_id` from the quote for exactly these arguments (single use, valid for 10 minutes)
 
@@ -505,7 +505,7 @@ Record an N-to-1 merge transformation on-chain, combining multiple source hashes
 - `source_hashes` (array of strings, required): 2–50 source Swarm reference hashes to merge (each 64-character hex)
 - `new_hash` (string, required): 64-character hex Swarm reference of the merged result
 - `description` (string): Description of the merge transformation (max 256 chars)
-- `new_data_type` (string): Data type for the merged result (default: `"merged"`, max 64 chars)
+- `new_data_type` (string): Data type for the merged result (default: `"merged"`). Must not be empty or only whitespace; at most 64 characters and 64 UTF-8 bytes
 - `confirm` (boolean): Set to `true`, together with `quote_id`, to send the transaction. See [Safety behavior](#safety-behavior)
 - `quote_id` (string): The `quote_id` from the quote for exactly these arguments (single use, valid for 10 minutes)
 

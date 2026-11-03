@@ -2007,7 +2007,11 @@ def create_server() -> Server:
                                 },
                                 "data_type": {
                                     "type": "string",
-                                    "description": "Data type/category for the on-chain record (default: 'swarm-provenance')",
+                                    "description": (
+                                        "Data type/category for the on-chain record "
+                                        "(default: 'swarm-provenance'). Must not be "
+                                        "empty; at most 64 UTF-8 bytes."
+                                    ),
                                     "default": "swarm-provenance",
                                     "maxLength": 64,
                                 },
@@ -2018,8 +2022,8 @@ def create_server() -> Server:
                                         "owner. If omitted, the wallet address is "
                                         "used. Use this to register data on behalf of "
                                         "another address (requires delegate "
-                                        "authorization). Not the wallet's own address "
-                                        "(omit owner instead) and not the zero "
+                                        "authorization). Do not pass the wallet's own "
+                                        "address (omit owner instead) or the zero "
                                         "address. A mixed-case address must have a "
                                         "valid EIP-55 checksum."
                                     ),
@@ -2134,7 +2138,11 @@ def create_server() -> Server:
                                 },
                                 "new_data_type": {
                                     "type": "string",
-                                    "description": "Data type for the merged result (default: 'merged'). Max 64 characters.",
+                                    "description": (
+                                        "Data type for the merged result (default: "
+                                        "'merged'). Must not be empty; at most 64 "
+                                        "characters and 64 UTF-8 bytes."
+                                    ),
                                     "default": "merged",
                                     "maxLength": 64,
                                 },
@@ -4096,13 +4104,39 @@ def _same_hash(value: Any, expected: str) -> bool:
     return _is_chain_hash(value) and value.lower() == expected.lower()
 
 
+MAX_DATA_TYPE_BYTES = 64
+
+
+def _check_data_type(value: Any, name: str) -> None:
+    """Refuse a data type the contract reverts on ('Data type cannot be
+    empty', 'Data type too long'), as the SDK's validateDataType does: not
+    a string, empty or whitespace only, or more than 64 UTF-8 bytes. More
+    than 64 characters keeps its earlier message.
+
+    Raises:
+        ValueError: With the reason, for the "Validation error" result.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string")
+    if not value.strip():
+        raise ValueError(f"{name} must not be empty")
+    if len(value) > MAX_DATA_TYPE_BYTES:
+        raise ValueError(f"{name} must be 64 characters or fewer")
+    size = len(value.encode("utf-8", "surrogatepass"))
+    if size > MAX_DATA_TYPE_BYTES:
+        raise ValueError(
+            f"{name} is {size} bytes (UTF-8); the contract accepts at most "
+            f"{MAX_DATA_TYPE_BYTES} bytes"
+        )
+
+
 def _check_anchor_inputs(
     swarm_hash: str, owner: Optional[str], storage_ref: Optional[str]
 ) -> None:
     """Refuse anchor_hash input the contract reverts on or that registers
-    something else than asked, before any quote or transaction. These are
-    the rules of the SDK's anchor and anchorFor (#167), plus the zero
-    storage ref, which the contract accepts without linking anything.
+    something other than what was asked, before any quote or transaction.
+    These are the rules of the SDK's anchor and anchorFor (#167), plus the
+    zero storage ref, which the contract accepts without linking anything.
 
     Raises:
         ValueError: With the reason, for the "Validation error" result.
@@ -4181,8 +4215,7 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
         clean_hash = validate_and_clean_reference_hash(swarm_hash)
 
         data_type = arguments.get("data_type", "swarm-provenance")
-        if len(data_type) > 64:
-            raise ValueError("data_type must be 64 characters or fewer")
+        _check_data_type(data_type, "data_type")
 
         # Only a missing key or None means "no owner": any other value,
         # including "", False and 0, must be a valid address.
@@ -4358,6 +4391,10 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
             response_text = f"⛓️  Hash already registered on-chain\n\n"
             response_text += f"   Swarm Hash: {clean_hash}\n"
             response_text += f"   Owner: {_chain_address(e.owner)}\n"
+            if owner and storage_ref:
+                # The record links the requested ref (checked above). The
+                # no-owner output stays as it was.
+                response_text += f"   Storage Ref: {storage_ref}\n"
             response_text += f"   Registered: {timestamp_str}\n"
             response_text += f"   Data Type: {quote(e.data_type)}"
             response_text += f"\n\n{QUOTED_NOTE}"
@@ -5019,8 +5056,7 @@ async def handle_record_merge_transform(arguments: Dict[str, Any]) -> CallToolRe
             raise ValueError("description must be 256 characters or fewer")
 
         new_data_type = arguments.get("new_data_type", "merged")
-        if len(new_data_type) > 64:
-            raise ValueError("new_data_type must be 64 characters or fewer")
+        _check_data_type(new_data_type, "new_data_type")
 
         gate = await _spend_confirmation(
             "record_merge_transform",

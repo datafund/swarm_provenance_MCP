@@ -10,6 +10,7 @@ import copy
 from unittest.mock import patch
 
 import pytest
+import requests
 
 from swarm_provenance_mcp.server import create_server
 from tests.test_list_stamps_readiness_260 import _value_id
@@ -397,6 +398,20 @@ class TestBranchDecisionsUseCheckedValues:
         assert _next_lines(text) == [f"_next: {expected}"], text
         if degraded:
             assert "Call health_check again after the gateway operator" in text
+            # One recommendation, which does not say both "retrying will not
+            # help" and "call health_check again".
+            assert "retrying will not help" not in text
+            assert "\u2014" not in text.split("_recommendations:", 1)[1]
+
+    async def test_degraded_network_without_usable_stamp_keeps_text(self, server):
+        def health(h):
+            h["gateway_response"]["bee_node"]["connected_peers"] = 0
+            return h
+
+        text = (await _run(server, "health_check", {"health_check": health})).content[0].text
+        assert "Operator action required \u2014 retrying will not help." in text
+        assert "Call health_check again after the gateway operator" not in text
+        assert _next_lines(text) == ["_next: check_stamp_health"]
 
 
 class TestCheckStampHealthUtilizationLine:
@@ -462,6 +477,9 @@ class TestNonObjectAnswers:
         assert not result.isError, text
         assert "not in the expected format" in text
         assert SENTINEL not in text
+        if field != "status" and not isinstance(value, list):
+            assert f"   [?] The {field} list is not in the expected format\n" in text
+            assert "gateway's answer" not in text
 
     @pytest.mark.parametrize("value", NOT_OBJECT, ids=_hostile_id)
     async def test_get_wallet_info(self, server, value):
@@ -510,8 +528,12 @@ class TestNonObjectAnswers:
             return b
 
         result = await _run(server, "purchase_stamp", {"purchase_stamp": body})
+        text = result.content[0].text
         assert not result.isError
-        assert f"Batch ID: `0x{TEST_STAMP_ID}`" in result.content[0].text
+        # Printed as the tool description promises: 64 hex characters, no 0x.
+        assert f"Batch ID: `{TEST_STAMP_ID}`" in text
+        assert f"Stamp ID: `{TEST_STAMP_ID}`" in text
+        assert "0x" not in text
 
     @pytest.mark.parametrize("value", NOT_OBJECT, ids=_hostile_id)
     async def test_extend_outcome_unknown(self, server, value):
@@ -529,6 +551,25 @@ class TestNonObjectAnswers:
 
         text = (await _run(server, "extend_stamp", {"extend_stamp": body})).content[0].text
         assert "Batch ID: `N/A`" in text
+
+    @pytest.mark.parametrize(
+        "message", [5, True, None, [FORGED], {"k": FORGED}, 10**400], ids=_hostile_id
+    )
+    async def test_extend_message_must_be_text(self, server, message):
+        def body(b):
+            b["message"] = message
+            return b
+
+        text = (await _run(server, "extend_stamp", {"extend_stamp": body})).content[0].text
+        assert "   Status: Extended\n" in text
+
+    async def test_extend_text_message_unchanged(self, server):
+        def body(b):
+            b["message"] = "Stamp extended"
+            return b
+
+        text = (await _run(server, "extend_stamp", {"extend_stamp": body})).content[0].text
+        assert "   Status: Stamp extended\n" in text
 
     @pytest.mark.parametrize("value", [[1], "x", 7, True], ids=_hostile_id)
     @pytest.mark.parametrize("field", ["gateway_response", "x402", "free_tier"])
@@ -576,6 +617,72 @@ class TestNonObjectAnswers:
         assert "0 usable by this server / 0 local" in text
         assert "No stamps found" in text
         assert _next_lines(text) == ["_next: purchase_stamp"]
+
+
+def _deep_response(status=200):
+    """A real requests.Response whose body is nested too deeply to parse:
+    gateway_client._json raises requests.InvalidJSONError for it."""
+    response = requests.Response()
+    response.status_code = status
+    response._content = b"[" * 100_000
+    response.headers["Content-Type"] = "application/json"
+    response.url = "http://127.0.0.1:9/api/v1/stamps/"
+    return response
+
+
+class TestUnreadable2xxWriteAnswer:
+    """A 2xx whose body cannot be parsed means the write may have happened,
+    whatever exception the parse raised. The real client path is used."""
+
+    async def test_purchase(self, server):
+        from swarm_provenance_mcp import server as srv
+
+        with patch.object(srv.gateway_client.session, "post", return_value=_deep_response()):
+            result = await call_tool_directly(
+                server, "purchase_stamp", {"duration_hours": 24, "label": "run-1"}
+            )
+        text = result.content[0].text
+        assert result.isError
+        assert "outcome unknown" in text
+        assert "retryable: false" in text
+        assert _next_lines(text) == ["_next: list_stamps"]
+
+    async def test_extend(self, server):
+        from requests.exceptions import ConnectionError as RequestsConnectionError
+        from swarm_provenance_mcp import server as srv
+
+        session = srv.gateway_client.session
+        with patch.object(session, "get", side_effect=RequestsConnectionError("down")), \
+                patch.object(session, "patch", return_value=_deep_response()):
+            result = await call_tool_directly(
+                server, "extend_stamp", {"stamp_id": TEST_STAMP_ID, "duration_hours": 24}
+            )
+        text = result.content[0].text
+        assert result.isError
+        assert "outcome unknown" in text
+        assert "retryable: false" in text
+        assert _next_lines(text) == ["_next: get_stamp_status"]
+
+    @pytest.mark.parametrize("status,expected", [
+        (200, True), (201, True), (204, True), (400, False), (404, False), (503, False),
+    ])
+    def test_classifier_reads_status(self, status, expected):
+        from swarm_provenance_mcp.server import _is_ambiguous_write_error
+
+        error = requests.exceptions.HTTPError("x", response=_deep_response(status))
+        assert _is_ambiguous_write_error(error) is expected
+
+    def test_classifier_invalid_json(self):
+        from swarm_provenance_mcp.server import _is_ambiguous_write_error
+
+        error = requests.exceptions.InvalidJSONError("bad body", response=_deep_response())
+        assert _is_ambiguous_write_error(error) is True
+
+    def test_classifier_any_2xx_request_error(self):
+        from swarm_provenance_mcp.server import _is_ambiguous_write_error
+
+        error = requests.exceptions.RequestException("x", response=_deep_response(200))
+        assert _is_ambiguous_write_error(error) is True
 
 
 # Full output for valid gateway answers, captured from the code before #270
@@ -662,8 +769,8 @@ GOLDEN = {
         '_related: list_stamps, purchase_stamp, get_wallet_info'
     ),
     'health_check_peers_0': (
-        # Changed in #270 round 2: a degraded network with a usable stamp
-        # now gives _next: health_check and says when to call it.
+        # Changed on purpose in #270: a degraded network with a usable stamp
+        # gives _next: health_check and one recommendation that says when.
         '✅ Gateway operational\n'
         '\n'
         '🌐 Gateway: http://localhost:8000\n'
@@ -679,8 +786,7 @@ GOLDEN = {
         '\n'
         'ready: false\n'
         '_recommendations:\n'
-        "  - The gateway's Bee node cannot reliably reach the Swarm network: uploads may never propagate and only data stored on this node can be downloaded. Operator action required — retrying will not help.\n"
-        "  - Call health_check again after the gateway operator fixes the Bee node's network connection. Do not upload until it reports the Swarm network as connected\n"
+        "  - The gateway's Bee node cannot reliably reach the Swarm network: uploads may never propagate and only data stored on this node can be downloaded. Operator action required. Call health_check again after the gateway operator fixes the Bee node's network connection, and do not upload until it reports the Swarm network as connected.\n"
         '_gateway: http://localhost:8000 (connected)\n'
         '\n'
         '_next: health_check\n'

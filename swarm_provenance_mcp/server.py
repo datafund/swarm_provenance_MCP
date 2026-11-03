@@ -951,13 +951,15 @@ def _is_ambiguous_write_error(e: Exception) -> bool:
     from requests.exceptions import (
         ChunkedEncodingError,
         ConnectTimeout,
-        JSONDecodeError,
+        InvalidJSONError,
         ReadTimeout,
     )
     from requests.exceptions import ConnectionError as ReqConnectionError
 
-    if isinstance(e, (ReadTimeout, ChunkedEncodingError, JSONDecodeError)):
-        # JSONDecodeError: a 2xx whose body could not be parsed — it succeeded.
+    if isinstance(e, (ReadTimeout, ChunkedEncodingError, InvalidJSONError)):
+        # InvalidJSONError (JSONDecodeError included): the client raises it
+        # only after a 2xx, for a body it cannot parse, for example one
+        # nested too deeply. The write succeeded.
         return True
     if isinstance(e, ReqConnectionError) and not isinstance(e, ConnectTimeout):
         # Dropped after sending ("Connection aborted", RemoteDisconnected), or
@@ -970,8 +972,12 @@ def _is_ambiguous_write_error(e: Exception) -> bool:
             for marker in ("Connection aborted", "RemoteDisconnected", "Read timed out")
         )
     response = getattr(e, "response", None)
+    if response is None:
+        return False
+    status = getattr(response, "status_code", None)
+    # Any error that carries a 2xx answer came after the write succeeded.
     # 500 too: the gateway returns it for errors raised after the purchase call.
-    return response is not None and response.status_code in (500, 502, 504)
+    return isinstance(status, int) and (200 <= status < 300 or status in (500, 502, 504))
 
 
 def _ambiguous_write_result(
@@ -2575,6 +2581,8 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
             return _ambiguous_write_result(
                 "Stamp purchase", reason, "list_stamps", _new_batch_hint(label, depth)
             )
+        # 64 hexadecimal characters, as the tool description says: no 0x.
+        batch_id = validate_and_clean_stamp_id(batch_id)
 
         response_text = f"🎉 Stamp purchased successfully!\n\n"
         response_text += f"📋 Your Stamp Details:\n"
@@ -3021,7 +3029,9 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
             batch_id = "N/A"
         response_text += f"   Batch ID: `{batch_id}`\n"
         response_text += f"   Additional Duration: {duration_hours} hours\n"
-        response_text += f"   Status: {one_line(result.get('message', 'Extended'))}\n\n"
+        message = result.get("message")
+        status_text = one_line(message) if isinstance(message, str) else "Extended"
+        response_text += f"   Status: {status_text}\n\n"
         response_text += f"⏱️  Important: Extension takes up to 2 minutes to propagate through the blockchain.\n"
         response_text += f"🔍 Check stamp status again in about 2 minutes to see the new expiration time."
         response_text += _format_hints("check_stamp_health", ["get_stamp_status"])
@@ -3525,6 +3535,12 @@ async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
         )
 
 
+_NETWORK_DEGRADED_TEXT = (
+    "The gateway's Bee node cannot reliably reach the Swarm network: uploads "
+    "may never propagate and only data stored on this node can be downloaded."
+)
+
+
 async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle health check requests with adaptive status.
 
@@ -3534,6 +3550,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
     ready = False
     recommendations = []
     next_tool = "list_stamps"
+    network_rec = None  # index of the degraded-network recommendation
 
     try:
         result = gateway_client.health_check()
@@ -3601,10 +3618,10 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 f"\n🐝 Swarm network: DEGRADED ({network['summary']})\n"
                 f"   {'; '.join(network['problems'])}\n"
             )
+            network_rec = len(recommendations)
             recommendations.append(
-                "The gateway's Bee node cannot reliably reach the Swarm network: "
-                "uploads may never propagate and only data stored on this node can "
-                "be downloaded. Operator action required — retrying will not help."
+                _NETWORK_DEGRADED_TEXT + " Operator action required — retrying "
+                "will not help."
             )
         advisories = _bee_advisories(gw_resp) if gateway_ok else []
         if advisories:
@@ -3659,10 +3676,12 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     next_tool = "upload_data"
                 elif usable_count > 0:
                     # The degraded network blocks uploads to a usable stamp.
-                    recommendations.append(
-                        "Call health_check again after the gateway operator "
-                        "fixes the Bee node's network connection. Do not upload "
-                        "until it reports the Swarm network as connected"
+                    # One recommendation that agrees with _next.
+                    recommendations[network_rec] = (
+                        _NETWORK_DEGRADED_TEXT + " Operator action required. Call "
+                        "health_check again after the gateway operator fixes the "
+                        "Bee node's network connection, and do not upload until it "
+                        "reports the Swarm network as connected."
                     )
                     next_tool = "health_check"
                 elif counts["pending"]:
@@ -3771,10 +3790,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         # Gateway status
         response_text += f"\n_gateway: {gateway_url} ({'connected' if gateway_ok else 'unreachable'})"
 
-        if next_tool:
-            response_text += f"\n\n_next: {next_tool}"
-        else:
-            response_text += "\n"
+        response_text += f"\n\n_next: {next_tool}"
         response_text += f"\n_related: list_stamps, purchase_stamp, get_wallet_info"
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
@@ -3811,7 +3827,7 @@ def _health_entries(title: str, entries: Any) -> str:
         return ""
     text = f"{title}:\n"
     if not isinstance(entries, list):
-        return text + f"   [?] {_NOT_EXPECTED_FORMAT}\n"
+        return text + f"   [?] The {title.lower()} list is not in the expected format\n"
     for entry in entries:
         if not isinstance(entry, dict):
             text += "   [?] An entry is not in the expected format\n"

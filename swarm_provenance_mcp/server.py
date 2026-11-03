@@ -74,15 +74,12 @@ def _gw_text(value: Any, max_chars: int = 100) -> str:
     return _gw(value, max_chars) if isinstance(value, str) else ""
 
 
-def _has_label(value: Any) -> bool:
-    """Whether a gateway label is printed: only text that is not blank."""
-    return isinstance(value, str) and bool(value.strip())
+def _is_text(value: Any) -> bool:
+    """Whether an optional gateway text field is printed: a non-empty str.
 
-
-def _ready_at(value: Any) -> str:
-    """A gateway estimatedReadyAt for printing: only text, through _gw;
-    "" for any other type, so callers fall back to their no-estimate text."""
-    return _gw_text(value)
+    Blank text counts, as it did before #270: it is a valid value of an
+    Optional[str] field. Any other type is never printed."""
+    return isinstance(value, str) and bool(value)
 
 
 def _number_in(value: Any, low: float, high: float) -> Optional[Union[int, float]]:
@@ -996,7 +993,8 @@ def _is_ambiguous_write_error(e: Exception) -> bool:
         # gateway client raises GatewayAnswerUnreadable for every such cause;
         # the requests classes it wraps are listed for callers that bypass
         # it. Ambiguous unless the status is known and is an error status.
-        return not isinstance(status, int) or 200 <= status < 300
+        # Below 400 (2xx, or a final 3xx): the gateway did not refuse it.
+        return not isinstance(status, int) or status < 400
     if isinstance(e, ReadTimeout):
         return True
     if isinstance(e, ReqConnectionError) and not isinstance(e, ConnectTimeout):
@@ -1063,9 +1061,8 @@ def _stamp_baseline(stamp_id: str) -> str:
         return ""
     # Only values that pass a check: a part that fails is left out.
     parts = []
-    expiry = _gw_text(details.get("expectedExpiration"))
-    if expiry:
-        parts.append(f"expiry {expiry}")
+    if _is_text(details.get("expectedExpiration")):
+        parts.append(f"expiry {_gw(details['expectedExpiration'])}")
     ttl = _number_in(details.get("batchTTL"), 0, MAX_TTL_SECONDS)
     if ttl is not None:
         parts.append(f"TTL {ttl}s")
@@ -2664,10 +2661,11 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"\n✅ Stamp ID: `{batch_id}`\n"
 
         propagation_status = result.get("propagationStatus")
-        estimated_ready = _ready_at(result.get("estimatedReadyAt"))
+        estimated_ready = _gw_text(result.get("estimatedReadyAt"))
+        has_estimate = _is_text(result.get("estimatedReadyAt"))
         if propagation_status == "ready":
             response_text += "⏱️  Stamp is ready immediately (from the gateway pool).\n"
-        elif propagation_status == "propagating" and estimated_ready:
+        elif propagation_status == "propagating" and has_estimate:
             response_text += f"⏱️  Stamp is propagating — estimated ready at {estimated_ready}.\n"
             response_text += (
                 "   → Use check_stamp_health to confirm it's ready before uploading."
@@ -2838,14 +2836,15 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"Immutable: {_flag_text(result.get('immutableFlag'))}\n"
         response_text += f"Local: {_flag_text(result.get('local'))}\n"
 
-        if _has_label(result.get("label")):
+        if _is_text(result.get("label")):
             response_text += f"Label: {quote(result['label'])}\n"
             response_text += f"{QUOTED_NOTE}\n"
 
         # Propagation timing (from gateway, when available)
         propagation_status = result.get("propagationStatus")
         seconds_since = result.get("secondsSincePurchase")
-        estimated_ready = _ready_at(result.get("estimatedReadyAt"))
+        estimated_ready = _gw_text(result.get("estimatedReadyAt"))
+        has_estimate = _is_text(result.get("estimatedReadyAt"))
 
         if isinstance(propagation_status, str) and propagation_status:
             response_text += f"Propagation: {_gw(propagation_status)}"
@@ -2853,7 +2852,7 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
             age = _stamp_age(seconds_since)
             if age is not None:
                 response_text += f" ({age}s since purchase)"
-            if estimated_ready and propagation_status == "propagating":
+            if has_estimate and propagation_status == "propagating":
                 response_text += f" — ready at {estimated_ready}"
             response_text += "\n"
 
@@ -2987,7 +2986,7 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
 
                 # What identifies a batch from an unanswered purchase
                 identity = []
-                if _has_label(stamp.get("label")):
+                if _is_text(stamp.get("label")):
                     identity.append(f"Label: {_label(stamp['label'])}")
                 depth = _plain_depth(stamp.get("depth"))
                 if depth is not None:
@@ -3005,7 +3004,7 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += "\n💡 All stamps are public (shared): other gateway users can fill them. For production use with predictable capacity, run your own Bee node or gateway. This server sends no wallet, so it cannot upload to wallet-owned stamps.\n"
 
         # Labels of shared stamps are written by other gateway users.
-        if any(_has_label(s.get("label")) for s in stamps):
+        if any(_is_text(s.get("label")) for s in stamps):
             response_text += f"\n{QUOTED_NOTE}\n"
 
         # Contextual hints, in health_check's order. Each recommendation
@@ -3973,9 +3972,8 @@ def _health_entries(title: str, entries: Any) -> str:
         code = entry.get("code", "?")
         code = one_line(code, 40) if isinstance(code, str) else "?"
         text += f"   [{code}] {_gw_text(entry.get('message', ''), 500)}\n"
-        suggestion = _gw_text(entry.get("suggestion"), 500)
-        if suggestion:
-            text += f"   → {suggestion}\n"
+        if _is_text(entry.get("suggestion")):
+            text += f"   → {one_line(entry['suggestion'], 500)}\n"
     return text
 
 
@@ -4039,21 +4037,27 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
             response_text += f"\nStatus:\n"
             if utilization is not None:
                 shown = f"{percent}%" if percent is not None else "N/A"
+                # Missing: "unknown"; null (a valid Optional) prints as before:
+                # empty. Any other type: "unknown".
                 util_status = status.get("utilizationStatus", "unknown")
-                util_status = _gw(util_status) if isinstance(util_status, str) else "unknown"
+                if util_status is not None:
+                    util_status = (
+                        _gw(util_status) if isinstance(util_status, str) else "unknown"
+                    )
+                util_status = _gw(util_status)
                 response_text += f"   Utilization: {shown} ({util_status})\n"
             # Left out when it fails validation, as when it is missing.
             ttl = _number_in(status.get("batchTTL"), 0, MAX_TTL_SECONDS)
             if ttl is not None:
                 response_text += f"   TTL: {_ttl_text(ttl)}\n"
-            expires = _gw_text(status.get("expectedExpiration"))
-            if expires:
-                response_text += f"   Expires: {expires}\n"
+            if _is_text(status.get("expectedExpiration")):
+                response_text += f"   Expires: {_gw(status['expectedExpiration'])}\n"
 
         # Propagation timing (from gateway, when available)
         propagation_status = result.get("propagationStatus")
         seconds_since = result.get("secondsSincePurchase")
-        estimated_ready = _ready_at(result.get("estimatedReadyAt"))
+        estimated_ready = _gw_text(result.get("estimatedReadyAt"))
+        has_estimate = _is_text(result.get("estimatedReadyAt"))
 
         if isinstance(propagation_status, str) and propagation_status:
             response_text += f"\nPropagation:\n"
@@ -4061,7 +4065,7 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
             age = _stamp_age(seconds_since)
             if age is not None:
                 response_text += f"   Purchased: {age}s ago\n"
-            if estimated_ready:
+            if has_estimate:
                 response_text += f"   Estimated ready: {estimated_ready}\n"
 
         # Contextual hints based on health
@@ -4091,13 +4095,15 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
             if errors_unreadable:
                 response_text += (
                     "\n💡 The gateway's error list is not in the expected format, so "
-                    "the cause is unknown. Retry check_stamp_health in 15 seconds."
+                    "the cause is unknown. Retry check_stamp_health in 15 seconds. "
+                    "If the same answer repeats, call get_stamp_status to see the "
+                    "stamp's state."
                 )
                 response_text += _format_hints(
                     "check_stamp_health", ["list_stamps", "get_stamp_status"]
                 )
             elif is_propagating:
-                if estimated_ready:
+                if has_estimate:
                     response_text += (
                         f"\n💡 Stamp is propagating. Estimated ready at {estimated_ready}. "
                         "Retry check_stamp_health in 15 seconds."
@@ -4153,8 +4159,9 @@ def _wallet_text(value: Any) -> str:
 
 
 def _wallet_balance(value: Any) -> str:
-    """bzzBalance for printing: text, or a number from 0 to 10**40."""
-    if isinstance(value, str):
+    """bzzBalance for printing: text, or a number from 0 to 10**40. Null
+    (a valid Optional) prints empty, as before #270."""
+    if value is None or isinstance(value, str):
         return _gw(value)
     number = _number_in(value, 0, 10**40)
     return "N/A" if number is None else _gw(number)
@@ -4169,7 +4176,7 @@ async def handle_get_wallet_info(arguments: Dict[str, Any]) -> CallToolResult:
         if isinstance(result, dict):
             response_text += (
                 f"   Address: {_wallet_text(result.get('walletAddress', 'N/A'))}\n"
-                f"   BZZ Balance: {_wallet_balance(result.get('bzzBalance'))}\n"
+                f"   BZZ Balance: {_wallet_balance(result.get('bzzBalance', 'N/A'))}\n"
             )
         else:
             response_text += (

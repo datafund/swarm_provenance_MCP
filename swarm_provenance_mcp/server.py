@@ -52,6 +52,13 @@ def _gw(value: Any, max_chars: int = 100) -> str:
     return one_line(value, max_chars)
 
 
+def _flag_text(value: Any) -> str:
+    """A gateway flag: True or False only for a real bool, else capped by _gw."""
+    if isinstance(value, bool):
+        return str(value)
+    return _gw(value, 20) or "N/A"
+
+
 def _number_in(value: Any, low: float, high: float) -> Optional[Union[int, float]]:
     """A gateway number, only when it is an int or float (not a bool) from
     ``low`` to ``high``; otherwise None.
@@ -2634,6 +2641,9 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
 # A batch TTL above this (about 3,000 years) is printed as the gateway sent
 # it, not converted.
 MAX_TTL_SECONDS = 10**11
+# get_stamp_status prints a numeric amount or block number only up to these.
+MAX_STAMP_AMOUNT = 10**40
+MAX_BLOCK_NUMBER = 10**12
 
 
 def _ttl_text(ttl: Union[int, float]) -> str:
@@ -2697,10 +2707,21 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         result = gateway_client.get_stamp_details(clean_stamp_id)
 
         response_text = f"Stamp Details for {clean_stamp_id}:\n"
-        response_text += f"Amount: {result.get('amount', 'N/A')}\n"
-        response_text += f"Depth: {result.get('depth', 'N/A')}\n"
-        response_text += f"Bucket Depth: {result.get('bucketDepth', 'N/A')}\n"
-        response_text += f"Block Number: {result.get('blockNumber', 'N/A')}\n"
+        # Each gateway value is printed only after a check, or through _gw,
+        # so no value can start a hint line (#242).
+        amount = _number_in(result.get("amount"), 0, MAX_STAMP_AMOUNT)
+        if amount is None:
+            amount = _gw(result.get("amount"), 40) or "N/A"
+        response_text += f"Amount: {amount}\n"
+        for name, key in (("Depth", "depth"), ("Bucket Depth", "bucketDepth")):
+            depth = _plain_depth(result.get(key))
+            if depth is None:
+                depth = _gw(result.get(key), 20) or "N/A"
+            response_text += f"{name}: {depth}\n"
+        block = _number_in(result.get("blockNumber"), 0, MAX_BLOCK_NUMBER)
+        if block is None:
+            block = _gw(result.get("blockNumber"), 20) or "N/A"
+        response_text += f"Block Number: {block}\n"
 
         # Enhanced TTL information
         batch_ttl = result.get("batchTTL")
@@ -2716,8 +2737,8 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         )
 
         # Enhanced usability information
-        usable = result.get("usable", "N/A")
-        response_text += f"Usable: {usable}"
+        usable = result.get("usable")
+        response_text += f"Usable: {_flag_text(usable)}"
         if usable is False:
             response_text += " ⚠️  (Cannot be used for uploads)"
         elif usable is True:
@@ -2726,8 +2747,8 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
 
         response_text += f"Utilization: {_format_stamp_utilization(result)}\n"
 
-        response_text += f"Immutable: {result.get('immutableFlag', 'N/A')}\n"
-        response_text += f"Local: {result.get('local', 'N/A')}\n"
+        response_text += f"Immutable: {_flag_text(result.get('immutableFlag'))}\n"
+        response_text += f"Local: {_flag_text(result.get('local'))}\n"
 
         if result.get("label"):
             response_text += f"Label: {quote(result['label'])}\n"

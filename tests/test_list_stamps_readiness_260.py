@@ -16,6 +16,12 @@ from tests.test_tool_execution import TEST_STAMP_ID, call_tool_directly
 OTHER_ID = "c" * 64
 
 
+def _value_id(value):
+    """Short test IDs for huge ints."""
+    text = repr(value)
+    return text if len(text) <= 12 else f"{'-' if value < 0 else ''}10**{len(text.lstrip('-')) - 1}"
+
+
 @pytest.fixture
 def server():
     return create_server()
@@ -240,7 +246,9 @@ class TestHostileGatewayValues:
         assert "Depth: 17" in text
 
     @pytest.mark.parametrize(
-        "value", [True, float("nan"), float("inf"), float("-inf"), -5, 10**30, "60"]
+        "value",
+        [True, float("nan"), float("inf"), float("-inf"), -5, 10**30, 10**400, -10**400, "60"],
+        ids=_value_id,
     )
     async def test_bad_age_is_not_printed(self, server, value):
         text = await _list(server, [_stamp("shared", secondsSincePurchase=value)])
@@ -431,3 +439,117 @@ class TestRejectedAccessModeIsShown:
     async def test_writable_without_mode_has_no_access_field(self, server):
         text = await _list(server, [_stamp("absent"), _stamp(None, batch_id=OTHER_ID)])
         assert "Access:" not in text
+
+
+# Values a JSON gateway can send that break naive number handling: ints too
+# large for a float, strings, bools, NaN and infinities.
+HOSTILE_NUMBERS = [
+    10**400, -10**400, 10**30, -1, "7", "", True, False,
+    float("nan"), float("inf"), float("-inf"), None, [], {},
+]
+
+
+STAMP_NUMBER_FIELDS = [
+    "depth", "secondsSincePurchase", "usable", "batchID", "accessMode",
+    "expectedExpiration", "unusableReason", "propagationStatus", "label",
+    "utilization", "utilizationPercent", "batchTTL", "amount",
+]
+
+
+class TestHostileNumbersNeverRaise:
+    """No gateway value makes list_stamps, health_check, get_stamp_status or
+    check_stamp_health fail."""
+
+    @staticmethod
+    def _assert_ok(result):
+        assert not result.isError, result.content[0].text
+        assert "Error" not in result.content[0].text.split("\n", 1)[0]
+
+    @pytest.mark.parametrize("value", HOSTILE_NUMBERS, ids=_value_id)
+    @pytest.mark.parametrize("field", STAMP_NUMBER_FIELDS)
+    async def test_list_stamps(self, server, field, value):
+        stamp = _stamp("shared", unusableReason="not_found")
+        stamp[field] = value
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.list_stamps.return_value = {"stamps": [stamp], "total_count": value}
+            result = await call_tool_directly(server, "list_stamps", {})
+        self._assert_ok(result)
+
+    @pytest.mark.parametrize("value", HOSTILE_NUMBERS, ids=_value_id)
+    @pytest.mark.parametrize(
+        "field",
+        STAMP_NUMBER_FIELDS
+        + ["response_time_ms", "connected_peers", "warnings", "healthy",
+           "warming_up", "rate_limit_per_minute"],
+    )
+    async def test_health_check(self, server, field, value):
+        stamp = _stamp("shared", usable=False, unusableReason="not_found")
+        bee = {"connected_peers": 5, "network_availability": "Available"}
+        free_tier = {"rate_limit_per_minute": 3}
+        health = {
+            "status": "healthy",
+            "gateway_url": "http://localhost:8000",
+            "response_time_ms": 12.5,
+            "gateway_response": {"status": "ok", "bee_node": bee,
+                                 "x402": {"free_tier": free_tier}},
+        }
+        if field in STAMP_NUMBER_FIELDS:
+            stamp[field] = value
+        elif field == "response_time_ms":
+            health[field] = value
+        elif field == "rate_limit_per_minute":
+            free_tier[field] = value
+        else:
+            bee[field] = value
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.health_check.return_value = health
+            gw.list_stamps.return_value = {"stamps": [stamp], "total_count": value}
+            result = await call_tool_directly(server, "health_check", {})
+        assert "_next:" in result.content[0].text or "_recommendations" in result.content[0].text
+        assert "Error" not in result.content[0].text.split("\n", 1)[0]
+
+    @pytest.mark.parametrize("value", HOSTILE_NUMBERS, ids=_value_id)
+    @pytest.mark.parametrize(
+        "field", ["utilization", "utilizationPercent", "batchTTL", "depth", "bucketDepth"]
+    )
+    async def test_get_stamp_status(self, server, field, value):
+        details = {"batchID": TEST_STAMP_ID, "usable": True, "depth": 20,
+                   "bucketDepth": 16, "utilization": 2, "batchTTL": 86400}
+        details[field] = value
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.get_stamp_details.return_value = details
+            result = await call_tool_directly(
+                server, "get_stamp_status", {"stamp_id": TEST_STAMP_ID}
+            )
+        self._assert_ok(result)
+
+    @pytest.mark.parametrize("value", HOSTILE_NUMBERS, ids=_value_id)
+    @pytest.mark.parametrize("field", ["utilizationPercent", "batchTTL"])
+    async def test_check_stamp_health(self, server, field, value):
+        status = {"utilizationPercent": 10, "batchTTL": 86400}
+        status[field] = value
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.check_stamp_health.return_value = {
+                "can_upload": True, "errors": [], "warnings": [], "status": status
+            }
+            result = await call_tool_directly(
+                server, "check_stamp_health", {"stamp_id": TEST_STAMP_ID}
+            )
+        self._assert_ok(result)
+
+    @pytest.mark.parametrize("value", [10**400, "7", True, float("nan"), -1], ids=_value_id)
+    async def test_bad_ttl_is_not_converted(self, server, value):
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.get_stamp_details.return_value = {"batchID": TEST_STAMP_ID, "batchTTL": value}
+            result = await call_tool_directly(
+                server, "get_stamp_status", {"stamp_id": TEST_STAMP_ID}
+            )
+        assert "days)" not in result.content[0].text
+
+    async def test_good_ttl_is_converted(self, server):
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.get_stamp_details.return_value = {"batchID": TEST_STAMP_ID, "batchTTL": 172800}
+            result = await call_tool_directly(
+                server, "get_stamp_status", {"stamp_id": TEST_STAMP_ID}
+            )
+        assert "Batch TTL: 172,800 seconds (2.0 days)" in result.content[0].text

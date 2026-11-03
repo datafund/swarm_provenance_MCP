@@ -12,7 +12,7 @@ import secrets
 import time
 import traceback
 from decimal import Decimal, localcontext
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -50,6 +50,19 @@ from .untrusted import (
 def _gw(value: Any, max_chars: int = 100) -> str:
     """A gateway or RPC field, flattened to one capped line for printing."""
     return one_line(value, max_chars)
+
+
+def _number_in(value: Any, low: float, high: float) -> Optional[Union[int, float]]:
+    """A gateway number, only when it is an int or float (not a bool) from
+    ``low`` to ``high``; otherwise None.
+
+    Compares without converting, so NaN (every comparison is false), the
+    infinities and ints too large for a float are rejected without raising
+    (math.isfinite raises OverflowError on such an int)."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if low <= value <= high:
+            return value
+    return None
 
 
 # Configure logging
@@ -1388,7 +1401,8 @@ def _bee_advisories(gateway_response: Dict[str, Any]) -> List[str]:
     bee = gateway_response.get("bee_node")
     if not isinstance(bee, dict):
         return []
-    return [str(w) for w in bee.get("warnings") or []]
+    warnings = bee.get("warnings")
+    return [str(w) for w in warnings] if isinstance(warnings, list) else []
 
 
 def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -2617,6 +2631,16 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         )
 
 
+# A batch TTL above this (about 3,000 years) is printed as the gateway sent
+# it, not converted.
+MAX_TTL_SECONDS = 10**11
+
+
+def _ttl_text(ttl: Union[int, float]) -> str:
+    """A validated TTL in seconds, with the days it is."""
+    return f"{ttl:,} seconds ({ttl/86400:.1f} days)"
+
+
 def _format_stamp_utilization(details: Dict[str, Any]) -> str:
     """Stamp utilization as a percentage.
 
@@ -2627,14 +2651,7 @@ def _format_stamp_utilization(details: Dict[str, Any]) -> str:
     def _is_int(v: Any) -> bool:
         return isinstance(v, int) and not isinstance(v, bool)
 
-    percent = details.get("utilizationPercent")
-    if not (
-        isinstance(percent, (int, float))
-        and not isinstance(percent, bool)
-        and math.isfinite(percent)
-        and 0 <= percent <= 100
-    ):
-        percent = None
+    percent = _number_in(details.get("utilizationPercent"), 0, 100)
 
     raw = details.get("utilization")
     count = None
@@ -2686,13 +2703,13 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"Block Number: {result.get('blockNumber', 'N/A')}\n"
 
         # Enhanced TTL information
-        batch_ttl = result.get("batchTTL", "N/A")
-        if batch_ttl != "N/A":
-            response_text += (
-                f"Batch TTL: {batch_ttl:,} seconds ({batch_ttl/86400:.1f} days)\n"
-            )
+        batch_ttl = result.get("batchTTL")
+        ttl = _number_in(batch_ttl, 0, MAX_TTL_SECONDS)
+        if ttl is not None:
+            response_text += f"Batch TTL: {_ttl_text(ttl)}\n"
         else:
-            response_text += f"Batch TTL: {batch_ttl}\n"
+            shown = "N/A" if batch_ttl is None else _gw(batch_ttl, 40) or "N/A"
+            response_text += f"Batch TTL: {shown}\n"
 
         response_text += (
             f"Expected Expiration: {_gw(result.get('expectedExpiration', 'N/A'))}\n"
@@ -2805,14 +2822,7 @@ def _plain_depth(value: Any) -> Optional[int]:
 
 def _stamp_age(value: Any) -> Optional[float]:
     """secondsSincePurchase, only as a finite, non-negative, sane number."""
-    if (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-        and 0 <= value <= MAX_STAMP_AGE_SECONDS
-    ):
-        return value
-    return None
+    return _number_in(value, 0, MAX_STAMP_AGE_SECONDS)
 
 
 async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
@@ -3464,20 +3474,20 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
 
         status = result.get("status", "unknown")
         gateway_url = result.get("gateway_url", "N/A")
-        response_time = result.get("response_time_ms", "N/A")
+        response_time = _number_in(result.get("response_time_ms"), 0, 10**9)
 
         gateway_ok = status == "healthy"
 
         if gateway_ok:
             response_text = f"✅ Gateway operational\n\n"
             response_text += f"🌐 Gateway: {gateway_url}\n"
-            if isinstance(response_time, (int, float)):
+            if response_time is not None:
                 response_text += f"⚡ Response Time: {response_time:.0f}ms\n"
         else:
             response_text = f"⚠️  Gateway issues detected\n\n"
             response_text += f"Status: {status}\n"
             response_text += f"Gateway: {gateway_url}\n"
-            if isinstance(response_time, (int, float)):
+            if response_time is not None:
                 response_text += f"Response Time: {response_time:.0f}ms\n"
             recommendations.append(
                 "Gateway not healthy — check connectivity or try again later"
@@ -3497,7 +3507,10 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         x402 = gw_resp.get("x402") or {}
         free_tier = x402.get("free_tier") or {}
         rate_limit = free_tier.get("rate_limit_per_minute")
-        if rate_limit:
+        if rate_limit and _number_in(rate_limit, 1, 10**6) is None:
+            # Not a sane count: say free tier without printing the value.
+            response_text += "\n💰 Payment: free tier\n"
+        elif rate_limit:
             response_text += f"\n💰 Payment: free tier ({rate_limit} write req/min, reads unlimited)\n"
         elif x402:
             response_text += "\n💰 Payment: x402 enabled\n"
@@ -3752,8 +3765,9 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
             if status.get("utilizationPercent") is not None:
                 response_text += f"   Utilization: {status['utilizationPercent']}% ({_gw(status.get('utilizationStatus', 'unknown'))})\n"
             if status.get("batchTTL") is not None:
-                ttl = status["batchTTL"]
-                response_text += f"   TTL: {ttl:,} seconds ({ttl/86400:.1f} days)\n"
+                ttl = _number_in(status["batchTTL"], 0, MAX_TTL_SECONDS)
+                shown = _ttl_text(ttl) if ttl is not None else _gw(status["batchTTL"], 40)
+                response_text += f"   TTL: {shown}\n"
             if status.get("expectedExpiration"):
                 response_text += f"   Expires: {_gw(status['expectedExpiration'])}\n"
 

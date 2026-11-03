@@ -416,8 +416,9 @@ class TestBranchDecisionsUseCheckedValues:
             assert _next_lines(text) == ["_next: check_stamp_health"], (tool, text)
             assert "purchase_stamp" not in text.split("_next:")[0].split("_related")[0], text
             assert (
-                "1 stamp has an access mode the gateway does not document, so check it "
-                "with check_stamp_health before you buy another stamp"
+                "1 stamp has an access mode the gateway does not document (batch ID: "
+                f"{TEST_STAMP_ID}), so check it with check_stamp_health before you buy "
+                "another stamp"
             ) in text
             assert "this server cannot use" not in text.split("_next:")[0].split("_recommendations")[-1]
 
@@ -1659,21 +1660,106 @@ class TestAgentTextsNeverBuyOnUnknownLists:
         assert "when no stamp is usable or pending and the list is complete" in skills
 
 
+class TestRound13:
+    @pytest.mark.parametrize("mode", ["weird", 7])
+    async def test_undocumented_mode_names_batch_id(self, server, mode):
+        def stamps(b):
+            b["stamps"][0]["accessMode"] = mode
+            return b
+
+        for tool, overrides in (
+            ("health_check", {"list_stamps": stamps}),
+            ("list_stamps", {"list_stamps": stamps}),
+        ):
+            text = (await _run(server, tool, overrides)).content[0].text
+            assert (
+                f"1 stamp has an access mode the gateway does not document (batch ID: "
+                f"{TEST_STAMP_ID}), so check it with check_stamp_health before you buy "
+                "another stamp"
+            ) in text, (tool, text)
+            assert _next_lines(text) == ["_next: check_stamp_health"]
+
+    def test_undocumented_mode_ids_capped(self):
+        from swarm_provenance_mcp.server import _no_writable_stamp_text
+
+        ids = [c * 64 for c in "abcde"]
+        text = _no_writable_stamp_text({"pool": 0, "owned": 0, "other": 5, "spent": 0}, ids)
+        assert f"(batch IDs: {ids[0]}, {ids[1]}, {ids[2]}, and 2 more)" in text
+
+    async def test_undocumented_mode_without_valid_id_never_checks_nothing(self, server):
+        def stamps(b):
+            b["stamps"][0]["accessMode"] = "weird"
+            b["stamps"][0]["batchID"] = "abc"
+            return b
+
+        for tool, nxt in (("health_check", "list_stamps"), ("list_stamps", "health_check")):
+            text = (await _run(server, tool, {"list_stamps": stamps})).content[0].text
+            assert _next_lines(text) == [f"_next: {nxt}"], (tool, text)
+            assert (
+                "1 stamp has an access mode the gateway does not document, and its batch "
+                "ID is not in the expected format, so this server cannot check it. Do not "
+                "buy another stamp yet. If the same answer repeats, stop and report it to "
+                "the gateway operator"
+            ) in text, text
+
+    @pytest.mark.parametrize("reference", ["0x" + "b" * 64, "0X" + "B" * 64, "0x" + "b" * 128])
+    async def test_upload_accepts_0x_reference(self, server, reference):
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.get_stamp_details.return_value = {"usable": True}
+            gw.upload_data.return_value = {"reference": reference}
+            result = await call_tool_directly(
+                server, "upload_data", {"data": "{}", "stamp_id": TEST_STAMP_ID}
+            )
+        text = result.content[0].text
+        assert not result.isError, text
+        assert f"Reference Hash: `{reference[2:]}`" in text
+
+    async def test_upload_unknown_last_sentence(self, server):
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.get_stamp_details.return_value = {"usable": True}
+            gw.upload_data.return_value = {"reference": "abc"}
+            result = await call_tool_directly(
+                server, "upload_data", {"data": "{}", "stamp_id": TEST_STAMP_ID}
+            )
+        assert "Call check_stamp_health to check that the stamp still has capacity." in result.content[0].text
+
+    def test_as_sentence_escapes_hidden_characters(self):
+        from swarm_provenance_mcp.server import _as_sentence
+
+        # one_line escapes a bidi control: it never reaches the agent raw.
+        text = _as_sentence("bad\u202eanswer")
+        assert "\u202e" not in text
+        assert "\\u202e" in text
+
+    def test_readme(self):
+        from pathlib import Path
+
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+        assert (
+            "unknown or incomplete (some entries are not in the expected format, or a "
+            "usable or pending stamp has a batch ID that is not in the expected format)"
+        ) in readme
+        assert "a degraded Swarm network with a usable stamp gives `_next: health_check`" in readme
+        assert "an unknown or incomplete stamp list gives `_next: list_stamps`" in readme
+        assert "an access mode the gateway does not document gives `_next: check_stamp_health`" in readme
+
+
 class TestRound12:
     def test_undocumented_mode_count_singular_and_plural(self):
         from swarm_provenance_mcp.server import _no_writable_stamp_text
 
-        one = _no_writable_stamp_text({"pool": 1, "owned": 0, "other": 1, "spent": 0})
+        a, b = "a" * 64, "b" * 64
+        one = _no_writable_stamp_text({"pool": 1, "owned": 0, "other": 1, "spent": 0}, [a])
         assert one == (
             "No stamp this server can write to: 1 pool stamp is gateway inventory. "
-            "1 stamp has an access mode the gateway does not document, so check it "
-            "with check_stamp_health before you buy another stamp"
+            f"1 stamp has an access mode the gateway does not document (batch ID: {a}), "
+            "so check it with check_stamp_health before you buy another stamp"
         )
-        two = _no_writable_stamp_text({"pool": 0, "owned": 0, "other": 2, "spent": 0})
+        two = _no_writable_stamp_text({"pool": 0, "owned": 0, "other": 2, "spent": 0}, [a, b])
         assert two == (
             "No stamp this server can write to. 2 stamps have access modes the gateway "
-            "does not document, so check them with check_stamp_health before you buy "
-            "another stamp"
+            f"does not document (batch IDs: {a}, {b}), so check them with "
+            "check_stamp_health before you buy another stamp"
         )
 
     @pytest.mark.parametrize("field", ["errors", "warnings"])

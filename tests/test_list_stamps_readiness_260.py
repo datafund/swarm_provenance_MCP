@@ -330,6 +330,8 @@ class TestStampReadiness:
             "owned": 1,
             "other": 1,
             "pending_ids": [TEST_STAMP_ID],
+            # Valid batch IDs of stamps with an undocumented access mode (#270).
+            "other_ids": [TEST_STAMP_ID, TEST_STAMP_ID],
             "blocked": {"pool": 2, "owned": 2, "other": 2, "spent": 1},
         }
 

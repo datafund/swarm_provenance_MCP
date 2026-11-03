@@ -1023,7 +1023,7 @@ def _is_ambiguous_write_error(e: Exception) -> bool:
 def _as_sentence(reason: Any) -> str:
     """A reason (an exception or text) as one sentence: capital first
     letter, final period."""
-    text = flatten(str(reason), MAX_EXCEPTION_CHARS).strip() or "No details"
+    text = one_line(str(reason), MAX_EXCEPTION_CHARS).strip() or "No details"
     text = text[0].upper() + text[1:]
     return text if text.endswith((".", "!", "?")) else text + "."
 
@@ -1294,6 +1294,7 @@ def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
         "other": 0,
     }
     counts["pending_ids"] = []
+    counts["other_ids"] = []
     # Every stamp this server cannot use, usable or not, by kind.
     blocked = {"pool": 0, "owned": 0, "other": 0, "spent": 0}
     counts["blocked"] = blocked
@@ -1303,6 +1304,10 @@ def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
             continue
         if kind in ("pool", "owned", "other"):
             blocked[kind] += 1
+            if kind == "other":
+                other_id = _clean_gateway_batch_id(stamp.get("batchID"))
+                if other_id is not None:
+                    counts["other_ids"].append(other_id)
             if stamp.get("usable") is True:
                 counts[kind] += 1
         elif kind == "spent":
@@ -1317,7 +1322,21 @@ def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
     return counts
 
 
-def _no_writable_stamp_text(blocked: Dict[str, int]) -> str:
+def _batch_ids_text(batch_ids: Sequence[str]) -> str:
+    """' (batch ID: ...)' for valid batch IDs, at most MAX_PENDING_IDS_SHOWN
+    of them; '' when there are none."""
+    if not batch_ids:
+        return ""
+    shown = ", ".join(batch_ids[:MAX_PENDING_IDS_SHOWN])
+    more = len(batch_ids) - MAX_PENDING_IDS_SHOWN
+    return f" (batch ID{'s' if len(batch_ids) != 1 else ''}: {shown}" + (
+        f", and {more} more)" if more > 0 else ")"
+    )
+
+
+def _no_writable_stamp_text(
+    blocked: Dict[str, int], other_ids: Sequence[str] = ()
+) -> str:
     """health_check recommendation when no stamp is writable, naming only the
     kinds of stamps actually listed."""
     parts = []
@@ -1341,23 +1360,42 @@ def _no_writable_stamp_text(blocked: Dict[str, int]) -> str:
     if other:
         # An access mode outside the documented set: the stamp may be one
         # this server can use, so a purchase could duplicate it.
-        if other == 1:
+        # other_ids: their valid batch IDs, named so that the agent can
+        # check them. Without one, the agent cannot check them either.
+        one = other == 1
+        stamps = (
+            "1 stamp has an access mode" if one
+            else f"{other} stamps have access modes"
+        )
+        if other_ids:
             check = (
-                "1 stamp has an access mode the gateway does not document, so "
-                "check it with check_stamp_health before you buy another stamp"
+                f"{stamps} the gateway does not document{_batch_ids_text(other_ids)}, "
+                f"so check {'it' if one else 'them'} with check_stamp_health "
+                "before you buy another stamp"
             )
         else:
             check = (
-                f"{other} stamps have access modes the gateway does not document, "
-                "so check them with check_stamp_health before you buy another stamp"
+                f"{stamps} the gateway does not document, and "
+                f"{'its batch ID is' if one else 'their batch IDs are'} not in the "
+                "expected format, so this server cannot check "
+                f"{'it' if one else 'them'}. Do not buy another stamp yet. "
+                f"{_REPEAT_TO_OPERATOR[:-1]}"
             )
         return f"No stamp this server can write to{detail} {check}"
     return f"No stamp this server can write to{detail} Purchase a stamp with purchase_stamp"
 
 
-def _no_writable_stamp_next(blocked: Dict[str, int]) -> str:
-    """The _next that matches _no_writable_stamp_text."""
-    return "check_stamp_health" if blocked["other"] else "purchase_stamp"
+def _no_writable_stamp_next(
+    blocked: Dict[str, int], other_ids: Sequence[str], from_tool: str
+) -> str:
+    """The _next that matches _no_writable_stamp_text. Stamps with an
+    undocumented access mode and no valid batch ID cannot be checked: the
+    list goes back to the other stamp tool, as an unknown list does."""
+    if not blocked["other"]:
+        return "purchase_stamp"
+    if other_ids:
+        return "check_stamp_health"
+    return "health_check" if from_tool == "list_stamps" else "list_stamps"
 
 
 # Batch IDs listed in the pending-stamp recommendation, at most.
@@ -1367,13 +1405,7 @@ MAX_PENDING_IDS_SHOWN = 3
 def _pending_stamp_text(count: int, batch_ids: List[str]) -> str:
     """health_check recommendation for writable stamps that are not usable
     yet. Pairs with _next: check_stamp_health."""
-    ids = ""
-    if batch_ids:
-        shown = ", ".join(batch_ids[:MAX_PENDING_IDS_SHOWN])
-        more = len(batch_ids) - MAX_PENDING_IDS_SHOWN
-        ids = f" (batch ID{'s' if len(batch_ids) != 1 else ''}: {shown}" + (
-            f", and {more} more)" if more > 0 else ")"
-        )
+    ids = _batch_ids_text(batch_ids)
     return (
         f"{count} stamp{'s' if count != 1 else ''} this server can write to "
         f"{'are' if count != 1 else 'is'} not usable yet, probably still "
@@ -1591,8 +1623,6 @@ def _bee_advisories(gateway_response: Dict[str, Any]) -> List[str]:
     if not isinstance(warnings, list):
         return []
     return [w for w in warnings if isinstance(w, str)]
-
-
 
 
 def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -3177,9 +3207,14 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += _format_hints("health_check", ["check_stamp_health"])
         else:
             if stamps:
-                response_text += f"\n💡 {_no_writable_stamp_text(counts['blocked'])}.\n"
+                response_text += (
+                    f"\n💡 {_no_writable_stamp_text(counts['blocked'], counts['other_ids'])}.\n"
+                )
             response_text += _format_hints(
-                _no_writable_stamp_next(counts["blocked"]), ["get_wallet_info"]
+                _no_writable_stamp_next(
+                    counts["blocked"], counts["other_ids"], "list_stamps"
+                ),
+                ["get_wallet_info"],
             )
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
@@ -3332,7 +3367,7 @@ def _upload_outcome_unknown(
             "again normally returns the same reference. A second upload also "
             "uses stamp capacity again. "
         )
-    msg += "Call check_stamp_health to confirm the stamp first."
+    msg += "Call check_stamp_health to check that the stamp still has capacity."
     logger.error(msg)
     return CallToolResult(
         content=[
@@ -3424,9 +3459,12 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
                     return _upload_outcome_unknown(e, sign)
             raise
         reference = result.get("reference") if isinstance(result, dict) else None
-        if not (
-            isinstance(reference, str) and SWARM_REFERENCE_PATTERN.fullmatch(reference)
-        ):
+        try:
+            # 64 or 128 hexadecimal characters, a 0x prefix removed.
+            reference = validate_and_clean_swarm_reference(reference)
+        except ValueError:
+            reference = None
+        if reference is None:
             return _upload_outcome_unknown(
                 "The gateway's answer has no valid reference", sign
             )
@@ -3984,8 +4022,12 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     )
                     next_tool = "list_stamps"
                 elif total_stamps > 0:
-                    recommendations.append(_no_writable_stamp_text(counts["blocked"]))
-                    next_tool = _no_writable_stamp_next(counts["blocked"])
+                    recommendations.append(
+                        _no_writable_stamp_text(counts["blocked"], counts["other_ids"])
+                    )
+                    next_tool = _no_writable_stamp_next(
+                        counts["blocked"], counts["other_ids"], "health_check"
+                    )
                 else:
                     recommendations.append(
                         "No stamps found — purchase one before uploading"

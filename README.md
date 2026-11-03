@@ -251,7 +251,7 @@ Each stamp's `Status` uses the same rule as `health_check`:
 - `Cannot become usable`: expired, about to expire, full, invalid depth, unreadable on the node, or not found on the node.
 - `Cannot be used: the batch ID is not in the expected format`: a usable or pending stamp without a valid batch ID. An upload needs the ID, so the server counts it as an entry it cannot read.
 
-`_next` is `upload_data` when a stamp is usable, `check_stamp_health` when a stamp is still propagating, and `purchase_stamp` otherwise. If the stamp list is unknown or incomplete (some entries are not in the expected format), `_next` is `health_check`, never `purchase_stamp`. If no stamp is usable or pending and a stamp has an access mode the gateway does not document, `_next` is `check_stamp_health`.
+`_next` is `upload_data` when a stamp is usable, `check_stamp_health` when a stamp is still propagating, and `purchase_stamp` otherwise. If the stamp list is unknown or incomplete (some entries are not in the expected format, or a usable or pending stamp has a batch ID that is not in the expected format), `_next` is `health_check`, never `purchase_stamp`. If no stamp is usable or pending and a stamp has an access mode the gateway does not document, `_next` is `check_stamp_health`, and the recommendation names that stamp's batch ID.
 
 **Parameters:** None
 
@@ -634,6 +634,11 @@ _gateway: <url> (connected|unreachable)
 The output also has a `Swarm network:` line: `connected (...)`, `DEGRADED (...)`, or `not reported by gateway`. When it is `DEGRADED`, `ready` is `false` even if stamps are usable, because uploads may not propagate.
 
 `ready` is true only when the server has a usable stamp it can write to: a `shared` stamp, or one without an `accessMode` (older gateways). `pool` stamps (gateway inventory) and `owned` stamps (registered to the wallet that paid for them) are counted separately, because the gateway refuses writes from this server to them. A writable stamp that is not usable yet (still propagating) leads to `_next: check_stamp_health`, not to a purchase.
+
+Three more cases never lead to a purchase:
+- a degraded Swarm network with a usable stamp gives `_next: health_check`: call it again after the gateway operator fixes the Bee node's network connection;
+- an unknown or incomplete stamp list gives `_next: list_stamps`; if the same answer repeats, stop and report it to the gateway operator;
+- with no usable or pending stamp, a stamp with an access mode the gateway does not document gives `_next: check_stamp_health`, and the recommendation names its batch ID.
 
 ### Safety behavior
 

@@ -8,6 +8,8 @@ create stamps or upload data through the default ``SWARM_GATEWAY_URL``.
   module-level settings and gateway client pick it up.
 * Tests marked ``integration`` are skipped unless ``--run-integration`` is
   given (point them at a local gateway with ``SWARM_TEST_GATEWAY_URL``).
+* Tests marked ``performance`` assert on wall-clock time, which depends on
+  machine load. They are skipped unless ``--run-performance`` is given.
 * Any HTTP request to the production gateway host fails the test that made
   it, even if the test swallows the exception. The only way past this guard
   is to name the production gateway explicitly in ``SWARM_TEST_GATEWAY_URL``.
@@ -58,15 +60,28 @@ def pytest_addoption(parser):
         default=False,
         help="run tests marked 'integration' against SWARM_TEST_GATEWAY_URL",
     )
+    parser.addoption(
+        "--run-performance",
+        action="store_true",
+        default=False,
+        help="run tests marked 'performance' (wall-clock timing checks)",
+    )
+
+
+_OPT_IN_MARKERS = {
+    "integration": "--run-integration",
+    "performance": "--run-performance",
+}
 
 
 def pytest_collection_modifyitems(config, items):
-    if config.getoption("--run-integration"):
-        return
-    skip = pytest.mark.skip(reason="integration test: pass --run-integration")
-    for item in items:
-        if "integration" in item.keywords:
-            item.add_marker(skip)
+    for marker, option in _OPT_IN_MARKERS.items():
+        if config.getoption(option):
+            continue
+        skip = pytest.mark.skip(reason=f"{marker} test: pass {option}")
+        for item in items:
+            if marker in item.keywords:
+                item.add_marker(skip)
 
 
 @pytest.fixture(autouse=True)

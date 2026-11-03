@@ -111,7 +111,12 @@ def main():
     if args.performance or args.full:
         total_tests += 1
         if run_command(
-            base_cmd + ["tests/test_performance_regression.py", "-m", "not slow"],
+            base_cmd + [
+                "tests/test_performance_regression.py",
+                "-m",
+                "not slow",
+                "--run-performance",
+            ],
             "Performance Baseline Tests",
             continue_on_error=True
         ):
@@ -120,7 +125,12 @@ def main():
         if args.full:
             total_tests += 1
             if run_command(
-                base_cmd + ["tests/test_performance_regression.py", "-m", "slow"],
+                base_cmd + [
+                    "tests/test_performance_regression.py",
+                    "-m",
+                    "slow",
+                    "--run-performance",
+                ],
                 "Sustained Load Tests",
                 continue_on_error=True
             ):

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Start the MCP server over stdio and check that it answers ``tools/list``.
+"""Start the MCP server over stdio and check ``tools/list`` and the skills guide.
 
 Usage:
     python scripts/mcp_stdio_smoke.py -- swarm-provenance-mcp
     python scripts/mcp_stdio_smoke.py -- docker run -i --rm IMAGE
 
-Sends ``initialize``, ``notifications/initialized`` and ``tools/list``, then
-checks that the server returned the core tools. Exits non-zero (and prints the
+Sends ``initialize``, ``notifications/initialized``, ``tools/list`` and
+``resources/read`` for ``provenance://skills``, then checks that the server
+returned the core tools and the packaged SKILLS.md (not its "not found"
+fallback). Exits non-zero (and prints the
 server's stderr) if the server fails to start or answers wrongly. Uses only
 the standard library so it can run against an image without installing the
 package.
@@ -20,6 +22,8 @@ import threading
 import time
 
 CORE_TOOLS = {"health_check", "purchase_stamp", "upload_data", "download_data"}
+# Start of the text the server serves when SKILLS.md is not installed.
+SKILLS_FALLBACK = "Provenance skills guide not found"
 
 MESSAGES = [
     {
@@ -34,7 +38,23 @@ MESSAGES = [
     },
     {"jsonrpc": "2.0", "method": "notifications/initialized"},
     {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "resources/read",
+        "params": {"uri": "provenance://skills"},
+    },
 ]
+
+
+def _skills_text(reply):
+    """Text of the first content in a resources/read reply, or "" when the
+    reply does not have that shape."""
+    result = reply.get("result") if isinstance(reply, dict) else None
+    contents = result.get("contents") if isinstance(result, dict) else None
+    first = contents[0] if isinstance(contents, list) and contents else None
+    text = first.get("text") if isinstance(first, dict) else None
+    return text if isinstance(text, str) else ""
 
 
 def _send(proc, message):
@@ -120,6 +140,8 @@ def run_smoke(cmd, timeout=120):
         _send(proc, MESSAGES[1])
         _send(proc, MESSAGES[2])
         listing = wait_for(2)
+        _send(proc, MESSAGES[3])
+        skills = wait_for(3)
     except (BrokenPipeError, OSError) as exc:
         return fail(f"server stopped reading stdin: {exc}")
     tools = (listing or {}).get("result", {}).get("tools")
@@ -129,11 +151,15 @@ def run_smoke(cmd, timeout=120):
     missing = CORE_TOOLS - names
     if missing:
         return fail(f"tools/list is missing {sorted(missing)}")
+    text = _skills_text(skills)
+    if not text or text.startswith(SKILLS_FALLBACK):
+        return fail("provenance://skills did not return the packaged SKILLS.md")
     finish()
     server = init["result"].get("serverInfo", {})
     return True, (
         f"ok: {server.get('name')} {server.get('version')} answered "
-        f"initialize and tools/list with {len(tools)} tools"
+        f"initialize and tools/list with {len(tools)} tools, and served "
+        f"provenance://skills ({len(text)} characters)"
     )
 
 

@@ -2343,20 +2343,33 @@ class TestGetAllMergeEvents:
         events = contract.get_all_merge_events(from_block=0, to_block=1000)
         assert len(events) == 1
 
-    def test_returns_empty_on_v1(self, mock_chain_deps):
-        """Tests that v1 contracts return empty list (no DataMerged event)."""
+    def test_returns_empty_when_abi_has_no_datamerged(self, mock_chain_deps):
+        """Tests that an ABI without DataMerged returns an empty list, unscanned."""
         from swarm_provenance_mcp.chain.contract import DataProvenanceContract
 
         contract = DataProvenanceContract(
             web3=mock_chain_deps["web3_instance"],
             contract_address=DUMMY_CONTRACT,
         )
-        # Make the event access raise (v1 has no DataMerged)
+        contract._abi = [e for e in contract._abi if e.get("name") != "DataMerged"]
+        contract._get_logs_chunked = MagicMock(return_value=[MagicMock()])
+        events = contract.get_all_merge_events(from_block=0, to_block=1000)
+        assert events == []
+        contract._get_logs_chunked.assert_not_called()
+
+    def test_scan_error_is_not_treated_as_v1(self, mock_chain_deps):
+        """Tests that a failed scan raises instead of returning no merges (#160)."""
+        from swarm_provenance_mcp.chain.contract import DataProvenanceContract
+
+        contract = DataProvenanceContract(
+            web3=mock_chain_deps["web3_instance"],
+            contract_address=DUMMY_CONTRACT,
+        )
         contract._get_logs_chunked = MagicMock(
             side_effect=Exception("no DataMerged event")
         )
-        events = contract.get_all_merge_events(from_block=0, to_block=1000)
-        assert events == []
+        with pytest.raises(Exception, match="no DataMerged event"):
+            contract.get_all_merge_events(from_block=0, to_block=1000)
 
 
 # --- MergeTransformResult model tests ---

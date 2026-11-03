@@ -167,7 +167,7 @@ After recording a transformation, upload the transformed data to Swarm and link 
 Inspect provenance records without a wallet.
 
 ```
-1. verify_hash(swarm_hash)        → check if hash is registered, get basic info
+1. verify_hash(swarm_hash, expected_owner?) → check if hash is registered, get basic info; fails if expected_owner differs
 2. get_provenance(swarm_hash)     → full record: owner, timestamp, status, storage ref, transformations
 3. lookup_by_storage_ref(ref)     → reverse lookup by Swarm reference
 4. get_provenance_chain(hash)     → follow transformation lineage tree
@@ -240,7 +240,7 @@ Inspect provenance records without a wallet.
 |-------|-------|----------|
 | "Not usable" / "NOT_FOUND" | Stamp not yet propagated | Check `propagationStatus` and `estimatedReadyAt` in the response. Poll `check_stamp_health` every 15s until `propagationStatus: "ready"` |
 | "insufficient funds" | Wallet ETH too low for gas | Run `chain_balance` for funding guidance (faucet/bridge URLs) |
-| "already registered" revert | Hash was already anchored | Not an error — `anchor_hash` returns the existing record |
+| "already registered" | Hash was already anchored | Not an error when the record owner is the expected owner: `anchor_hash` returns the existing record. An error when another address owns it: change the content, upload it again, and anchor the new hash |
 | "already exists" / "already registered" revert on `record_transform` | `new_hash` was pre-anchored via `anchor_hash` | Do NOT anchor `new_hash` before `record_transform` — it auto-registers. Re-upload the data to get a fresh hash. |
 | "Transformation already recorded" on `record_transform` | Same `(original → new)` pair was already recorded | Not an error — `record_transform` returns the existing link without spending gas. Use `get_provenance_chain` to verify. |
 | "data not registered" | `original_hash` not anchored | Call `anchor_hash` on the original first, then retry `record_transform` |
@@ -272,5 +272,6 @@ Inspect provenance records without a wallet.
 | **DataProvenance contract** | Smart contract that stores provenance records and emits `DataTransformed` events |
 | **Owner** | The wallet address that anchored a hash — has exclusive rights to record transformations |
 | **RESTRICTED status** | Irreversible status set via `restrict_original=true` — signals data should not be accessed directly |
-| **Owned stamp** | A stamp purchased by your wallet — exclusive access, predictable utilization, production-ready |
-| **Public stamp** | A stamp available to all gateway users (accessMode: "shared" in API) — utilization is unpredictable, suitable for testing |
+| **Owned stamp** | A stamp registered to the x402 wallet that paid for it (accessMode: "owned" in API). This server sends no wallet, so the gateway refuses its uploads to owned stamps |
+| **Pool stamp** | Gateway inventory (accessMode: "pool" in API). The gateway refuses uploads to it until someone acquires it, so this server cannot use it |
+| **Public stamp** | A stamp available to all gateway users (accessMode: "shared" in API), and the kind this server buys and uploads to. Other users can fill it, so utilization is unpredictable. For predictable capacity, run your own Bee node or gateway |

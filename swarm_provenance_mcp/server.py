@@ -59,6 +59,11 @@ def _flag_text(value: Any) -> str:
     return _gw(value, 20) or "N/A"
 
 
+# How a tool describes a gateway answer, or part of one, of the wrong type.
+# The value itself is never printed.
+_NOT_EXPECTED_FORMAT = "the gateway's answer is not in the expected format"
+
+
 def _number_in(value: Any, low: float, high: float) -> Optional[Union[int, float]]:
     """A gateway number, only when it is an int or float (not a bool) from
     ``low`` to ``high``; otherwise None.
@@ -542,6 +547,18 @@ def validate_and_clean_stamp_id(stamp_id: str) -> str:
         )
 
     return stamp_id
+
+
+def _is_gateway_batch_id(value: Any) -> bool:
+    """Whether a gateway batch ID is a string that validate_and_clean_stamp_id
+    accepts: 64 hexadecimal characters, with or without 0x."""
+    if not isinstance(value, str):
+        return False
+    try:
+        validate_and_clean_stamp_id(value)
+    except ValueError:
+        return False
+    return True
 
 
 def validate_and_clean_reference_hash(reference: str) -> str:
@@ -1440,9 +1457,10 @@ def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, 
         problems.append("gateway reports the Bee node unhealthy")
     if availability is not None and availability != "Available":
         problems.append(f"network availability is {_gw(availability)}")
-    if peers is not None and peers == 0:
+    # Only a real number counts: False or "0" says nothing about the peers.
+    if _number_in(peers, 0, 0) is not None:
         problems.append("Bee node has no connected peers")
-    if bee.get("warming_up"):
+    if bee.get("warming_up") is True:
         problems.append("Bee node is still warming up")
     advisories = _bee_advisories(gateway_response)
 
@@ -2533,6 +2551,15 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
             duration_hours, size=size, depth=depth, label=label
         )
 
+        # A 2xx whose answer cannot be read: the purchase may have happened.
+        if not isinstance(result, dict):
+            return _ambiguous_write_result(
+                "Stamp purchase",
+                _NOT_EXPECTED_FORMAT,
+                "list_stamps",
+                _new_batch_hint(label, depth),
+            )
+
         # Check if purchase was actually successful
         batch_id = result.get("batchID")
         if not batch_id:
@@ -2550,6 +2577,14 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
                     )
                 ],
                 isError=True,
+            )
+        if not _is_gateway_batch_id(batch_id):
+            return _ambiguous_write_result(
+                "Stamp purchase",
+                "the batch ID in the gateway's answer is not a 64-character "
+                "hexadecimal string",
+                "list_stamps",
+                _new_batch_hint(label, depth),
             )
 
         response_text = f"🎉 Stamp purchased successfully!\n\n"
@@ -2707,6 +2742,15 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         result = gateway_client.get_stamp_details(clean_stamp_id)
 
         response_text = f"Stamp Details for {clean_stamp_id}:\n"
+        if not isinstance(result, dict):
+            response_text += (
+                f"The stamp's state is unknown: {_NOT_EXPECTED_FORMAT}. "
+                "Check it in list_stamps.\n"
+            )
+            response_text += _format_hints("list_stamps", ["check_stamp_health"])
+            return CallToolResult(
+                content=[TextContent(type="text", text=response_text)]
+            )
         # Each gateway value is printed only after a check, or through _gw,
         # so no value can start a hint line (#242).
         amount = _number_in(result.get("amount"), 0, MAX_STAMP_AMOUNT)
@@ -2972,10 +3016,20 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         # compares against to tell whether the extension happened.
         baseline = _stamp_baseline(clean_stamp_id)
         result = gateway_client.extend_stamp(clean_stamp_id, duration_hours)
+        # A 2xx whose answer cannot be read: the extension may have happened.
+        if not isinstance(result, dict):
+            return _ambiguous_write_result(
+                "Stamp extension",
+                _NOT_EXPECTED_FORMAT,
+                "get_stamp_status",
+                _extension_hint(baseline, duration_hours),
+            )
 
         response_text = f"✅ Stamp extended successfully!\n\n"
         response_text += f"📋 Extension Details:\n"
-        batch_id = result.get("batchID", "N/A")
+        batch_id = result.get("batchID")
+        if not _is_gateway_batch_id(batch_id):
+            batch_id = "N/A"
         response_text += f"   Batch ID: `{batch_id}`\n"
         response_text += f"   Additional Duration: {duration_hours} hours\n"
         response_text += f"   Status: {one_line(result.get('message', 'Extended'))}\n\n"
@@ -3526,9 +3580,16 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
             )
 
         # Parse payment / free-tier info from gateway response
-        gw_resp = result.get("gateway_response") or {}
-        x402 = gw_resp.get("x402") or {}
-        free_tier = x402.get("free_tier") or {}
+        # A part that is not an object counts as not reported.
+        gw_resp = result.get("gateway_response")
+        if not isinstance(gw_resp, dict):
+            gw_resp = {}
+        x402 = gw_resp.get("x402")
+        if not isinstance(x402, dict):
+            x402 = {}
+        free_tier = x402.get("free_tier")
+        if not isinstance(free_tier, dict):
+            free_tier = {}
         rate_limit = free_tier.get("rate_limit_per_minute")
         if rate_limit and _number_in(rate_limit, 1, 10**6) is None:
             # Not a sane count: say free tier without printing the value.
@@ -3569,7 +3630,13 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         if gateway_ok:
             try:
                 stamps_result = gateway_client.list_stamps()
-                stamps = stamps_result.get("stamps", [])
+                # The same rule as list_stamps: an answer or a stamp list
+                # that is not the expected type counts as no stamps.
+                stamps = (
+                    stamps_result.get("stamps")
+                    if isinstance(stamps_result, dict)
+                    else None
+                )
                 if not isinstance(stamps, list):
                     stamps = []
                 total_stamps = len(stamps)
@@ -3741,6 +3808,26 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         )
 
 
+def _health_entries(title: str, entries: Any) -> str:
+    """The Errors or Warnings section of check_stamp_health."""
+    if not entries:
+        return ""
+    text = f"{title}:\n"
+    if not isinstance(entries, list):
+        return text + f"   [?] {_NOT_EXPECTED_FORMAT}\n"
+    for entry in entries:
+        if not isinstance(entry, dict):
+            text += "   [?] An entry is not in the expected format\n"
+            continue
+        text += (
+            f"   [{one_line(entry.get('code', '?'), 40)}] "
+            f"{one_line(entry.get('message', ''), 500)}\n"
+        )
+        if entry.get("suggestion"):
+            text += f"   → {one_line(entry['suggestion'], 500)}\n"
+    return text
+
+
 async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle stamp health check requests."""
     try:
@@ -3750,8 +3837,18 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
 
         clean_stamp_id = validate_and_clean_stamp_id(stamp_id)
         result = gateway_client.check_stamp_health(clean_stamp_id)
+        if not isinstance(result, dict):
+            response_text = (
+                f"⚠️  Stamp {clean_stamp_id[:16]}...: {_NOT_EXPECTED_FORMAT}, so "
+                "its upload readiness is unknown. Check it in list_stamps.\n"
+            )
+            response_text += _format_hints("list_stamps", ["get_stamp_status"])
+            return CallToolResult(
+                content=[TextContent(type="text", text=response_text)]
+            )
 
-        can_upload = result.get("can_upload", False)
+        # Only a real True counts: a string such as "false" is not a yes.
+        can_upload = result.get("can_upload") is True
         errors = result.get("errors", [])
         warnings = result.get("warnings", [])
         status = result.get("status", {})
@@ -3763,31 +3860,23 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
                 f"❌ Stamp {clean_stamp_id[:16]}... cannot be used for uploads.\n\n"
             )
 
-        if errors:
-            response_text += "Errors:\n"
-            for err in errors:
-                response_text += (
-                    f"   [{one_line(err.get('code', '?'), 40)}] "
-                    f"{one_line(err.get('message', ''), 500)}\n"
-                )
-                if err.get("suggestion"):
-                    response_text += f"   → {one_line(err['suggestion'], 500)}\n"
+        response_text += _health_entries("Errors", errors)
+        response_text += _health_entries("Warnings", warnings)
 
-        if warnings:
-            response_text += "Warnings:\n"
-            for warn in warnings:
-                response_text += (
-                    f"   [{one_line(warn.get('code', '?'), 40)}] "
-                    f"{one_line(warn.get('message', ''), 500)}\n"
-                )
-                if warn.get("suggestion"):
-                    response_text += f"   → {one_line(warn['suggestion'], 500)}\n"
+        # The utilization the propagation check below uses: only a number
+        # from 0 to 100, and 0 when the gateway does not report one.
+        percent = None
+        utilization = None
+        if isinstance(status, dict):
+            utilization = status.get("utilizationPercent")
+            percent = _number_in(utilization, 0, 100)
+        elif status:
+            response_text += f"\nStatus: {_NOT_EXPECTED_FORMAT}\n"
+            status = {}
 
         if status:
             response_text += f"\nStatus:\n"
-            utilization = status.get("utilizationPercent")
             if utilization is not None:
-                percent = _number_in(utilization, 0, 100)
                 shown = f"{percent}%" if percent is not None else _gw(utilization, 20) or "N/A"
                 response_text += f"   Utilization: {shown} ({_gw(status.get('utilizationStatus', 'unknown'))})\n"
             if status.get("batchTTL") is not None:
@@ -3821,8 +3910,13 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
             # Detect propagation: prefer gateway field, fall back to heuristic
             is_propagating = propagation_status == "propagating"
             if not is_propagating:
-                error_codes = {e.get("code", "") for e in errors}
-                util_pct = (status.get("utilizationPercent") or 0) if status else 0
+                # Only string codes count; an unhashable code cannot raise.
+                error_codes = {
+                    e["code"]
+                    for e in (errors if isinstance(errors, list) else [])
+                    if isinstance(e, dict) and isinstance(e.get("code"), str)
+                }
+                util_pct = 0 if utilization is None else percent
                 is_propagating = ("NOT_FOUND" in error_codes) or (
                     "NOT_USABLE" in error_codes and util_pct == 0
                 )
@@ -3883,8 +3977,15 @@ async def handle_get_wallet_info(arguments: Dict[str, Any]) -> CallToolResult:
         result = gateway_client.get_wallet_info()
 
         response_text = f"Wallet Information:\n"
-        response_text += f"   Address: {_gw(result.get('walletAddress', 'N/A'))}\n"
-        response_text += f"   BZZ Balance: {_gw(result.get('bzzBalance', 'N/A'))}\n"
+        if isinstance(result, dict):
+            response_text += (
+                f"   Address: {_gw(result.get('walletAddress', 'N/A'))}\n"
+                f"   BZZ Balance: {_gw(result.get('bzzBalance', 'N/A'))}\n"
+            )
+        else:
+            response_text += (
+                f"   The wallet details are unknown: {_NOT_EXPECTED_FORMAT}.\n"
+            )
         response_text += _format_hints("purchase_stamp", ["list_stamps"])
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])

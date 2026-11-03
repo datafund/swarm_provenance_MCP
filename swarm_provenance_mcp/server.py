@@ -1050,13 +1050,44 @@ def _recently_purchased(stamp: Dict[str, Any]) -> bool:
     )
 
 
+def _stamp_readiness(stamp: Any) -> Optional[str]:
+    """Whether this server can upload to one stamp from a list_stamps answer.
+
+    ``writable``: usable, with an access mode this server can write to.
+    ``pending``: writable, not usable yet, for no lasting reason (it may
+    still be propagating). ``spent``: writable, but the gateway reports a
+    reason that waiting does not fix. ``pool``, ``owned`` or ``other``: an
+    access mode the gateway refuses for this server, usable or not.
+    None for an entry that is not an object."""
+    if not isinstance(stamp, dict):
+        return None
+    mode = stamp.get("accessMode")
+    writable = mode is None or (
+        isinstance(mode, str) and mode in _WRITABLE_ACCESS_MODES
+    )
+    if not writable:
+        return mode if mode in ("pool", "owned") else "other"
+    if stamp.get("usable") is True:
+        return "writable"
+    reason = stamp.get("unusableReason")
+    if isinstance(reason, str) and (
+        reason in _SPENT_REASONS
+        or (reason == "not_found" and not _recently_purchased(stamp))
+    ):
+        return "spent"
+    # Not usable yet, for no lasting reason: it may still be propagating,
+    # so wait for it rather than buy another.
+    return "pending"
+
+
 def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
     """Usable stamps in a list_stamps answer, split by whether this server can
     write to them, plus ``pending`` (writable stamps not usable yet, which may
     still be propagating; ``pending_ids`` holds their valid batch IDs) and
     ``blocked`` (every stamp this server cannot use, by kind; ``spent`` is a
     writable stamp the gateway reports as expired, full or about to expire).
-    Entries that are not objects are not counted."""
+    Entries that are not objects are not counted. Each stamp is classified
+    by _stamp_readiness."""
     counts: Dict[str, Any] = {
         "writable": 0, "pending": 0, "pool": 0, "owned": 0, "other": 0
     }
@@ -1065,39 +1096,22 @@ def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
     blocked = {"pool": 0, "owned": 0, "other": 0, "spent": 0}
     counts["blocked"] = blocked
     for stamp in stamps:
-        if not isinstance(stamp, dict):
+        kind = _stamp_readiness(stamp)
+        if kind is None:
             continue
-        mode = stamp.get("accessMode")
-        writable = mode is None or (
-            isinstance(mode, str) and mode in _WRITABLE_ACCESS_MODES
-        )
-        if not writable:
-            blocked[mode if mode in ("pool", "owned") else "other"] += 1
-        if stamp.get("usable") is not True:
-            if not writable:
-                continue
-            reason = stamp.get("unusableReason")
-            if isinstance(reason, str) and (
-                reason in _SPENT_REASONS
-                or (reason == "not_found" and not _recently_purchased(stamp))
-            ):
-                blocked["spent"] += 1
-                continue
-            # Not usable yet, for no lasting reason: it may still be
-            # propagating, so wait for it rather than buy another.
+        if kind in ("pool", "owned", "other"):
+            blocked[kind] += 1
+            if stamp.get("usable") is True:
+                counts[kind] += 1
+        elif kind == "spent":
+            blocked["spent"] += 1
+        elif kind == "pending":
             counts["pending"] += 1
             batch_id = stamp.get("batchID")
             if isinstance(batch_id, str) and STAMP_ID_PATTERN.match(batch_id):
                 counts["pending_ids"].append(batch_id)
-            continue
-        if writable:
-            counts["writable"] += 1
-        elif mode == "pool":
-            counts["pool"] += 1
-        elif mode == "owned":
-            counts["owned"] += 1
         else:
-            counts["other"] += 1
+            counts["writable"] += 1
     return counts
 
 

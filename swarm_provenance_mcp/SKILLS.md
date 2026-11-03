@@ -137,20 +137,23 @@ Combine multiple datasets into one with verifiable provenance linking all source
 
 Register data on Swarm and link both the content hash and Swarm reference on-chain for bidirectional lookup.
 
+The two values are different hashes. `swarm_hash` is the content hash you anchor: the SHA-256 of the data. The SDK anchors such a content hash; the CLI's `chain anchor` takes a Swarm reference hash and accepts `--storage-ref` for a linked reference. Compute the SHA-256 yourself; `upload_data` does not return it. `storage_ref` is the Swarm reference that `upload_data` returns. It must differ from `swarm_hash`: `anchor_hash` refuses a `storage_ref` equal to `swarm_hash`, and so does the contract.
+
 ```
 1. health_check              → verify gateway + chain connectivity
 2. chain_balance              → confirm wallet has ETH for gas
 3. purchase_stamp             → get a stamp for Swarm storage
 4. check_stamp_health         → poll until can_upload: true
 5. upload_data                → store data, receive Swarm reference hash
-6. anchor_hash(swarm_hash,    → register hash on-chain with storage reference linked
+6. anchor_hash(               → register the content hash on-chain with the
+     swarm_hash=<sha256>,       Swarm reference linked
      storage_ref=<swarm_ref>)
 7. lookup_by_storage_ref      → verify reverse lookup works
 ```
 
 ### F: Link Storage Reference After Transformation
 
-After recording a transformation, upload the transformed data to Swarm and link the storage location.
+After recording a transformation, upload the transformed data to Swarm and link the storage location. Here `new_hash` is the content hash (SHA-256) of the transformed data, so it differs from its Swarm reference. If `new_hash` is the Swarm reference itself, skip `set_storage_ref`: a storage reference must differ from the hash it is linked to.
 
 ```
 1. record_transform           → link original_hash → new_hash (new_hash auto-registered)
@@ -255,7 +258,7 @@ If the output starts with `INCOMPLETE`, the lineage is partial. Do not treat it 
 | `list_stamps` Status "Cannot be used: the batch ID is not in the expected format" | The gateway reports the stamp usable or pending, but its batch ID is not 64 hexadecimal characters, so this server cannot name it for `upload_data` | Do not use it. If no other stamp is usable or pending, the list is incomplete: follow `_next` and do not buy a stamp. If the same answer repeats, stop and report it to the gateway operator |
 | `list_stamps` Status "Cannot become usable" | The gateway reports one of: expired, about to expire, full, invalid depth, unreadable on the node, or not found on the node | `purchase_stamp`. Waiting does not help |
 | "insufficient funds" | Wallet ETH too low for gas | Run `chain_balance` for funding guidance (faucet/bridge URLs) |
-| "already registered" | Hash was already anchored | Not an error when the record owner is the expected owner: `anchor_hash` returns the existing record. An error when another address owns it: change the content, upload it again, and anchor the new hash |
+| "already registered" | Hash was already anchored | Not an error when the record owner is the expected owner: `anchor_hash` returns the existing record. With `storage_ref`, the record must already link the same reference; otherwise it is an error, and only the owner can link one with `set_storage_ref` when the record has none. An error when another address owns it: change the content, upload it again, and anchor the new hash |
 | "already exists" / "already registered" revert on `record_transform` | `new_hash` was pre-anchored via `anchor_hash` | Do NOT anchor `new_hash` before `record_transform` — it auto-registers. Re-upload the data to get a fresh hash. |
 | "Transformation already recorded" on `record_transform` | Same `(original → new)` pair was already recorded | Not an error — `record_transform` returns the existing link without spending gas. Use `get_provenance_chain` to verify. |
 | `get_provenance_chain` output starts with `INCOMPLETE` | A node's record or links could not be read, `max_depth` stopped the walk, or the event index could not be built | Follow the `Retry:` line in the banner: call `get_provenance_chain` on the named hash, or with a larger `max_depth` |

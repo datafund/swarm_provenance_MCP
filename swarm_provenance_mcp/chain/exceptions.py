@@ -90,12 +90,15 @@ class DataAlreadyRegisteredError(ChainError):
         owner: str = None,
         timestamp: int = None,
         data_type: str = None,
+        storage_ref: str = None,
     ):
         super().__init__(message)
         self.data_hash = data_hash
         self.owner = owner
         self.timestamp = timestamp
         self.data_type = data_type
+        # The record's storage ref (None when it has none or it is unknown)
+        self.storage_ref = storage_ref
 
 
 class StorageRefAlreadySetError(ChainError):

@@ -34,7 +34,11 @@ from requests.exceptions import RequestException
 
 from . import bmt
 from .config import WALLET_KEY_HINT, is_plain_http_remote, settings
-from .gateway_client import PaymentRequiredError, SwarmGatewayClient
+from .gateway_client import (
+    GatewayAnswerUnreadable,
+    PaymentRequiredError,
+    SwarmGatewayClient,
+)
 from .redact import mask_literal_urls, redact_urls, rpc_host, url_without_userinfo
 from .untrusted import (
     MAX_EXCEPTION_CHARS,
@@ -57,6 +61,25 @@ def _flag_text(value: Any) -> str:
     if isinstance(value, bool):
         return str(value)
     return _gw(value, 20) or "N/A"
+
+
+# How a tool describes a gateway answer, or part of one, of the wrong type.
+# The value itself is never printed.
+_NOT_EXPECTED_FORMAT = "the gateway's answer is not in the expected format"
+
+
+def _gw_text(value: Any, max_chars: int = 100) -> str:
+    """A gateway text field for printing: only a str, through _gw; "" for
+    any other type, so a wrong-typed value is never shown as its repr."""
+    return _gw(value, max_chars) if isinstance(value, str) else ""
+
+
+def _is_text(value: Any) -> bool:
+    """Whether an optional gateway text field is printed: a non-empty str.
+
+    Blank text counts, as it did before #270: it is a valid value of an
+    Optional[str] field. Any other type is never printed."""
+    return isinstance(value, str) and bool(value)
 
 
 def _number_in(value: Any, low: float, high: float) -> Optional[Union[int, float]]:
@@ -536,12 +559,30 @@ def validate_and_clean_stamp_id(stamp_id: str) -> str:
         stamp_id = stamp_id[2:]
 
     # Validate format
-    if not STAMP_ID_PATTERN.match(stamp_id):
+    # fullmatch: "$" also matches before a final newline.
+    if not STAMP_ID_PATTERN.fullmatch(stamp_id):
         raise ValueError(
             f"Invalid stamp ID format. Expected 64-character hexadecimal string (without 0x prefix), got: {stamp_id}"
         )
 
     return stamp_id
+
+
+def _is_gateway_batch_id(value: Any) -> bool:
+    """Whether a gateway batch ID is a string that validate_and_clean_stamp_id
+    accepts: exactly 64 hexadecimal characters, with or without 0x."""
+    return _clean_gateway_batch_id(value) is not None
+
+
+def _clean_gateway_batch_id(value: Any) -> Optional[str]:
+    """A gateway batch ID as 64 hexadecimal characters without 0x, or None
+    when it is not one. Every reader of a gateway batchID uses this."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return validate_and_clean_stamp_id(value)
+    except ValueError:
+        return None
 
 
 def validate_and_clean_reference_hash(reference: str) -> str:
@@ -564,7 +605,7 @@ def validate_and_clean_reference_hash(reference: str) -> str:
         reference = reference[2:]
 
     # Validate format
-    if not REFERENCE_HASH_PATTERN.match(reference):
+    if not REFERENCE_HASH_PATTERN.fullmatch(reference):
         raise ValueError(
             f"Invalid reference hash format. Expected 64-character hexadecimal string (without 0x prefix), got: {reference}"
         )
@@ -584,7 +625,7 @@ def validate_and_clean_swarm_reference(reference: str) -> str:
         raise ValueError("Reference cannot be empty")
     if reference.startswith(("0x", "0X")):
         reference = reference[2:]
-    if not SWARM_REFERENCE_PATTERN.match(reference):
+    if not SWARM_REFERENCE_PATTERN.fullmatch(reference):
         raise ValueError(
             "Invalid Swarm reference format. Expected 64 or 128 hexadecimal "
             "characters (128 for an encrypted reference), without 0x prefix; "
@@ -892,7 +933,8 @@ def _is_retryable_error(e: Exception) -> bool:
     """Determine if an exception represents a transient, retryable error."""
     from requests.exceptions import ConnectionError as ReqConnectionError, Timeout
 
-    if isinstance(e, (ReqConnectionError, Timeout)):
+    if isinstance(e, (ReqConnectionError, Timeout, GatewayAnswerUnreadable)):
+        # An unreadable answer may be a one-off: reading again can work.
         return True
     if (
         isinstance(e, RequestException)
@@ -929,18 +971,37 @@ def _is_ambiguous_write_error(e: Exception) -> bool:
     A read timeout or a proxy 502/504 means the request reached the gateway,
     which may have finished it (bought or topped up a batch) after the client
     stopped waiting. A connect failure means it never arrived, so it is not
-    ambiguous.
+    ambiguous. An error raised before the request is sent (for example
+    requests refusing to serialise the body, a plain InvalidJSONError with
+    no response) is not ambiguous either.
     """
     from requests.exceptions import (
         ChunkedEncodingError,
         ConnectTimeout,
+        ContentDecodingError,
         JSONDecodeError,
         ReadTimeout,
     )
     from requests.exceptions import ConnectionError as ReqConnectionError
 
-    if isinstance(e, (ReadTimeout, ChunkedEncodingError, JSONDecodeError)):
-        # JSONDecodeError: a 2xx whose body could not be parsed — it succeeded.
+    response = getattr(e, "response", None)
+    status = getattr(response, "status_code", None)
+    if isinstance(
+        e,
+        (
+            GatewayAnswerUnreadable,
+            JSONDecodeError,
+            ContentDecodingError,
+            ChunkedEncodingError,
+        ),
+    ):
+        # The answer arrived but its body could not be read or parsed. The
+        # gateway client raises GatewayAnswerUnreadable for every such cause;
+        # the requests classes it wraps are listed for callers that bypass
+        # it. Ambiguous unless the status is known and is an error status.
+        # Below 400 (2xx, or a final 3xx): the gateway did not refuse it.
+        return not isinstance(status, int) or status < 400
+    if isinstance(e, ReadTimeout):
         return True
     if isinstance(e, ReqConnectionError) and not isinstance(e, ConnectTimeout):
         # Dropped after sending ("Connection aborted", RemoteDisconnected), or
@@ -952,13 +1013,25 @@ def _is_ambiguous_write_error(e: Exception) -> bool:
             marker in text
             for marker in ("Connection aborted", "RemoteDisconnected", "Read timed out")
         )
-    response = getattr(e, "response", None)
+    if response is None:
+        return False
+    # Any error that carries a 2xx answer came after the write succeeded.
     # 500 too: the gateway returns it for errors raised after the purchase call.
-    return response is not None and response.status_code in (500, 502, 504)
+    return isinstance(status, int) and (
+        200 <= status < 300 or status in (500, 502, 504)
+    )
+
+
+def _as_sentence(reason: Any) -> str:
+    """A reason (an exception or text) as one sentence: capital first
+    letter, final period."""
+    text = one_line(str(reason), MAX_EXCEPTION_CHARS).strip() or "No details"
+    text = text[0].upper() + text[1:]
+    return text if text.endswith((".", "!", "?")) else text + "."
 
 
 def _ambiguous_write_result(
-    action: str, e: Exception, check_tool: str, how_to_check: str = ""
+    action: str, e: Union[Exception, str], check_tool: str, how_to_check: str = ""
 ) -> CallToolResult:
     """Tell the agent not to repeat a write whose outcome is unknown.
 
@@ -966,7 +1039,7 @@ def _ambiguous_write_result(
     does not apply to it; a blind retry buys (or extends) a second time.
     """
     msg = (
-        f"{action} outcome unknown: {e}\n\n"
+        f"{action} outcome unknown. {_as_sentence(e)}\n\n"
         "The request reached the gateway but no usable answer came back, so "
         "it may have completed. Do not repeat it yet: call "
         f"{check_tool} first and only retry if the change is not there."
@@ -994,11 +1067,13 @@ def _stamp_baseline(stamp_id: str) -> str:
         return ""
     if not isinstance(details, dict):
         return ""
+    # Only values that pass a check: a part that fails is left out.
     parts = []
-    if details.get("expectedExpiration"):
+    if _is_text(details.get("expectedExpiration")):
         parts.append(f"expiry {_gw(details['expectedExpiration'])}")
-    if details.get("batchTTL") is not None:
-        parts.append(f"TTL {_gw(details['batchTTL'])}s")
+    ttl = details.get("batchTTL")
+    if _is_plain_int(ttl) or _number_in(ttl, 0, MAX_TTL_SECONDS) is not None:
+        parts.append(f"TTL {_gw(ttl)}s")
     return ", ".join(parts)
 
 
@@ -1077,14 +1152,106 @@ _SPENT_REASONS_PHRASE = (
 
 
 def _recently_purchased(stamp: Dict[str, Any]) -> bool:
-    """Whether the gateway reports the stamp as bought less than
-    NOT_FOUND_GRACE_SECONDS ago. Only a plain non-negative int counts."""
+    """Whether a not_found stamp may still appear: the gateway reports it as
+    bought less than NOT_FOUND_GRACE_SECONDS ago, or its secondsSincePurchase
+    is not an int, so its age is unknown and buying another could duplicate
+    it. Null means it was not bought through this gateway: not recent."""
     age = stamp.get("secondsSincePurchase")
+    if age is None:
+        return False
+    if not _is_plain_int(age):
+        # Not an int (the model type): the age is unknown.
+        return True
+    # Any int, as before #270 (the model sets no bounds).
+    return 0 <= age < NOT_FOUND_GRACE_SECONDS
+
+
+def _stamp_list(answer: Any) -> Optional[Tuple[List[Dict[str, Any]], int]]:
+    """The stamp objects in a list_stamps answer and the number of entries
+    that are not objects, or None when the answer is malformed: not an
+    object, a stamps value that is not a list, or a non-empty list without
+    one object."""
+    stamps = answer.get("stamps") if isinstance(answer, dict) else None
+    if not isinstance(stamps, list):
+        return None
+    objects = [s for s in stamps if isinstance(s, dict)]
+    if stamps and not objects:
+        return None
+    return objects, len(stamps) - len(objects)
+
+
+# A stamp list the server cannot read, whole or in part. Neither leads to
+# purchase_stamp: an entry it cannot read may be a usable or pending stamp.
+_STAMP_LIST_UNKNOWN = (
+    "The stamp list is unknown: the gateway's answer is not in the expected format."
+)
+_REPEAT_TO_OPERATOR = (
+    "If the same answer repeats, stop and report it to the gateway operator."
+)
+
+
+def _entries(count: int) -> str:
+    return f"{count} entr{'ies' if count != 1 else 'y'}"
+
+
+def _no_id_text(count: int) -> str:
+    """Stamps reported usable or pending whose batch ID cannot be read."""
+    if count == 1:
+        return (
+            "1 stamp is reported usable or pending, but its batch ID is not in "
+            "the expected format"
+        )
     return (
-        isinstance(age, int)
-        and not isinstance(age, bool)
-        and 0 <= age < NOT_FOUND_GRACE_SECONDS
+        f"{count} stamps are reported usable or pending, but their batch IDs "
+        "are not in the expected format"
     )
+
+
+def _stamp_list_incomplete(entries: int, no_id: int) -> str:
+    """No writable or pending stamp to use, and the list has ``entries``
+    that are not objects and ``no_id`` usable or pending stamps without a
+    valid batch ID. Each kind is named only when present."""
+    parts = []
+    if entries:
+        verb = "are" if entries != 1 else "is"
+        parts.append(
+            f"{_entries(entries)} {verb} not in the expected format, so this "
+            "server cannot tell whether a usable stamp exists"
+        )
+    if no_id:
+        parts.append(
+            f"{_no_id_text(no_id)}, so this server cannot name "
+            f"{'them' if no_id != 1 else 'it'}"
+        )
+    return f"The stamp list is incomplete: {'; '.join(parts)}."
+
+
+def _unreadable_entries_note(entries: int, no_id: int) -> str:
+    """A usable or pending stamp was found; name what could not be read."""
+    parts = []
+    if entries:
+        verb = "are" if entries != 1 else "is"
+        parts.append(
+            f"{_entries(entries)} in the stamp list {verb} not in the expected format"
+        )
+    if no_id:
+        parts.append(_no_id_text(no_id))
+    return "; ".join(parts)
+
+
+def _is_plain_int(value: Any) -> bool:
+    """An int that is not a bool: the type the gateway models give counts,
+    depths, TTLs and ages, with no bounds. Such a value is printed as the
+    code before #270 printed it, even when it fails a range check."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _plain_int(value: Any, low: int, high: int) -> Optional[int]:
+    """A gateway count, only as a plain int (not a bool or a float) from
+    ``low`` to ``high``; otherwise None."""
+    if isinstance(value, int) and not isinstance(value, bool) and low <= value <= high:
+        return value
+    return None
 
 
 def _stamp_readiness(stamp: Any) -> Optional[str]:
@@ -1124,11 +1291,20 @@ def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
     ``blocked`` (every stamp this server cannot use, by kind; ``spent`` is a
     writable stamp the gateway reports as expired, full or about to expire).
     Entries that are not objects are not counted. Each stamp is classified
-    by _stamp_readiness."""
+    by _stamp_readiness. A writable or pending stamp without a valid batch ID
+    cannot be used (an upload needs the ID): it counts as ``unreadable``.
+    ``pending_ids`` and ``other_ids`` (stamps with an access mode the gateway
+    does not document) hold valid batch IDs, each once in first-seen order,
+    with a 0x prefix removed, so a 0x variant counts as the same ID.
+    ``other_unnamed`` counts the undocumented-mode stamps without a valid
+    batch ID."""
     counts: Dict[str, Any] = {
-        "writable": 0, "pending": 0, "pool": 0, "owned": 0, "other": 0
+        "writable": 0, "pending": 0, "unreadable": 0, "pool": 0, "owned": 0,
+        "other": 0,
     }
     counts["pending_ids"] = []
+    counts["other_ids"] = []
+    counts["other_unnamed"] = 0
     # Every stamp this server cannot use, usable or not, by kind.
     blocked = {"pool": 0, "owned": 0, "other": 0, "spent": 0}
     counts["blocked"] = blocked
@@ -1138,23 +1314,53 @@ def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
             continue
         if kind in ("pool", "owned", "other"):
             blocked[kind] += 1
+            if kind == "other":
+                # Each valid ID once, in first-seen order.
+                other_id = _clean_gateway_batch_id(stamp.get("batchID"))
+                if other_id is None:
+                    counts["other_unnamed"] += 1
+                elif other_id not in counts["other_ids"]:
+                    counts["other_ids"].append(other_id)
             if stamp.get("usable") is True:
                 counts[kind] += 1
         elif kind == "spent":
             blocked["spent"] += 1
+        elif _clean_gateway_batch_id(stamp.get("batchID")) is None:
+            counts["unreadable"] += 1
         elif kind == "pending":
             counts["pending"] += 1
-            batch_id = stamp.get("batchID")
-            if isinstance(batch_id, str) and STAMP_ID_PATTERN.match(batch_id):
-                counts["pending_ids"].append(batch_id)
+            pending_id = _clean_gateway_batch_id(stamp["batchID"])
+            if pending_id not in counts["pending_ids"]:
+                counts["pending_ids"].append(pending_id)
         else:
             counts["writable"] += 1
     return counts
 
 
-def _no_writable_stamp_text(blocked: Dict[str, int]) -> str:
-    """health_check recommendation when no stamp is writable, naming only the
-    kinds of stamps actually listed."""
+def _batch_ids_list(batch_ids: Sequence[str]) -> str:
+    """'batch ID(s): ...' for valid batch IDs, at most MAX_PENDING_IDS_SHOWN
+    of them, then 'and N more' for the named IDs not shown."""
+    shown = ", ".join(batch_ids[:MAX_PENDING_IDS_SHOWN])
+    more = len(batch_ids) - MAX_PENDING_IDS_SHOWN
+    return f"batch ID{'s' if len(batch_ids) != 1 else ''}: {shown}" + (
+        f", and {more} more" if more > 0 else ""
+    )
+
+
+def _batch_ids_text(batch_ids: Sequence[str]) -> str:
+    """' (batch ID: ...)' for valid batch IDs; '' when there are none."""
+    return f" ({_batch_ids_list(batch_ids)})" if batch_ids else ""
+
+
+def _no_writable_stamp_text(
+    blocked: Dict[str, int],
+    other_ids: Sequence[str] = (),
+    *,
+    other_unnamed: int,
+) -> str:
+    """The recommendation health_check and list_stamps give when no stamp is
+    writable, naming only the kinds of stamps actually listed. ``other_ids``
+    and ``other_unnamed`` come from _writable_stamp_counts."""
     parts = []
     pool, owned, other = blocked["pool"], blocked["owned"], blocked["other"]
     if pool:
@@ -1166,11 +1372,6 @@ def _no_writable_stamp_text(blocked: Dict[str, int]) -> str:
             f"{owned} owned stamp{'s belong' if owned != 1 else ' belongs'} to the "
             f"wallet that paid for {'them' if owned != 1 else 'it'}"
         )
-    if other:
-        parts.append(
-            f"{other} stamp{'s have' if other != 1 else ' has'} an access mode "
-            "this server cannot use"
-        )
     spent = blocked["spent"]
     if spent:
         parts.append(
@@ -1178,7 +1379,60 @@ def _no_writable_stamp_text(blocked: Dict[str, int]) -> str:
             f"({_SPENT_REASONS_PHRASE})"
         )
     detail = f": {'; '.join(parts)}." if parts else "."
+    if other:
+        # An access mode outside the documented set: the stamp may be one
+        # this server can use, so a purchase could duplicate it.
+        # other_ids: their valid batch IDs, named so that the agent can
+        # check them. Without one, the agent cannot check them either.
+        one = other == 1
+        stamps = (
+            "1 stamp has an access mode" if one
+            else f"{other} stamps have access modes"
+        )
+        if other_ids:
+            # Name the valid IDs; say how many of the stamps cannot be named.
+            unnamed = other_unnamed
+            ids = _batch_ids_list(other_ids)
+            if unnamed:
+                ids += (
+                    f"; {unnamed} of them {'have' if unnamed != 1 else 'has'} a batch "
+                    "ID that is not in the expected format"
+                )
+            if one:
+                target = "it"
+            elif unnamed:
+                target = (
+                    "the named stamp" if len(other_ids) == 1 else "the named stamps"
+                )
+            else:
+                target = "them"
+            check = (
+                f"{stamps} the gateway does not document ({ids}), so check "
+                f"{target} with check_stamp_health before you buy another stamp"
+            )
+        else:
+            check = (
+                f"{stamps} the gateway does not document, and "
+                f"{'its batch ID is' if one else 'their batch IDs are'} not in the "
+                "expected format, so this server cannot check "
+                f"{'it' if one else 'them'}. Do not buy another stamp yet. "
+                f"{_REPEAT_TO_OPERATOR}"
+            )
+        return f"No stamp this server can write to{detail} {check}"
     return f"No stamp this server can write to{detail} Purchase a stamp with purchase_stamp"
+
+
+def _no_writable_stamp_next(
+    blocked: Dict[str, int], other_ids: Sequence[str], from_tool: str
+) -> str:
+    """The _next that matches _no_writable_stamp_text. Stamps with an
+    undocumented access mode and no valid batch ID cannot be checked: the
+    list goes back to the other stamp tool, as an unknown list does."""
+    if not blocked["other"]:
+        return "purchase_stamp"
+    if other_ids:
+        return "check_stamp_health"
+    return "health_check" if from_tool == "list_stamps" else "list_stamps"
 
 
 # Batch IDs listed in the pending-stamp recommendation, at most.
@@ -1188,13 +1442,7 @@ MAX_PENDING_IDS_SHOWN = 3
 def _pending_stamp_text(count: int, batch_ids: List[str]) -> str:
     """health_check recommendation for writable stamps that are not usable
     yet. Pairs with _next: check_stamp_health."""
-    ids = ""
-    if batch_ids:
-        shown = ", ".join(batch_ids[:MAX_PENDING_IDS_SHOWN])
-        more = len(batch_ids) - MAX_PENDING_IDS_SHOWN
-        ids = f" (batch ID{'s' if len(batch_ids) != 1 else ''}: {shown}" + (
-            f", and {more} more)" if more > 0 else ")"
-        )
+    ids = _batch_ids_text(batch_ids)
     return (
         f"{count} stamp{'s' if count != 1 else ''} this server can write to "
         f"{'are' if count != 1 else 'is'} not usable yet, probably still "
@@ -1409,7 +1657,9 @@ def _bee_advisories(gateway_response: Dict[str, Any]) -> List[str]:
     if not isinstance(bee, dict):
         return []
     warnings = bee.get("warnings")
-    return [str(w) for w in warnings] if isinstance(warnings, list) else []
+    if not isinstance(warnings, list):
+        return []
+    return [w for w in warnings if isinstance(w, str)]
 
 
 def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1429,20 +1679,31 @@ def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, 
     ``ok``.
     """
     bee = gateway_response.get("bee_node")
-    state_keys = ("healthy", "network_availability", "connected_peers", "warming_up")
-    if not isinstance(bee, dict) or not any(k in bee for k in state_keys):
+    if not isinstance(bee, dict):
+        return None
+    # Only values of the right type count, for the decision and the summary.
+    # A bee_node with none of them counts as not reported.
+    # Any int, as before #270; another type is not reported.
+    peers = bee.get("connected_peers")
+    if not _is_plain_int(peers):
+        peers = None
+    availability = bee.get("network_availability")
+    if not isinstance(availability, str) or not availability.strip():
+        availability = None
+    flags = [bee.get(k) for k in ("healthy", "warming_up")]
+    if peers is None and availability is None and not any(
+        isinstance(flag, bool) for flag in flags
+    ):
         return None
 
-    peers = bee.get("connected_peers")
-    availability = bee.get("network_availability")
     problems = []
     if bee.get("healthy") is False:
         problems.append("gateway reports the Bee node unhealthy")
     if availability is not None and availability != "Available":
         problems.append(f"network availability is {_gw(availability)}")
-    if peers is not None and peers == 0:
+    if peers == 0:
         problems.append("Bee node has no connected peers")
-    if bee.get("warming_up"):
+    if bee.get("warming_up") is True:
         problems.append("Bee node is still warming up")
     advisories = _bee_advisories(gateway_response)
 
@@ -1451,8 +1712,9 @@ def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, 
         parts.append(f"{_gw(peers)} peers")
     if availability:
         parts.append(f"availability {_gw(availability)}")
-    if bee.get("reachability"):
-        parts.append(f"reachability {_gw(bee['reachability'])}")
+    reachability = bee.get("reachability")
+    if isinstance(reachability, str) and reachability:
+        parts.append(f"reachability {_gw(reachability)}")
     return {
         "ok": not problems,
         "summary": ", ".join(parts) or "no details reported",
@@ -1848,7 +2110,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="list_stamps",
-                description=f"List postage stamps available on the gateway. Each stamp includes its access mode: shared (public, any gateway user can upload to it), owned (registered to the wallet that paid for it) or pool (gateway inventory). This server sends no wallet, so the gateway refuses its uploads to owned and pool stamps: use a shared stamp. Each stamp's Status says whether this server can upload to it and, if not, why: not usable by this server (pool, owned or another access mode), not usable yet (may still be propagating: poll check_stamp_health, do not buy another) or cannot become usable ({_SPENT_REASONS_PHRASE}). Also shows expiration.",
+                description=f"List postage stamps available on the gateway. Each stamp includes its access mode: shared (public, any gateway user can upload to it), owned (registered to the wallet that paid for it) or pool (gateway inventory). This server sends no wallet, so the gateway refuses its uploads to owned and pool stamps: use a shared stamp. Each stamp's Status says whether this server can upload to it and, if not, why: not usable by this server (pool, owned or another access mode), not usable yet (may still be propagating: poll check_stamp_health, do not buy another), cannot become usable ({_SPENT_REASONS_PHRASE}) or cannot be used because its batch ID is not in the expected format. If the stamp list is unknown or incomplete, do not buy a stamp: follow _next. Also shows expiration.",
                 inputSchema={"type": "object", "properties": {}, "required": []},
             ),
             Tool(
@@ -2414,6 +2676,9 @@ def create_server() -> Server:
                                 "   - Stamps with low TTL → extend_stamp to add time\n"
                                 "   - Stamps marked 'Not usable yet' → poll check_stamp_health; do not buy another while they propagate\n"
                                 "   - No usable stamps and none pending → purchase_stamp\n"
+                                "   - The stamp list is unknown or incomplete, or a "
+                                "stamp has an access mode the gateway does not "
+                                "document → do not buy; follow _next\n"
                                 "5. Summarize the inventory status and recommended actions"
                             ),
                         ),
@@ -2533,24 +2798,30 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
             duration_hours, size=size, depth=depth, label=label
         )
 
-        # Check if purchase was actually successful
+        # A 2xx whose answer cannot be read: the purchase may have happened.
+        if not isinstance(result, dict):
+            return _ambiguous_write_result(
+                "Stamp purchase",
+                _NOT_EXPECTED_FORMAT,
+                "list_stamps",
+                _new_batch_hint(label, depth),
+            )
+
+        # A 2xx without a valid batch ID: the purchase may still have
+        # happened, so the agent must look before it buys again.
         batch_id = result.get("batchID")
-        if not batch_id:
-            error_msg = f"❌ Stamp purchase failed - no stamp ID returned!\n\nGateway response: {_gw(repr(result), 300)}"
-            logger.error(
-                f"Purchase failed - missing batchID in response: {_gw(repr(result), 300)}"
+        if not _is_gateway_batch_id(batch_id):
+            reason = (
+                "the gateway's answer has no batch ID"
+                if batch_id is None
+                else "the batch ID in the gateway's answer is not a "
+                "64-character hexadecimal string"
             )
-            return CallToolResult(
-                content=[
-                    TextContent(
-                        type="text",
-                        text=_format_error(
-                            error_msg, retryable=True, next_tool="health_check"
-                        ),
-                    )
-                ],
-                isError=True,
+            return _ambiguous_write_result(
+                "Stamp purchase", reason, "list_stamps", _new_batch_hint(label, depth)
             )
+        # 64 hexadecimal characters, as the tool description says: no 0x.
+        batch_id = _clean_gateway_batch_id(batch_id)
 
         response_text = f"🎉 Stamp purchased successfully!\n\n"
         response_text += f"📋 Your Stamp Details:\n"
@@ -2573,11 +2844,14 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"\n✅ Stamp ID: `{batch_id}`\n"
 
         propagation_status = result.get("propagationStatus")
-        estimated_ready = result.get("estimatedReadyAt")
+        estimated_ready = _gw_text(result.get("estimatedReadyAt"))
+        has_estimate = _is_text(result.get("estimatedReadyAt"))
         if propagation_status == "ready":
             response_text += "⏱️  Stamp is ready immediately (from the gateway pool).\n"
-        elif propagation_status == "propagating" and estimated_ready:
-            response_text += f"⏱️  Stamp is propagating — estimated ready at {_gw(estimated_ready)}.\n"
+        elif propagation_status == "propagating" and has_estimate:
+            response_text += (
+                f"⏱️  Stamp is propagating — estimated ready at {estimated_ready}.\n"
+            )
             response_text += (
                 "   → Use check_stamp_health to confirm it's ready before uploading."
             )
@@ -2593,27 +2867,6 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
-    except ValueError as e:
-        from requests.exceptions import JSONDecodeError
-
-        if isinstance(e, JSONDecodeError):
-            # A 2xx with an unreadable body — the write probably succeeded
-            return _ambiguous_write_result(
-                "Stamp purchase", e, "list_stamps", _new_batch_hint(label, depth)
-            )
-        error_msg = f"Validation error: {str(e)}"
-        logger.error(error_msg)
-        return CallToolResult(
-            content=[
-                TextContent(
-                    type="text",
-                    text=_format_error(
-                        error_msg, retryable=False, next_tool="purchase_stamp"
-                    ),
-                )
-            ],
-            isError=True,
-        )
     except PaymentRequiredError as e:
         return _payment_required_result(e, "purchase_stamp")
     except RequestException as e:
@@ -2631,6 +2884,22 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
                         error_msg,
                         retryable=_is_retryable_error(e),
                         next_tool=_recovery_hint(e),
+                    ),
+                )
+            ],
+            isError=True,
+        )
+    # After RequestException on purpose: requests' JSONDecodeError is also
+    # a ValueError and must reach _is_ambiguous_write_error.
+    except ValueError as e:
+        error_msg = f"Validation error: {str(e)}"
+        logger.error(error_msg)
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        error_msg, retryable=False, next_tool="purchase_stamp"
                     ),
                 )
             ],
@@ -2707,34 +2976,49 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         result = gateway_client.get_stamp_details(clean_stamp_id)
 
         response_text = f"Stamp Details for {clean_stamp_id}:\n"
-        # Each gateway value is printed only after a check, or through _gw,
-        # so no value can start a hint line (#242).
+        if not isinstance(result, dict):
+            response_text += (
+                f"The stamp's state is unknown: {_NOT_EXPECTED_FORMAT}. "
+                "Check it in list_stamps.\n"
+            )
+            response_text += _format_hints("list_stamps", ["check_stamp_health"])
+            return CallToolResult(
+                content=[TextContent(type="text", text=response_text)]
+            )
+        # Each gateway value is printed only after a check (#242). A value
+        # that fails it is N/A, as a missing one is, never its repr (#270).
+        # The amount may also be text, as Bee sends it.
         amount = _number_in(result.get("amount"), 0, MAX_STAMP_AMOUNT)
         if amount is None:
-            amount = _gw(result.get("amount"), 40) or "N/A"
+            amount = _gw_text(result.get("amount"), 40) or "N/A"
         response_text += f"Amount: {amount}\n"
+        # An int outside the checked range prints as it did before #270:
+        # the models type these as int with no bounds.
         for name, key in (("Depth", "depth"), ("Bucket Depth", "bucketDepth")):
             depth = _plain_depth(result.get(key))
             if depth is None:
-                depth = _gw(result.get(key), 20) or "N/A"
+                raw = result.get(key)
+                depth = _gw(raw, 20) if _is_plain_int(raw) else "N/A"
             response_text += f"{name}: {depth}\n"
         block = _number_in(result.get("blockNumber"), 0, MAX_BLOCK_NUMBER)
         if block is None:
-            block = _gw(result.get("blockNumber"), 20) or "N/A"
+            raw = result.get("blockNumber")
+            block = _gw(raw, 20) if _is_plain_int(raw) else "N/A"
         response_text += f"Block Number: {block}\n"
 
         # Enhanced TTL information
-        batch_ttl = result.get("batchTTL")
-        ttl = _number_in(batch_ttl, 0, MAX_TTL_SECONDS)
+        ttl = _number_in(result.get("batchTTL"), 0, MAX_TTL_SECONDS)
         if ttl is not None:
-            response_text += f"Batch TTL: {_ttl_text(ttl)}\n"
+            shown = _ttl_text(ttl)
+        elif _is_plain_int(result.get("batchTTL")):
+            shown = _gw(result.get("batchTTL"), 40)
         else:
-            shown = "N/A" if batch_ttl is None else _gw(batch_ttl, 40) or "N/A"
-            response_text += f"Batch TTL: {shown}\n"
+            shown = "N/A"
+        response_text += f"Batch TTL: {shown}\n"
 
-        response_text += (
-            f"Expected Expiration: {_gw(result.get('expectedExpiration', 'N/A'))}\n"
-        )
+        expiry = result.get("expectedExpiration")
+        expiry = _gw(expiry) if isinstance(expiry, str) else "N/A"
+        response_text += f"Expected Expiration: {expiry}\n"
 
         # Enhanced usability information
         usable = result.get("usable")
@@ -2750,33 +3034,46 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"Immutable: {_flag_text(result.get('immutableFlag'))}\n"
         response_text += f"Local: {_flag_text(result.get('local'))}\n"
 
-        if result.get("label"):
+        if _is_text(result.get("label")):
             response_text += f"Label: {quote(result['label'])}\n"
             response_text += f"{QUOTED_NOTE}\n"
 
         # Propagation timing (from gateway, when available)
         propagation_status = result.get("propagationStatus")
         seconds_since = result.get("secondsSincePurchase")
-        estimated_ready = result.get("estimatedReadyAt")
+        estimated_ready = _gw_text(result.get("estimatedReadyAt"))
+        has_estimate = _is_text(result.get("estimatedReadyAt"))
 
-        if propagation_status:
+        if isinstance(propagation_status, str) and propagation_status:
             response_text += f"Propagation: {_gw(propagation_status)}"
-            if seconds_since is not None:
-                age = _stamp_age(seconds_since)
-                shown = f"{age}s" if age is not None else _gw(seconds_since, 20) or "N/A"
-                response_text += f" ({shown} since purchase)"
-            if estimated_ready and propagation_status == "propagating":
-                response_text += f" — ready at {_gw(estimated_ready)}"
+            # Left out when it is not a number, as when it is missing; an
+            # int out of range prints as before #270.
+            age = _stamp_age(seconds_since)
+            if age is not None:
+                response_text += f" ({age}s since purchase)"
+            elif _is_plain_int(seconds_since):
+                response_text += f" ({_gw(seconds_since, 20)} since purchase)"
+            if has_estimate and propagation_status == "propagating":
+                response_text += f" — ready at {estimated_ready}"
             response_text += "\n"
 
-        # Contextual hints based on usability
+        # Contextual hints based on usability. Null is a valid Optional and
+        # keeps the not-usable hints; any other non-bool value is unknown.
         if usable is True:
             response_text += _format_hints(
                 "upload_data", ["extend_stamp", "check_stamp_health"]
             )
-        else:
+        elif usable is False or usable is None:
             response_text += _format_hints(
                 "purchase_stamp", ["extend_stamp", "list_stamps"]
+            )
+        else:
+            response_text += (
+                "\n💡 The gateway's usable value is not in the expected format, "
+                "so the stamp's state is unknown. Check it with check_stamp_health."
+            )
+            response_text += _format_hints(
+                "check_stamp_health", ["list_stamps", "extend_stamp"]
             )
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
@@ -2824,6 +3121,8 @@ _STAMP_STATUS = {
     ),
     "other": "⛔ Not usable by this server (access mode it cannot use)",
 }
+# A writable or pending stamp whose batch ID cannot be read.
+_STAMP_STATUS_NO_ID = "⚠️ Cannot be used: the batch ID is not in the expected format"
 # secondsSincePurchase above this (ten years) is not printed.
 MAX_STAMP_AGE_SECONDS = 10 * 365 * 86400
 
@@ -2857,13 +3156,21 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
     """
     try:
         result = gateway_client.list_stamps()
-        stamps = result.get("stamps") if isinstance(result, dict) else None
-        if not isinstance(stamps, list):
-            stamps = []
+        listed = _stamp_list(result)
+        if listed is None:
+            # Not "no stamps": never a purchase on a list it cannot read.
+            response_text = f"⚠️  {_STAMP_LIST_UNKNOWN} {_REPEAT_TO_OPERATOR}\n"
+            response_text += _format_hints("health_check", ["check_stamp_health"])
+            return CallToolResult(
+                content=[TextContent(type="text", text=response_text)]
+            )
+        stamps, unreadable = listed
         # The gateway's total_count is not printed: the count is the number
         # of entries listed here.
-        stamps = [s for s in stamps if isinstance(s, dict)]
         counts = _writable_stamp_counts(stamps)
+        # A usable or pending stamp without a valid batch ID cannot be used
+        # either: both kinds make the list incomplete.
+        no_id = counts["unreadable"]
 
         if not stamps:
             response_text = "📭 No stamps found.\n\n💡 Use the 'purchase_stamp' tool to create your first stamp!"
@@ -2871,12 +3178,12 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
             response_text = f"📋 Found {len(stamps)} stamp(s):\n\n"
 
             for stamp in stamps:
-                batch_id = stamp.get("batchID")
-                if not (isinstance(batch_id, str) and STAMP_ID_PATTERN.match(batch_id)):
-                    batch_id = _gw(batch_id, 70) if batch_id is not None else "N/A"
-                expiration = _gw(stamp.get("expectedExpiration"), 40) or "N/A"
+                batch_id = _clean_gateway_batch_id(stamp.get("batchID")) or "N/A"
+                expiration = _gw_text(stamp.get("expectedExpiration"), 40) or "N/A"
                 kind = _stamp_readiness(stamp)
                 status = _stamp_status(stamp, kind)
+                if kind in ("writable", "pending") and batch_id == "N/A":
+                    status = _STAMP_STATUS_NO_ID
 
                 response_text += f"Batch ID: {batch_id}\n"
                 detail_line = f"  Expiration: {expiration} | Status: {status}"
@@ -2885,17 +3192,21 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                 # mode is always shown, even an empty one.
                 access_mode = stamp.get("accessMode")
                 if access_mode or kind == "other":
-                    shown = _gw(access_mode, 30) or "(empty)"
+                    shown = (
+                        _gw(access_mode, 30) or "(empty)"
+                        if isinstance(access_mode, str)
+                        else "N/A"
+                    )
                     detail_line += f" | Access: {shown}"
 
                 # Surface propagation status when provided
-                propagation_status = stamp.get("propagationStatus")
+                propagation_status = _gw_text(stamp.get("propagationStatus"), 30)
                 if propagation_status:
-                    detail_line += f" | Propagation: {_gw(propagation_status, 30)}"
+                    detail_line += f" | Propagation: {propagation_status}"
 
                 # What identifies a batch from an unanswered purchase
                 identity = []
-                if stamp.get("label"):
+                if _is_text(stamp.get("label")):
                     identity.append(f"Label: {_label(stamp['label'])}")
                 depth = _plain_depth(stamp.get("depth"))
                 if depth is not None:
@@ -2913,8 +3224,11 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
             response_text += "\n💡 All stamps are public (shared): other gateway users can fill them. For production use with predictable capacity, run your own Bee node or gateway. This server sends no wallet, so it cannot upload to wallet-owned stamps.\n"
 
         # Labels of shared stamps are written by other gateway users.
-        if any(s.get("label") for s in stamps):
+        if any(_is_text(s.get("label")) for s in stamps):
             response_text += f"\n{QUOTED_NOTE}\n"
+
+        if (unreadable or no_id) and (counts["writable"] or counts["pending"]):
+            response_text += f"\n💡 {_unreadable_entries_note(unreadable, no_id)}.\n"
 
         # Contextual hints, in health_check's order. Each recommendation
         # matches its _next.
@@ -2927,10 +3241,29 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                 f"\n💡 {_pending_stamp_text(counts['pending'], counts['pending_ids'])}.\n"
             )
             response_text += _format_hints("check_stamp_health", ["get_stamp_status"])
+        elif unreadable or no_id:
+            # An entry it cannot read may be the stamp to use: never buy.
+            response_text += (
+                f"\n💡 {_stamp_list_incomplete(unreadable, no_id)} "
+                f"{_REPEAT_TO_OPERATOR}\n"
+            )
+            response_text += _format_hints("health_check", ["check_stamp_health"])
         else:
             if stamps:
-                response_text += f"\n💡 {_no_writable_stamp_text(counts['blocked'])}.\n"
-            response_text += _format_hints("purchase_stamp", ["get_wallet_info"])
+                text = _no_writable_stamp_text(
+                    counts["blocked"],
+                    counts["other_ids"],
+                    other_unnamed=counts["other_unnamed"],
+                )
+                # The no-valid-ID text ends with the repeat sentence's period.
+                end = "" if text.endswith(".") else "."
+                response_text += f"\n💡 {text}{end}\n"
+            response_text += _format_hints(
+                _no_writable_stamp_next(
+                    counts["blocked"], counts["other_ids"], "list_stamps"
+                ),
+                ["get_wallet_info"],
+            )
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
@@ -2972,43 +3305,37 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         # compares against to tell whether the extension happened.
         baseline = _stamp_baseline(clean_stamp_id)
         result = gateway_client.extend_stamp(clean_stamp_id, duration_hours)
+        # A 2xx whose answer cannot be read: the extension may have happened.
+        if not isinstance(result, dict):
+            return _ambiguous_write_result(
+                "Stamp extension",
+                _NOT_EXPECTED_FORMAT,
+                "get_stamp_status",
+                _extension_hint(baseline, duration_hours),
+            )
 
         response_text = f"✅ Stamp extended successfully!\n\n"
         response_text += f"📋 Extension Details:\n"
-        batch_id = result.get("batchID", "N/A")
-        response_text += f"   Batch ID: `{batch_id}`\n"
+        # Printed as 64 hexadecimal characters, without 0x. Without a valid
+        # ID in the answer, the requested one, marked as not confirmed.
+        batch_id = _clean_gateway_batch_id(result.get("batchID"))
+        if batch_id is not None:
+            response_text += f"   Batch ID: `{batch_id}`\n"
+        else:
+            response_text += (
+                f"   Batch ID: `{clean_stamp_id}` (requested; the gateway's answer "
+                "did not confirm it)\n"
+            )
         response_text += f"   Additional Duration: {duration_hours} hours\n"
-        response_text += f"   Status: {one_line(result.get('message', 'Extended'))}\n\n"
+        message = result.get("message")
+        status_text = one_line(message) if isinstance(message, str) else "Extended"
+        response_text += f"   Status: {status_text}\n\n"
         response_text += f"⏱️  Important: Extension takes up to 2 minutes to propagate through the blockchain.\n"
         response_text += f"🔍 Check stamp status again in about 2 minutes to see the new expiration time."
         response_text += _format_hints("check_stamp_health", ["get_stamp_status"])
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
-    except ValueError as e:
-        from requests.exceptions import JSONDecodeError
-
-        if isinstance(e, JSONDecodeError):
-            # A 2xx with an unreadable body — the write probably succeeded
-            return _ambiguous_write_result(
-                "Stamp extension",
-                e,
-                "get_stamp_status",
-                _extension_hint(baseline, arguments.get("duration_hours")),
-            )
-        error_msg = f"Validation error: {str(e)}"
-        logger.error(error_msg)
-        return CallToolResult(
-            content=[
-                TextContent(
-                    type="text",
-                    text=_format_error(
-                        error_msg, retryable=False, next_tool="list_stamps"
-                    ),
-                )
-            ],
-            isError=True,
-        )
     except PaymentRequiredError as e:
         return _payment_required_result(e, "extend_stamp")
     except RequestException as e:
@@ -3034,6 +3361,73 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
             ],
             isError=True,
         )
+    # After RequestException on purpose: requests' JSONDecodeError is also
+    # a ValueError and must reach _is_ambiguous_write_error.
+    except ValueError as e:
+        error_msg = f"Validation error: {str(e)}"
+        logger.error(error_msg)
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        error_msg, retryable=False, next_tool="list_stamps"
+                    ),
+                )
+            ],
+            isError=True,
+        )
+
+
+def _is_unreadable_body(e: Exception) -> bool:
+    """requests' own error for a body it cannot parse (mocked clients)."""
+    from requests.exceptions import JSONDecodeError
+
+    return isinstance(e, JSONDecodeError)
+
+
+def _upload_outcome_unknown(
+    cause: Union[Exception, str], sign: Optional[str]
+) -> CallToolResult:
+    """An upload whose answer cannot be used: it may have completed.
+
+    The reference is unknown and cannot be looked up, so the result says
+    so and does not tell the agent to upload again: a second upload uses
+    stamp capacity again, and a signed one makes a second signed document."""
+    if isinstance(cause, (GatewayAnswerUnreadable, str)):
+        reason = cause
+    else:
+        reason = "The gateway's answer could not be read: it is not valid JSON"
+    msg = (
+        f"Upload outcome unknown. {_as_sentence(reason)}\n\n"
+        "The request reached the gateway, so the upload may have completed, "
+        "but the reference is unknown. "
+    )
+    if sign:
+        msg += (
+            "Do not upload the same data again: a signed upload creates a "
+            "second signed document, and a second upload also uses stamp "
+            "capacity again. "
+        )
+    else:
+        msg += (
+            "Swarm addresses content by its hash, so uploading the same data "
+            "again normally returns the same reference. A second upload also "
+            "uses stamp capacity again. "
+        )
+    msg += "Call check_stamp_health to check that the stamp still has capacity."
+    logger.error(msg)
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=_format_error(
+                    msg, retryable=False, next_tool="check_stamp_health"
+                ),
+            )
+        ],
+        isError=True,
+    )
 
 
 async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
@@ -3067,7 +3461,11 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
             stamp_details = gateway_client.get_stamp_details(clean_stamp_id)
 
             # Verify it's a usable stamp
-            if not stamp_details.get("usable", False):
+            # An answer that is not an object says nothing: the upload goes
+            # ahead and the gateway checks the stamp.
+            if isinstance(stamp_details, dict) and not stamp_details.get(
+                "usable", False
+            ):
                 return CallToolResult(
                     content=[
                         TextContent(
@@ -3100,7 +3498,26 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
                 raise
 
         # Proceed with upload if stamp validation passed
-        result = gateway_client.upload_data(data, clean_stamp_id, content_type, sign=sign)
+        try:
+            result = gateway_client.upload_data(
+                data, clean_stamp_id, content_type, sign=sign
+            )
+        except RequestException as e:
+            # An unreadable 2xx (or unknown status): the upload may be done.
+            if isinstance(e, GatewayAnswerUnreadable) or _is_unreadable_body(e):
+                if _is_ambiguous_write_error(e):
+                    return _upload_outcome_unknown(e, sign)
+            raise
+        reference = result.get("reference") if isinstance(result, dict) else None
+        try:
+            # 64 or 128 hexadecimal characters, a 0x prefix removed.
+            reference = validate_and_clean_swarm_reference(reference)
+        except ValueError:
+            reference = None
+        if reference is None:
+            return _upload_outcome_unknown(
+                "The gateway's answer has no valid reference", sign
+            )
 
         response_text = f"🎉 Data uploaded successfully to Swarm!\n\n"
         response_text += f"📄 Upload Details:\n"
@@ -3117,14 +3534,14 @@ async def handle_upload_data(arguments: Dict[str, Any]) -> CallToolResult:
         if sign:
             response_text += f"   Signing: {sign}\n"
         response_text += f"\n🔗 Retrieval Information:\n"
-        response_text += f"   Reference Hash: `{result['reference']}`\n"
+        response_text += f"   Reference Hash: `{reference}`\n"
         response_text += f"   💡 Copy this reference hash to download your data later using the 'download_data' tool."
 
         # Surface notary signature details when present
         notary_info = result.get("notary") or result.get("signature")
         if notary_info and isinstance(notary_info, dict):
             signer = notary_info.get("signer") or notary_info.get("signerAddress")
-            if signer:
+            if isinstance(signer, str) and signer:
                 # A gateway field: printed on one line and capped.
                 response_text += f"\n\n🔐 Notary Signature:\n   Signer: {_gw(signer)}"
 
@@ -3182,8 +3599,12 @@ def _download_not_found(reference: str) -> CallToolResult:
     """
     network = None
     try:
-        gw_resp = gateway_client.health_check().get("gateway_response") or {}
-        network = _bee_network_status(gw_resp)
+        # The same guards as health_check: a part that is not an object
+        # counts as not reported.
+        health = gateway_client.health_check()
+        gw_resp = health.get("gateway_response") if isinstance(health, dict) else None
+        if isinstance(gw_resp, dict):
+            network = _bee_network_status(gw_resp)
     except RequestException:
         pass
 
@@ -3482,6 +3903,16 @@ async def handle_download_data(arguments: Dict[str, Any]) -> CallToolResult:
         )
 
 
+class _StampListUnknown(Exception):
+    """health_check: the list_stamps answer is malformed (_stamp_list)."""
+
+
+_NETWORK_DEGRADED_TEXT = (
+    "The gateway's Bee node cannot reliably reach the Swarm network: uploads "
+    "may never propagate and only data stored on this node can be downloaded."
+)
+
+
 async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle health check requests with adaptive status.
 
@@ -3491,6 +3922,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
     ready = False
     recommendations = []
     next_tool = "list_stamps"
+    network_rec = None  # index of the degraded-network recommendation
 
     try:
         result = gateway_client.health_check()
@@ -3526,15 +3958,24 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
             )
 
         # Parse payment / free-tier info from gateway response
-        gw_resp = result.get("gateway_response") or {}
-        x402 = gw_resp.get("x402") or {}
-        free_tier = x402.get("free_tier") or {}
-        rate_limit = free_tier.get("rate_limit_per_minute")
-        if rate_limit and _number_in(rate_limit, 1, 10**6) is None:
-            # Not a sane count: say free tier without printing the value.
-            response_text += "\n💰 Payment: free tier\n"
-        elif rate_limit:
+        # A part that is not an object counts as not reported.
+        gw_resp = result.get("gateway_response")
+        if not isinstance(gw_resp, dict):
+            gw_resp = {}
+        x402 = gw_resp.get("x402")
+        if not isinstance(x402, dict):
+            x402 = {}
+        free_tier = x402.get("free_tier")
+        if not isinstance(free_tier, dict):
+            free_tier = {}
+        # Only a sane count says free tier; any other value counts as absent.
+        rate_limit_raw = free_tier.get("rate_limit_per_minute")
+        rate_limit = _plain_int(rate_limit_raw, 1, 10**6)
+        if rate_limit is not None:
             response_text += f"\n💰 Payment: free tier ({rate_limit} write req/min, reads unlimited)\n"
+        elif _is_plain_int(rate_limit_raw) and rate_limit_raw:
+            # An int out of range: free tier, without the count (as before).
+            response_text += "\n💰 Payment: free tier\n"
         elif x402:
             response_text += "\n💰 Payment: x402 enabled\n"
 
@@ -3551,10 +3992,10 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 f"\n🐝 Swarm network: DEGRADED ({network['summary']})\n"
                 f"   {'; '.join(network['problems'])}\n"
             )
+            network_rec = len(recommendations)
             recommendations.append(
-                "The gateway's Bee node cannot reliably reach the Swarm network: "
-                "uploads may never propagate and only data stored on this node can "
-                "be downloaded. Operator action required — retrying will not help."
+                _NETWORK_DEGRADED_TEXT + " Operator action required — retrying "
+                "will not help."
             )
         advisories = _bee_advisories(gw_resp) if gateway_ok else []
         if advisories:
@@ -3568,13 +4009,16 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         total_stamps = 0
         if gateway_ok:
             try:
-                stamps_result = gateway_client.list_stamps()
-                stamps = stamps_result.get("stamps", [])
-                if not isinstance(stamps, list):
-                    stamps = []
+                # The same rule as list_stamps (_stamp_list): a malformed
+                # list is unknown, never "no stamps".
+                listed = _stamp_list(gateway_client.list_stamps())
+                if listed is None:
+                    raise _StampListUnknown()
+                stamps, unreadable = listed
                 total_stamps = len(stamps)
                 counts = _writable_stamp_counts(stamps)
                 usable_count = counts["writable"]
+                no_id = counts["unreadable"]
 
                 stamps_info += (
                     f"\n📋 Stamps: {usable_count} usable by this server / "
@@ -3595,25 +4039,65 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 if others:
                     stamps_info += f" (usable but not by this server: {', '.join(others)})"
                 stamps_info += "\n"
+                # Named here only when a stamp to use was found; otherwise the
+                # incomplete-list recommendation names it.
+                if (unreadable or no_id) and (usable_count or counts["pending"]):
+                    stamps_info += (
+                        f"   ⚠️  {_unreadable_entries_note(unreadable, no_id)}\n"
+                    )
 
                 if usable_count > 0 and (network is None or network["ok"]):
                     ready = True
                     next_tool = "upload_data"
                 elif usable_count > 0:
-                    next_tool = None
+                    # The degraded network blocks uploads to a usable stamp.
+                    # One recommendation that agrees with _next.
+                    recommendations[network_rec] = (
+                        _NETWORK_DEGRADED_TEXT + " The gateway operator must fix "
+                        "the Bee node's network connection. Call health_check again "
+                        "after that fix, and do not upload until health_check "
+                        "shows the Swarm network as connected."
+                    )
+                    next_tool = "health_check"
                 elif counts["pending"]:
                     recommendations.append(
                         _pending_stamp_text(counts["pending"], counts["pending_ids"])
                     )
                     next_tool = "check_stamp_health"
+                elif unreadable or no_id:
+                    # An entry it cannot read may be the stamp to use: never buy.
+                    recommendations.append(
+                        f"{_stamp_list_incomplete(unreadable, no_id)} Call "
+                        "list_stamps to "
+                        f"check the stamps. {_REPEAT_TO_OPERATOR}"
+                    )
+                    next_tool = "list_stamps"
                 elif total_stamps > 0:
-                    recommendations.append(_no_writable_stamp_text(counts["blocked"]))
-                    next_tool = "purchase_stamp"
+                    recommendations.append(
+                        _no_writable_stamp_text(
+                            counts["blocked"],
+                            counts["other_ids"],
+                            other_unnamed=counts["other_unnamed"],
+                        )
+                    )
+                    next_tool = _no_writable_stamp_next(
+                        counts["blocked"], counts["other_ids"], "health_check"
+                    )
                 else:
                     recommendations.append(
                         "No stamps found — purchase one before uploading"
                     )
                     next_tool = "purchase_stamp"
+            except _StampListUnknown:
+                stamps_info += (
+                    "\n📋 Stamps: unknown (the gateway's answer is not in the "
+                    "expected format)\n"
+                )
+                recommendations.append(
+                    f"{_STAMP_LIST_UNKNOWN} Call list_stamps to check the stamps. "
+                    f"{_REPEAT_TO_OPERATOR}"
+                )
+                next_tool = "list_stamps"
             except RequestException:
                 stamps_info += "\n📋 Stamps: unable to check (gateway error)\n"
                 recommendations.append(
@@ -3707,14 +4191,32 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         # Gateway status
         response_text += f"\n_gateway: {gateway_url} ({'connected' if gateway_ok else 'unreachable'})"
 
-        if next_tool:
-            response_text += f"\n\n_next: {next_tool}"
-        else:
-            response_text += "\n"
+        response_text += f"\n\n_next: {next_tool}"
         response_text += f"\n_related: list_stamps, purchase_stamp, get_wallet_info"
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
 
+    except GatewayAnswerUnreadable as e:
+        # The gateway answered: the connection works, the answer does not.
+        gateway_url = url_without_userinfo(settings.swarm_gateway_url)
+        error_msg = (
+            f"❌ Gateway answer unreadable\n\nError: {str(e)}\n"
+            f"Gateway: {gateway_url}\n\n"
+            "The gateway answered, but this server cannot read the answer. Call "
+            "health_check again; if this repeats, report it to the gateway operator."
+        )
+        logger.error(f"Health check failed: {str(e)}")
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=_format_error(
+                        error_msg, retryable=True, next_tool="health_check"
+                    ),
+                )
+            ],
+            isError=True,
+        )
     except RequestException as e:
         gateway_url = url_without_userinfo(settings.swarm_gateway_url)
         error_msg = f"❌ Connection failed!\n\n"
@@ -3741,6 +4243,37 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         )
 
 
+def _health_entries(title: str, entries: Any) -> str:
+    """The Errors or Warnings section of check_stamp_health. Only text
+    fields are printed: a code of another type shows as ?, a message or
+    suggestion of another type is left out."""
+    if isinstance(entries, list) and not entries:
+        return ""
+    text = f"{title}:\n"
+    if not isinstance(entries, list):
+        return text + f"   [?] The {title.lower()} list is not in the expected format\n"
+    for entry in entries:
+        if not isinstance(entry, dict):
+            text += "   [?] An entry is not in the expected format\n"
+            continue
+        code = entry.get("code", "?")
+        code = one_line(code, 40) if isinstance(code, str) else "?"
+        text += f"   [{code}] {_gw_text(entry.get('message', ''), 500)}\n"
+        if _is_text(entry.get("suggestion")):
+            text += f"   → {one_line(entry['suggestion'], 500)}\n"
+    return text
+
+
+def _error_list_unreadable(errors: Any) -> bool:
+    """Whether check_stamp_health cannot read every error code: the list is
+    not a list, or an entry is not an object with a text code."""
+    if not isinstance(errors, list):
+        return True
+    return any(
+        not isinstance(e, dict) or not isinstance(e.get("code"), str) for e in errors
+    )
+
+
 async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle stamp health check requests."""
     try:
@@ -3750,86 +4283,143 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
 
         clean_stamp_id = validate_and_clean_stamp_id(stamp_id)
         result = gateway_client.check_stamp_health(clean_stamp_id)
+        if not isinstance(result, dict):
+            response_text = (
+                f"⚠️  Stamp {clean_stamp_id[:16]}...: {_NOT_EXPECTED_FORMAT}, so "
+                "its upload readiness is unknown. Check it in list_stamps.\n"
+            )
+            response_text += _format_hints("list_stamps", ["get_stamp_status"])
+            return CallToolResult(
+                content=[TextContent(type="text", text=response_text)]
+            )
 
-        can_upload = result.get("can_upload", False)
+        # Only a real True counts: a string such as "false" is not a yes. A
+        # value that is not a bool (missing included) leaves it unknown.
+        can_upload = result.get("can_upload") is True
+        readiness_unknown = not isinstance(result.get("can_upload"), bool)
+        # Null lists count as empty, as before #270.
         errors = result.get("errors", [])
+        if errors is None:
+            errors = []
         warnings = result.get("warnings", [])
+        if warnings is None:
+            warnings = []
         status = result.get("status", {})
 
         if can_upload:
             response_text = f"✅ Stamp {clean_stamp_id[:16]}... is healthy and ready for uploads.\n\n"
+        elif readiness_unknown:
+            response_text = (
+                f"⚠️  Stamp {clean_stamp_id[:16]}...: upload readiness is unknown, "
+                f"because {_NOT_EXPECTED_FORMAT}.\n\n"
+            )
         else:
             response_text = (
                 f"❌ Stamp {clean_stamp_id[:16]}... cannot be used for uploads.\n\n"
             )
 
-        if errors:
-            response_text += "Errors:\n"
-            for err in errors:
-                response_text += (
-                    f"   [{one_line(err.get('code', '?'), 40)}] "
-                    f"{one_line(err.get('message', ''), 500)}\n"
-                )
-                if err.get("suggestion"):
-                    response_text += f"   → {one_line(err['suggestion'], 500)}\n"
+        response_text += _health_entries("Errors", errors)
+        response_text += _health_entries("Warnings", warnings)
 
-        if warnings:
-            response_text += "Warnings:\n"
-            for warn in warnings:
-                response_text += (
-                    f"   [{one_line(warn.get('code', '?'), 40)}] "
-                    f"{one_line(warn.get('message', ''), 500)}\n"
-                )
-                if warn.get("suggestion"):
-                    response_text += f"   → {one_line(warn['suggestion'], 500)}\n"
+        # The utilization the Utilization line and the propagation check
+        # use: only a number from 0 to 100.
+        percent = None
+        utilization = None
+        if isinstance(status, dict):
+            utilization = status.get("utilizationPercent")
+            percent = _number_in(utilization, 0, 100)
+        elif status:
+            response_text += "\nStatus: not in the expected format\n"
+            status = {}
 
         if status:
             response_text += f"\nStatus:\n"
-            utilization = status.get("utilizationPercent")
             if utilization is not None:
-                percent = _number_in(utilization, 0, 100)
-                shown = f"{percent}%" if percent is not None else _gw(utilization, 20) or "N/A"
-                response_text += f"   Utilization: {shown} ({_gw(status.get('utilizationStatus', 'unknown'))})\n"
-            if status.get("batchTTL") is not None:
-                ttl = _number_in(status["batchTTL"], 0, MAX_TTL_SECONDS)
-                shown = _ttl_text(ttl) if ttl is not None else _gw(status["batchTTL"], 40)
-                response_text += f"   TTL: {shown}\n"
-            if status.get("expectedExpiration"):
+                shown = f"{percent}%" if percent is not None else "N/A"
+                # Missing: "unknown"; null (a valid Optional) prints as before:
+                # empty. Any other type: "unknown".
+                util_status = status.get("utilizationStatus", "unknown")
+                if util_status is None:
+                    util_status = ""
+                elif isinstance(util_status, str):
+                    util_status = _gw(util_status)
+                else:
+                    util_status = "unknown"
+                response_text += f"   Utilization: {shown} ({util_status})\n"
+            # Left out when it is not a number, as when it is missing; an
+            # int out of range prints as before #270.
+            ttl = _number_in(status.get("batchTTL"), 0, MAX_TTL_SECONDS)
+            if ttl is not None:
+                response_text += f"   TTL: {_ttl_text(ttl)}\n"
+            elif _is_plain_int(status.get("batchTTL")):
+                response_text += f"   TTL: {_gw(status['batchTTL'], 40)}\n"
+            if _is_text(status.get("expectedExpiration")):
                 response_text += f"   Expires: {_gw(status['expectedExpiration'])}\n"
 
         # Propagation timing (from gateway, when available)
         propagation_status = result.get("propagationStatus")
         seconds_since = result.get("secondsSincePurchase")
-        estimated_ready = result.get("estimatedReadyAt")
+        estimated_ready = _gw_text(result.get("estimatedReadyAt"))
+        has_estimate = _is_text(result.get("estimatedReadyAt"))
 
-        if propagation_status:
+        if isinstance(propagation_status, str) and propagation_status:
             response_text += f"\nPropagation:\n"
             response_text += f"   Status: {_gw(propagation_status, 40)}\n"
-            if seconds_since is not None:
-                age = _stamp_age(seconds_since)
-                shown = f"{age}s ago" if age is not None else _gw(seconds_since, 20) or "N/A"
-                response_text += f"   Purchased: {shown}\n"
-            if estimated_ready:
-                response_text += f"   Estimated ready: {_gw(estimated_ready)}\n"
+            age = _stamp_age(seconds_since)
+            if age is not None:
+                response_text += f"   Purchased: {age}s ago\n"
+            elif _is_plain_int(seconds_since):
+                response_text += f"   Purchased: {_gw(seconds_since, 20)}\n"
+            if has_estimate:
+                response_text += f"   Estimated ready: {estimated_ready}\n"
 
         # Contextual hints based on health
         if can_upload:
             response_text += _format_hints(
                 "upload_data", ["get_stamp_status", "extend_stamp"]
             )
+        elif readiness_unknown:
+            response_text += (
+                "\n💡 Retry check_stamp_health in 15 seconds. If the same answer "
+                "repeats, call get_stamp_status to see the stamp's state."
+            )
+            response_text += _format_hints(
+                "check_stamp_health", ["list_stamps", "get_stamp_status"]
+            )
         else:
             # Detect propagation: prefer gateway field, fall back to heuristic
             is_propagating = propagation_status == "propagating"
-            if not is_propagating:
-                error_codes = {e.get("code", "") for e in errors}
-                util_pct = (status.get("utilizationPercent") or 0) if status else 0
+            # An error list the server cannot read may hide NOT_FOUND: check
+            # again rather than buy.
+            errors_unreadable = not is_propagating and _error_list_unreadable(errors)
+            if not is_propagating and not errors_unreadable:
+                # Only string codes count; an unhashable code cannot raise.
+                error_codes = {
+                    e["code"]
+                    for e in (errors if isinstance(errors, list) else [])
+                    if isinstance(e, dict) and isinstance(e.get("code"), str)
+                }
+                # A value that fails validation counts as not reported, so
+                # malformed data never leads to purchase_stamp.
+                util_pct = 0 if percent is None else percent
                 is_propagating = ("NOT_FOUND" in error_codes) or (
                     "NOT_USABLE" in error_codes and util_pct == 0
                 )
-            if is_propagating:
-                if estimated_ready:
+            if errors_unreadable:
+                response_text += (
+                    "\n💡 The gateway's error list is not in the expected format, so "
+                    "the cause is unknown. Retry check_stamp_health in 15 seconds. "
+                    "If the same answer repeats, call get_stamp_status to see the "
+                    "stamp's state."
+                )
+                response_text += _format_hints(
+                    "check_stamp_health", ["list_stamps", "get_stamp_status"]
+                )
+            elif is_propagating:
+                if has_estimate:
                     response_text += (
-                        f"\n💡 Stamp is propagating. Estimated ready at {_gw(estimated_ready)}. "
+                        "\n💡 Stamp is propagating. Estimated ready at "
+                        f"{estimated_ready}. "
                         "Retry check_stamp_health in 15 seconds."
                     )
                 else:
@@ -3877,14 +4467,35 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
         )
 
 
+def _wallet_text(value: Any) -> str:
+    """walletAddress for printing: only text."""
+    return _gw(value) if isinstance(value, str) else "N/A"
+
+
+def _wallet_balance(value: Any) -> str:
+    """bzzBalance for printing: text, or a number from 0 to 10**40. Null
+    (a valid Optional) prints empty, as before #270."""
+    if value is None or isinstance(value, str):
+        return _gw(value)
+    number = _number_in(value, 0, 10**40)
+    return "N/A" if number is None else _gw(number)
+
+
 async def handle_get_wallet_info(arguments: Dict[str, Any]) -> CallToolResult:
     """Handle wallet info requests."""
     try:
         result = gateway_client.get_wallet_info()
 
         response_text = f"Wallet Information:\n"
-        response_text += f"   Address: {_gw(result.get('walletAddress', 'N/A'))}\n"
-        response_text += f"   BZZ Balance: {_gw(result.get('bzzBalance', 'N/A'))}\n"
+        if isinstance(result, dict):
+            response_text += (
+                f"   Address: {_wallet_text(result.get('walletAddress', 'N/A'))}\n"
+                f"   BZZ Balance: {_wallet_balance(result.get('bzzBalance', 'N/A'))}\n"
+            )
+        else:
+            response_text += (
+                f"   The wallet details are unknown: {_NOT_EXPECTED_FORMAT}.\n"
+            )
         response_text += _format_hints("purchase_stamp", ["list_stamps"])
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])

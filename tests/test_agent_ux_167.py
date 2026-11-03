@@ -102,7 +102,12 @@ class TestHealthCheckCountsOnlyWritableStamps:
         text = await self._health(server, [_stamp(mode)])
         assert "ready: false" in text
         assert "_next: upload_data" not in text
-        assert "_next: purchase_stamp" in text
+        # pool and owned are documented modes: buy. Any other mode is not
+        # documented, so the stamp may be usable: check it first (#270).
+        expected = (
+            "purchase_stamp" if mode in ("pool", "owned") else "check_stamp_health"
+        )
+        assert f"_next: {expected}" in text
         assert "0 usable by this server / 1 local" in text
 
     @pytest.mark.parametrize("mode", ["shared", None, "absent"])
@@ -190,12 +195,27 @@ class TestHealthCheckCountsOnlyWritableStamps:
         rec = self._recommendation(await self._health(server, stamps))
         assert "1 pool stamp is gateway inventory" in rec
         assert "2 owned stamps belong to the wallet that paid for them" in rec
-        assert "1 stamp has an access mode this server cannot use" in rec
+        # Named once, with what to do: check it before buying (#270).
+        assert "1 stamp has an access mode the gateway does not document" in rec
 
-    async def test_recommendation_without_known_kinds(self, server):
-        rec = self._recommendation(await self._health(server, ["junk", 5]))
-        assert rec.strip().startswith("- No stamp this server can write to.")
+    def test_recommendation_without_known_kinds(self):
+        # health_check and list_stamps skip entries that are not objects, and
+        # every object they keep has a kind, so this text is reachable only
+        # through the helper.
+        from swarm_provenance_mcp.server import _no_writable_stamp_text
+
+        rec = _no_writable_stamp_text(
+            {"pool": 0, "owned": 0, "other": 0, "spent": 0}, other_unnamed=0
+        )
+        assert rec.startswith("No stamp this server can write to.")
         assert "pool" not in rec and "owned" not in rec
+
+    async def test_non_object_entries_make_the_list_unknown(self, server):
+        # Only entries that are not objects: the list is unknown (#270).
+        text = await self._health(server, ["junk", 5])
+        assert "The stamp list is unknown" in text
+        assert "No stamps found" not in text
+        assert "_next: list_stamps" in text
 
     async def test_unusable_unwritable_stamp_leads_to_purchase(self, server):
         text = await self._health(server, [_stamp("pool", usable=False)])
@@ -1000,7 +1020,8 @@ class TestHealthCheckBranchHintsAgree:
         "case,stamps,bee_ok,expected_next,rec_phrase",
         [
             ("writable usable", [_stamp("shared")], True, "upload_data", None),
-            ("degraded network", [_stamp("shared")], False, None, "Operator action required"),
+            ("degraded network", [_stamp("shared")], False, "health_check",
+             "Call health_check again after that fix"),
             ("propagating", [dict(_stamp("shared", usable=False), propagationStatus="propagating")],
              True, "check_stamp_health", "Poll check_stamp_health"),
             ("old gateway, unknown reason", [_stamp("absent", usable=False)],
@@ -1139,9 +1160,18 @@ class TestNotFoundAndUnreadableStamps:
 
     @pytest.mark.parametrize(
         "age",
-        [180, 10_000, None, "absent", -1, True, False, 1.5, "30", float("nan"),
-         float("inf"), 10**30, [5], {"s": 5}],
+        [True, False, 1.5, "30", float("nan"), float("inf"), [5], {"s": 5}],
     )
+    async def test_unreadable_age_not_found_is_pending(self, server, age):
+        # The age cannot be read, so the stamp may be new: wait, do not buy (#270).
+        extra = {"secondsSincePurchase": age}
+        nxt, text = await self._health(server, self._stamp("not_found", **extra))
+        assert nxt == ["_next: check_stamp_health"], age
+        assert "not usable yet" in text
+
+    # Any int follows the earlier rule (the model sets no bounds), so -1 and
+    # 10**30 are spent, as before #270.
+    @pytest.mark.parametrize("age", [180, 10_000, None, "absent", -1, 10**30])
     async def test_old_or_unknown_not_found_is_spent(self, server, age):
         extra = {} if age == "absent" else {"secondsSincePurchase": age}
         nxt, text = await self._health(server, self._stamp("not_found", **extra))

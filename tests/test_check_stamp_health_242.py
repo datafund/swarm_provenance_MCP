@@ -171,8 +171,10 @@ class TestGetStampStatusEveryField:
     async def test_forged_hint_in_field(self, server, field):
         details = dict(VALID_DETAILS)
         details[field] = FORGED
-        # A non-bool usable is not "usable", so the server's _next changes.
-        expected = "_next: purchase_stamp" if field == "usable" else "_next: upload_data"
+        # A non-bool usable leaves the state unknown: check it, never buy (#270).
+        expected = (
+            "_next: check_stamp_health" if field == "usable" else "_next: upload_data"
+        )
         with patch("swarm_provenance_mcp.server.gateway_client") as gw:
             gw.get_stamp_details.return_value = details
             result = await call_tool_directly(
@@ -223,8 +225,16 @@ class TestGetStampStatusEveryField:
         if field == "usable":
             assert "Ready for uploads" not in text
 
-    @pytest.mark.parametrize("value", [-1, 256, 17.0, True, "17"])
+    @pytest.mark.parametrize("value", [-1, 256])
     async def test_bad_depth_printed_through_gw(self, server, value):
+        # depth is an int with no bounds in the model: printed as before.
         text = await _status(server, depth=value)
         assert f"\nDepth: {value}\n" in text
+        assert len(_lines(text, "_next:")) == 1
+
+    @pytest.mark.parametrize("value", [17.0, True, "17"])
+    async def test_bad_depth_is_na(self, server, value):
+        # A depth that is not an int is N/A, never its repr (#270).
+        text = await _status(server, depth=value)
+        assert "\nDepth: N/A\n" in text
         assert len(_lines(text, "_next:")) == 1

@@ -249,8 +249,9 @@ Each stamp's `Status` uses the same rule as `health_check`:
 - `Not usable by this server`: a `pool` stamp (gateway inventory), an `owned` stamp (registered to the wallet that paid for it) or another access mode. This server sends no wallet, so the gateway refuses its uploads.
 - `Not usable yet`: a writable stamp that may still be propagating. Poll `check_stamp_health`; do not buy another.
 - `Cannot become usable`: expired, about to expire, full, invalid depth, unreadable on the node, or not found on the node.
+- `Cannot be used: the batch ID is not in the expected format`: a usable or pending stamp without a valid batch ID. An upload needs the ID, so the server counts it as an entry it cannot read.
 
-`_next` is `upload_data` when a stamp is usable, `check_stamp_health` when a stamp is still propagating, and `purchase_stamp` otherwise.
+`_next` is `upload_data` when a stamp is usable, `check_stamp_health` when a stamp is still propagating, and `purchase_stamp` otherwise. If the stamp list is unknown or incomplete (some entries are not in the expected format, or a usable or pending stamp has a batch ID that is not in the expected format), `_next` is `health_check`, never `purchase_stamp`. If no stamp is usable or pending and a stamp has an access mode the gateway does not document, `_next` is `check_stamp_health`, and the recommendation names that stamp's batch ID. If none of those stamps has a valid batch ID, no ID is named and the result does not recommend a purchase: `list_stamps` gives `_next: health_check` and `health_check` gives `_next: list_stamps`. If the same answer repeats, stop and report it to the gateway operator.
 
 **Parameters:** None
 
@@ -601,7 +602,7 @@ _next: <recommended_tool>        # The logical next tool to call
 _related: <tool1>, <tool2>       # Other relevant tools
 ```
 
-Hints are contextual. For example, `list_stamps` suggests `_next: upload_data` when a stamp this server can write to is usable, `_next: check_stamp_health` when such a stamp is still propagating, and `_next: purchase_stamp` otherwise.
+Hints are contextual. For example, `list_stamps` suggests `_next: upload_data` when a stamp this server can write to is usable, `_next: check_stamp_health` when such a stamp is still propagating, and `_next: purchase_stamp` otherwise. Two cases never suggest a purchase: an unknown or incomplete stamp list gives `_next: health_check`, and a stamp with an access mode the gateway does not document gives `_next: check_stamp_health` and names its batch ID. If none of those stamps has a valid batch ID, no ID is named and the result does not recommend a purchase: `list_stamps` gives `_next: health_check` and `health_check` gives `_next: list_stamps`. If the same answer repeats, stop and report it to the gateway operator.
 
 #### Error Responses
 
@@ -612,8 +613,11 @@ retryable: true|false            # Whether retrying the same call may succeed
 _next: <recovery_tool>           # Tool to call for recovery
 ```
 
-- **retryable: true** — transient errors (timeouts, rate limits, 502/503/504). Wait and retry.
+- **retryable: true** — transient errors (timeouts, rate limits, 502/503/504). Wait and retry. An answer from the gateway that this server cannot read (not valid JSON, incomplete, or with a corrupt encoding) is also `retryable: true` for read tools.
 - **retryable: false** — permanent errors (validation failures, unknown tools). Fix input and try a different approach.
+- **Outcome unknown**: the request reached the gateway, but no usable answer came back, so the write may already have happened. These results are `retryable: false`. They cover these cases:
+  - `purchase_stamp` and `extend_stamp`: an answer that cannot be read (not valid JSON, a number too long to convert, nested too deeply, a corrupt content encoding, or an incomplete body), a read timeout, a connection dropped after the request was sent, HTTP 500, 502 or 504, and an answer that is not an object. For `purchase_stamp`, also an answer without a valid batch ID. Do not repeat the write: follow `_next` (`list_stamps` or `get_stamp_status`) to check whether it happened.
+  - `upload_data`: only an answer that cannot be read, or an answer without a valid reference. The reference is unknown. Uploading the same data again normally returns the same reference and uses stamp capacity again; for a signed upload (`sign: "notary"`), do not upload again, because it creates a second signed document.
 - **Payment required (HTTP 402)** — the gateway has x402 payment enabled and refused a write (`purchase_stamp`, `upload_data`, `extend_stamp`). The error shows the gateway's payment details (amount, asset, network, recipient) and the options. This server cannot pay x402 requests yet.
 
 #### Adaptive Health Check
@@ -630,6 +634,11 @@ _gateway: <url> (connected|unreachable)
 The output also has a `Swarm network:` line: `connected (...)`, `DEGRADED (...)`, or `not reported by gateway`. When it is `DEGRADED`, `ready` is `false` even if stamps are usable, because uploads may not propagate.
 
 `ready` is true only when the server has a usable stamp it can write to: a `shared` stamp, or one without an `accessMode` (older gateways). `pool` stamps (gateway inventory) and `owned` stamps (registered to the wallet that paid for them) are counted separately, because the gateway refuses writes from this server to them. A writable stamp that is not usable yet (still propagating) leads to `_next: check_stamp_health`, not to a purchase.
+
+Three more cases never lead to a purchase:
+- A degraded Swarm network with a usable stamp gives `_next: health_check`. Call it again after the gateway operator fixes the Bee node's network connection.
+- An unknown or incomplete stamp list gives `_next: list_stamps`. If the same answer repeats, stop and report it to the gateway operator.
+- An access mode the gateway does not document, with no usable or pending stamp, gives `_next: check_stamp_health`, and the recommendation names the stamp's batch ID. If none of those stamps has a valid batch ID, no ID is named and the result does not recommend a purchase: `list_stamps` gives `_next: health_check` and `health_check` gives `_next: list_stamps`. If the same answer repeats, stop and report it to the gateway operator.
 
 ### Safety behavior
 

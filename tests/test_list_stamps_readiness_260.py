@@ -266,12 +266,14 @@ class TestHostileGatewayValues:
 
     @pytest.mark.parametrize("value", [None, "abc", {"a": 1}, 5])
     async def test_non_list_stamps(self, server, value):
+        # A malformed stamp list is unknown, not empty: never a purchase (#270).
         with patch("swarm_provenance_mcp.server.gateway_client") as gw:
             gw.list_stamps.return_value = {"stamps": value, "total_count": 3}
             result = await call_tool_directly(server, "list_stamps", {})
         text = result.content[0].text
-        assert "No stamps found" in text
-        assert _next_lines(text) == ["_next: purchase_stamp"]
+        assert "No stamps found" not in text
+        assert "The stamp list is unknown" in text
+        assert _next_lines(text) == ["_next: health_check"]
 
 
 class TestStampReadiness:
@@ -318,13 +320,20 @@ class TestStampReadiness:
             _stamp("weird", usable=False),
             "junk",
         ]
+        # A pending stamp without a valid batch ID cannot be used: it counts
+        # as unreadable, not pending (#270).
         assert _writable_stamp_counts(stamps) == {
             "writable": 2,
-            "pending": 2,
+            "pending": 1,
+            "unreadable": 1,
             "pool": 1,
             "owned": 1,
             "other": 1,
             "pending_ids": [TEST_STAMP_ID],
+            # Valid batch IDs of stamps with an undocumented access mode, once
+            # each, and how many such stamps have no valid batch ID (#270).
+            "other_ids": [TEST_STAMP_ID],
+            "other_unnamed": 0,
             "blocked": {"pool": 2, "owned": 2, "other": 2, "spent": 1},
         }
 
@@ -399,7 +408,9 @@ class TestSpentReasonsNamedEverywhere:
     def test_no_writable_stamp_text(self):
         from swarm_provenance_mcp.server import _no_writable_stamp_text
 
-        rec = _no_writable_stamp_text({"pool": 0, "owned": 0, "other": 0, "spent": 1})
+        rec = _no_writable_stamp_text(
+            {"pool": 0, "owned": 0, "other": 0, "spent": 1}, other_unnamed=0
+        )
         for text in self._reasons():
             assert text in rec, text
 
@@ -429,7 +440,11 @@ class TestRejectedAccessModeIsShown:
 
     @pytest.mark.parametrize(
         "mode,shown",
-        [("", "(empty)"), ("   ", "(empty)"), (False, "False"), (0, "0"), ([], "[]"), ({}, "{}")],
+        # A mode that is not text is shown as N/A, never as its repr (#270).
+        [
+            ("", "(empty)"), ("   ", "(empty)"), (False, "N/A"), (0, "N/A"),
+            ([], "N/A"), ({}, "N/A"),
+        ],
     )
     async def test_falsy_mode_is_printed(self, server, mode, shown):
         text = await _list(server, [_stamp(mode)])
@@ -560,7 +575,8 @@ class TestLabelPrintedLikePurchaseHint:
     tells the agent to look for."""
 
     @pytest.mark.parametrize(
-        "label", ["run-42", "a\n\nb  c", "x" * 5000, 'say "hi"', 7, ["x"]]
+        # Only text labels are printed (#270); see test_gateway_field_types_270.
+        "label", ["run-42", "a\n\nb  c", "x" * 5000, 'say "hi"']
     )
     async def test_label_matches_label_helper(self, server, label):
         from swarm_provenance_mcp.server import _label

@@ -32,17 +32,59 @@ def _clean_strings(value: Any) -> Any:
     return value
 
 
+class GatewayAnswerUnreadable(requests.exceptions.InvalidJSONError):
+    """The gateway answered, but the body could not be read or parsed.
+
+    The only exception the client raises for a body that arrived and cannot
+    be used, whatever the cause: not JSON, an integer over Python's
+    4,300-digit limit, nesting too deep, a corrupt Content-Encoding, or a
+    body cut off while it was read. ``response`` is the response when the
+    body failed to parse, and None when it failed while it was received
+    (requests then gives no status). It is never raised before a request
+    is sent, so a write tool treats it as "outcome unknown". The message
+    names only the cause, never the body.
+    """
+
+
+_UNREADABLE = "The gateway's answer could not be read"
+
+# Readable causes, by exception class. Any other cause reads "it is in an
+# unexpected form" (or, for a plain ValueError, "it holds a number too long
+# to convert").
+_UNREADABLE_CAUSES = {
+    RecursionError: "it is nested too deeply",
+    requests.exceptions.JSONDecodeError: "it is not valid JSON",
+    requests.exceptions.ContentDecodingError: "its content encoding is corrupt",
+    requests.exceptions.ChunkedEncodingError: "the body is incomplete",
+}
+
+
+def _unreadable(error: BaseException, response=None) -> GatewayAnswerUnreadable:
+    """A GatewayAnswerUnreadable that names the cause of ``error``."""
+    cause = next(
+        (text for cls, text in _UNREADABLE_CAUSES.items() if isinstance(error, cls)),
+        None,
+    )
+    if cause is None:
+        # A ValueError here is an integer over the 4,300-digit limit.
+        cause = (
+            "it holds a number too long to convert"
+            if type(error) is ValueError
+            else "it is in an unexpected form"
+        )
+    return GatewayAnswerUnreadable(f"{_UNREADABLE}: {cause}", response=response)
+
+
 def _json(response) -> Any:
-    """The response body as JSON, with its strings cleaned."""
+    """The response body as JSON, with its strings cleaned.
+
+    Any failure to parse or clean the body raises GatewayAnswerUnreadable.
+    Depending on the Python version, nesting that is too deep raises
+    RecursionError in json decoding (3.10's scanner) or in the cleaner."""
     try:
         return _clean_strings(response.json())
-    except RecursionError:
-        # A body nested too deeply is not a real gateway response. Depending
-        # on the Python version the RecursionError comes from json decoding
-        # (3.10's scanner) or from the cleaner walking the decoded value.
-        raise requests.exceptions.InvalidJSONError(
-            "Gateway response is nested too deeply to process", response=response
-        ) from None
+    except Exception as e:  # noqa: BLE001 - every cause means the same here
+        raise _unreadable(e, response) from None
 
 
 # Longest PAYMENT-REQUIRED header the client decodes, in characters.
@@ -165,6 +207,18 @@ class _GatewaySession(requests.Session):
     (``should_strip_auth``): another host, port or scheme counts as another
     origin, except an http to https upgrade on the same host.
     """
+
+    def send(self, request, **kwargs):
+        """Send, and turn a failure to receive the body into
+        GatewayAnswerUnreadable. requests reads the body inside send, so
+        these errors carry no response; the request was already sent."""
+        try:
+            return super().send(request, **kwargs)
+        except (
+            requests.exceptions.ContentDecodingError,
+            requests.exceptions.ChunkedEncodingError,
+        ) as e:
+            raise _unreadable(e) from None
 
     def rebuild_auth(self, prepared_request, response):
         super().rebuild_auth(prepared_request, response)

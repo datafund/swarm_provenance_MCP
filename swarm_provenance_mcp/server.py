@@ -1163,24 +1163,56 @@ def _recently_purchased(stamp: Dict[str, Any]) -> bool:
     return age < NOT_FOUND_GRACE_SECONDS
 
 
-def _stamp_list(answer: Any) -> Optional[List[Dict[str, Any]]]:
-    """The stamp objects in a list_stamps answer, or None when the answer is
-    malformed: not an object, a stamps value that is not a list, or a
-    non-empty list without one object. Entries that are not objects are
-    skipped from a list that has objects."""
+def _stamp_list(answer: Any) -> Optional[Tuple[List[Dict[str, Any]], int]]:
+    """The stamp objects in a list_stamps answer and the number of entries
+    that are not objects, or None when the answer is malformed: not an
+    object, a stamps value that is not a list, or a non-empty list without
+    one object."""
     stamps = answer.get("stamps") if isinstance(answer, dict) else None
     if not isinstance(stamps, list):
         return None
     objects = [s for s in stamps if isinstance(s, dict)]
     if stamps and not objects:
         return None
-    return objects
+    return objects, len(stamps) - len(objects)
 
 
-# A stamp list the server cannot read. Never leads to purchase_stamp.
+# A stamp list the server cannot read, whole or in part. Neither leads to
+# purchase_stamp: an entry it cannot read may be a usable or pending stamp.
 _STAMP_LIST_UNKNOWN = (
     "The stamp list is unknown: the gateway's answer is not in the expected format."
 )
+_REPEAT_TO_OPERATOR = (
+    "If the same answer repeats, stop and report it to the gateway operator."
+)
+
+
+def _entries(count: int) -> str:
+    return f"{count} entr{'ies' if count != 1 else 'y'}"
+
+
+def _stamp_list_incomplete(unreadable: int) -> str:
+    """No writable or pending stamp among the readable entries, and some
+    entries cannot be read."""
+    verb = "are" if unreadable != 1 else "is"
+    return (
+        f"The stamp list is incomplete: {_entries(unreadable)} {verb} not in the "
+        "expected format, so this server cannot tell whether a usable stamp exists."
+    )
+
+
+def _unreadable_entries_note(unreadable: int) -> str:
+    """A usable or pending stamp was found; some entries cannot be read."""
+    verb = "are" if unreadable != 1 else "is"
+    return f"{_entries(unreadable)} in the stamp list {verb} not in the expected format"
+
+
+def _plain_int(value: Any, low: int, high: int) -> Optional[int]:
+    """A gateway count, only as a plain int (not a bool or a float) from
+    ``low`` to ``high``; otherwise None."""
+    if isinstance(value, int) and not isinstance(value, bool) and low <= value <= high:
+        return value
+    return None
 
 
 def _stamp_readiness(stamp: Any) -> Optional[str]:
@@ -1548,7 +1580,7 @@ def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, 
         return None
     # Only values of the right type count, for the decision and the summary.
     # A bee_node with none of them counts as not reported.
-    peers = _number_in(bee.get("connected_peers"), 0, MAX_BEE_PEERS)
+    peers = _plain_int(bee.get("connected_peers"), 0, MAX_BEE_PEERS)
     availability = bee.get("network_availability")
     if not isinstance(availability, str) or not availability.strip():
         availability = None
@@ -2995,14 +3027,15 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
     """
     try:
         result = gateway_client.list_stamps()
-        stamps = _stamp_list(result)
-        if stamps is None:
+        listed = _stamp_list(result)
+        if listed is None:
             # Not "no stamps": never a purchase on a list it cannot read.
-            response_text = f"⚠️  {_STAMP_LIST_UNKNOWN}\n"
+            response_text = f"⚠️  {_STAMP_LIST_UNKNOWN} {_REPEAT_TO_OPERATOR}\n"
             response_text += _format_hints("health_check", ["check_stamp_health"])
             return CallToolResult(
                 content=[TextContent(type="text", text=response_text)]
             )
+        stamps, unreadable = listed
         # The gateway's total_count is not printed: the count is the number
         # of entries listed here.
         counts = _writable_stamp_counts(stamps)
@@ -3060,6 +3093,9 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
         if any(_is_text(s.get("label")) for s in stamps):
             response_text += f"\n{QUOTED_NOTE}\n"
 
+        if unreadable and (counts["writable"] or counts["pending"]):
+            response_text += f"\n💡 {_unreadable_entries_note(unreadable)}.\n"
+
         # Contextual hints, in health_check's order. Each recommendation
         # matches its _next.
         if counts["writable"]:
@@ -3071,6 +3107,12 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                 f"\n💡 {_pending_stamp_text(counts['pending'], counts['pending_ids'])}.\n"
             )
             response_text += _format_hints("check_stamp_health", ["get_stamp_status"])
+        elif unreadable:
+            # An entry it cannot read may be the stamp to use: never buy.
+            response_text += (
+                f"\n💡 {_stamp_list_incomplete(unreadable)} {_REPEAT_TO_OPERATOR}\n"
+            )
+            response_text += _format_hints("health_check", ["check_stamp_health"])
         else:
             if stamps:
                 response_text += f"\n💡 {_no_writable_stamp_text(counts['blocked'])}.\n"
@@ -3129,10 +3171,16 @@ async def handle_extend_stamp(arguments: Dict[str, Any]) -> CallToolResult:
 
         response_text = f"✅ Stamp extended successfully!\n\n"
         response_text += f"📋 Extension Details:\n"
-        batch_id = result.get("batchID")
-        # Printed as 64 hexadecimal characters, without 0x.
-        batch_id = _clean_gateway_batch_id(batch_id) or "N/A"
-        response_text += f"   Batch ID: `{batch_id}`\n"
+        # Printed as 64 hexadecimal characters, without 0x. Without a valid
+        # ID in the answer, the requested one, marked as not confirmed.
+        batch_id = _clean_gateway_batch_id(result.get("batchID"))
+        if batch_id is not None:
+            response_text += f"   Batch ID: `{batch_id}`\n"
+        else:
+            response_text += (
+                f"   Batch ID: `{clean_stamp_id}` (requested; the gateway's answer "
+                "did not confirm it)\n"
+            )
         response_text += f"   Additional Duration: {duration_hours} hours\n"
         message = result.get("message")
         status_text = one_line(message) if isinstance(message, str) else "Extended"
@@ -3770,7 +3818,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         if not isinstance(free_tier, dict):
             free_tier = {}
         # Only a sane count says free tier; any other value counts as absent.
-        rate_limit = _number_in(free_tier.get("rate_limit_per_minute"), 1, 10**6)
+        rate_limit = _plain_int(free_tier.get("rate_limit_per_minute"), 1, 10**6)
         if rate_limit is not None:
             response_text += f"\n💰 Payment: free tier ({rate_limit} write req/min, reads unlimited)\n"
         elif x402:
@@ -3808,9 +3856,10 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
             try:
                 # The same rule as list_stamps (_stamp_list): a malformed
                 # list is unknown, never "no stamps".
-                stamps = _stamp_list(gateway_client.list_stamps())
-                if stamps is None:
+                listed = _stamp_list(gateway_client.list_stamps())
+                if listed is None:
                     raise _StampListUnknown()
+                stamps, unreadable = listed
                 total_stamps = len(stamps)
                 counts = _writable_stamp_counts(stamps)
                 usable_count = counts["writable"]
@@ -3834,6 +3883,8 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 if others:
                     stamps_info += f" (usable but not by this server: {', '.join(others)})"
                 stamps_info += "\n"
+                if unreadable:
+                    stamps_info += f"   ⚠️  {_unreadable_entries_note(unreadable)}\n"
 
                 if usable_count > 0 and (network is None or network["ok"]):
                     ready = True
@@ -3853,6 +3904,13 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                         _pending_stamp_text(counts["pending"], counts["pending_ids"])
                     )
                     next_tool = "check_stamp_health"
+                elif unreadable:
+                    # An entry it cannot read may be the stamp to use: never buy.
+                    recommendations.append(
+                        f"{_stamp_list_incomplete(unreadable)} Call list_stamps to "
+                        f"check the stamps. {_REPEAT_TO_OPERATOR}"
+                    )
+                    next_tool = "list_stamps"
                 elif total_stamps > 0:
                     recommendations.append(_no_writable_stamp_text(counts["blocked"]))
                     next_tool = _no_writable_stamp_next(counts["blocked"])
@@ -3864,7 +3922,8 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
             except _StampListUnknown:
                 stamps_info += "\n📋 Stamps: unknown (the gateway's answer is not in the expected format)\n"
                 recommendations.append(
-                    f"{_STAMP_LIST_UNKNOWN} Call list_stamps to check the stamps"
+                    f"{_STAMP_LIST_UNKNOWN} Call list_stamps to check the stamps. "
+                    f"{_REPEAT_TO_OPERATOR}"
                 )
                 next_tool = "list_stamps"
             except RequestException:
@@ -4072,8 +4131,8 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
             response_text = f"✅ Stamp {clean_stamp_id[:16]}... is healthy and ready for uploads.\n\n"
         elif readiness_unknown:
             response_text = (
-                f"⚠️  Stamp {clean_stamp_id[:16]}...: upload readiness is unknown: "
-                f"{_NOT_EXPECTED_FORMAT}.\n\n"
+                f"⚠️  Stamp {clean_stamp_id[:16]}...: upload readiness is unknown, "
+                f"because {_NOT_EXPECTED_FORMAT}.\n\n"
             )
         else:
             response_text = (

@@ -267,6 +267,9 @@ If the output starts with `INCOMPLETE`, the lineage is partial. Do not treat it 
 | Gateway unreachable | Network or gateway issue | Run `health_check`, check `SWARM_GATEWAY_URL` config |
 | "outcome unknown" on `purchase_stamp`, `extend_stamp` or `upload_data` | The request reached the gateway, but no usable answer came back. The write may already have happened (`retryable: false`) | Do not repeat the write. Follow `_next`: `list_stamps` for a purchase, `get_stamp_status` for an extension, `check_stamp_health` for an upload. For an unsigned upload, the same data normally gets the same reference; never repeat a signed upload |
 | "Gateway answer unreadable" on `health_check` | The gateway answered, but this server cannot read the answer | Call `health_check` again later. If it repeats, report it to the gateway operator |
+| "The stamp list is unknown" or "The stamp list is incomplete" on `list_stamps` or `health_check` | The gateway's stamp list, or some of its entries, is not in the expected format. An entry that cannot be read may be a usable or pending stamp | Do not buy a stamp. Follow `_next`: `health_check` from `list_stamps`, `list_stamps` from `health_check`. If the same answer repeats, stop and report it to the gateway operator |
+| "upload readiness is unknown" on `check_stamp_health` | The gateway's `can_upload` is missing or not true or false | Follow `_next: check_stamp_health` and retry in 15 seconds. If the same answer repeats, call `get_stamp_status` to see the stamp's state |
+| "usable value is not in the expected format" on `get_stamp_status` | The gateway's `usable` is not true, false or null | Follow `_next: check_stamp_health`. Do not buy a stamp because of this answer |
 | RPC timeout | Blockchain node unresponsive | Run `chain_health`, try again or check `CHAIN_RPC_URL` |
 
 ---

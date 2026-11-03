@@ -68,7 +68,7 @@ def _unreadable(error: BaseException, response=None) -> GatewayAnswerUnreadable:
         cause = (
             "it holds a number too long to convert"
             if type(error) is ValueError
-            else f"{type(error).__name__}"
+            else "it is in an unexpected form"
         )
     return GatewayAnswerUnreadable(f"{_UNREADABLE}: {cause}", response=response)
 

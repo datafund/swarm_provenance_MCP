@@ -97,6 +97,14 @@ def _list_body(usable=False):
     }
 
 
+def _two_stamps():
+    body = _list_body(usable=True)
+    pool = dict(body["stamps"][0], accessMode="pool", batchID="d" * 64)
+    body["stamps"] = [pool, body["stamps"][0]]
+    body["total_count"] = 2
+    return body
+
+
 def _check_body():
     return {
         "can_upload": False,
@@ -171,6 +179,11 @@ TOOLS = {
     ),
     "get_stamp_status": ({"stamp_id": TEST_STAMP_ID}, {"get_stamp_details": _details}),
     "list_stamps": ({}, {"list_stamps": lambda: _list_body(usable=True)}),
+    # Two stamps: a pool stamp (not usable by this server) and a usable
+    # shared one. A bad second entry must not leave only the pool stamp to
+    # decide on a purchase.
+    "health_check[two]": ({}, {"health_check": _health, "list_stamps": lambda: _two_stamps()}),
+    "list_stamps[two]": ({}, {"list_stamps": lambda: _two_stamps()}),
     "purchase_stamp": (
         {"duration_hours": 24, "label": "run-1"},
         {"purchase_stamp": _purchase_body},
@@ -347,7 +360,7 @@ class TestBranchDecisionsUseCheckedValues:
         text = (await _run(server, "check_stamp_health", {"check_stamp_health": body})).content[0].text
         assert "is healthy" not in text
         assert "cannot be used for uploads" not in text
-        assert "upload readiness is unknown" in text
+        assert "upload readiness is unknown, because the gateway's answer is not in the expected format." in text
         assert _next_lines(text) == ["_next: check_stamp_health"]
 
     @pytest.mark.parametrize("errors", [[], [{"code": "EXPIRED", "message": "x"}]])
@@ -470,7 +483,8 @@ class TestBranchDecisionsUseCheckedValues:
             ("connected_peers", "0", False),
             ("connected_peers", [], False),
             ("connected_peers", 0, True),
-            ("connected_peers", 0.0, True),
+            # Only a plain int is a peer count: 0.0 is not reported (#270).
+            ("connected_peers", 0.0, False),
             ("warming_up", "false", False),
             ("warming_up", 1, False),
             ("warming_up", [0], False),
@@ -660,7 +674,11 @@ class TestNonObjectAnswers:
             return b
 
         text = (await _run(server, "extend_stamp", {"extend_stamp": body})).content[0].text
-        assert "Batch ID: `N/A`" in text
+        # The requested ID, marked as not confirmed by the gateway.
+        assert (
+            f"Batch ID: `{TEST_STAMP_ID}` (requested; the gateway's answer did not confirm it)"
+            in text
+        )
 
     @pytest.mark.parametrize(
         "message", [5, True, None, [FORGED], {"k": FORGED}, 10**400], ids=_hostile_id
@@ -711,6 +729,7 @@ class TestNonObjectAnswers:
         text = result.content[0].text
         assert not result.isError, text
         assert "The stamp list is unknown: the gateway's answer is not in the expected format." in text
+        assert "If the same answer repeats, stop and report it to the gateway operator." in text
         assert "No stamps found" not in text
         assert _next_lines(text) == ["_next: list_stamps"]
 
@@ -724,6 +743,7 @@ class TestNonObjectAnswers:
         text = result.content[0].text
         assert not result.isError, text
         assert "The stamp list is unknown: the gateway's answer is not in the expected format." in text
+        assert "If the same answer repeats, stop and report it to the gateway operator." in text
         assert "No stamps found" not in text
         assert _next_lines(text) == ["_next: health_check"]
 
@@ -739,8 +759,10 @@ class TestNonObjectAnswers:
             return b
 
         text = (await _run(server, "health_check", {"list_stamps": stamps})).content[0].text
-        # Skipped, as list_stamps skips them: only the one object is counted.
+        # Skipped, as list_stamps skips them: only the one object is counted,
+        # and the unreadable entries are named.
         assert "0 usable by this server / 1 local" in text
+        assert "4 entries in the stamp list are not in the expected format" in text
         assert SENTINEL not in text
         assert _next_lines(text) == ["_next: check_stamp_health"]
 
@@ -1484,6 +1506,65 @@ class TestBatchIdRules:
 
         with pytest.raises(ValueError):
             validate_and_clean_reference_hash("b" * 64 + "\n")
+
+
+class TestRound9:
+    @pytest.mark.parametrize("junk", ["garbage", 7, None, [FORGED]], ids=_hostile_id)
+    async def test_mixed_list_without_usable_stamp_is_incomplete(self, server, junk):
+        def body(b):
+            b = _two_stamps()
+            b["stamps"][1] = junk
+            return b
+
+        for tool, nxt in (("health_check", "list_stamps"), ("list_stamps", "health_check")):
+            text = (await _run(server, tool, {"list_stamps": body})).content[0].text
+            assert _next_lines(text) == [f"_next: {nxt}"], (tool, text)
+            assert "The stamp list is incomplete: 1 entry is not in the expected format" in text
+            assert "If the same answer repeats, stop and report it to the gateway operator." in text
+            assert "Purchase a stamp" not in text and "purchase one" not in text
+            assert SENTINEL not in text
+
+    async def test_mixed_list_with_usable_stamp_keeps_result(self, server):
+        def body(b):
+            b = _two_stamps()
+            b["stamps"].append("garbage")
+            return b
+
+        for tool in ("health_check", "list_stamps"):
+            text = (await _run(server, tool, {"list_stamps": body})).content[0].text
+            assert _next_lines(text) == ["_next: upload_data"], (tool, text)
+            assert "1 entry in the stamp list is not in the expected format" in text
+
+    @pytest.mark.parametrize("value", [5.0, 0.0, 3.5, True, 10**7], ids=_hostile_id)
+    async def test_peers_must_be_a_plain_int(self, server, value):
+        def health(h):
+            h["gateway_response"]["bee_node"]["connected_peers"] = value
+            return h
+
+        text = (await _run(server, "health_check", {"health_check": health})).content[0].text
+        assert "peers" not in text.split("Swarm network:", 1)[1].split("\n", 1)[0]
+
+    @pytest.mark.parametrize("value", [3.0, 2.5, True], ids=_hostile_id)
+    async def test_rate_limit_must_be_a_plain_int(self, server, value):
+        def health(h):
+            h["gateway_response"]["x402"]["free_tier"]["rate_limit_per_minute"] = value
+            return h
+
+        text = (await _run(server, "health_check", {"health_check": health})).content[0].text
+        assert "free tier" not in text
+
+    async def test_unknown_unreadable_cause_is_fixed_text(self):
+        from swarm_provenance_mcp.gateway_client import _unreadable
+
+        error = _unreadable(AttributeError("x"))
+        assert str(error) == "The gateway's answer could not be read: it is in an unexpected form"
+
+    async def test_extend_empty_answer_names_requested_id(self, server):
+        text = (await _run(server, "extend_stamp", {"extend_stamp": lambda b: {}})).content[0].text
+        assert (
+            f"   Batch ID: `{TEST_STAMP_ID}` (requested; the gateway's answer did not confirm it)\n"
+            in text
+        )
 
 
 # Full output for valid gateway answers, captured from the code before #270

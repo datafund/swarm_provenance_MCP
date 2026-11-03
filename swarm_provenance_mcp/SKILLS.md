@@ -137,20 +137,23 @@ Combine multiple datasets into one with verifiable provenance linking all source
 
 Register data on Swarm and link both the content hash and Swarm reference on-chain for bidirectional lookup.
 
+The two values are different hashes. `swarm_hash` is the content hash you anchor: the SHA-256 of the data, as the SDK and CLI use it. Compute it yourself; `upload_data` does not return it. `storage_ref` is the Swarm reference that `upload_data` returns. It must differ from `swarm_hash`: `anchor_hash` refuses a `storage_ref` equal to `swarm_hash`, and so does the contract.
+
 ```
 1. health_check              → verify gateway + chain connectivity
 2. chain_balance              → confirm wallet has ETH for gas
 3. purchase_stamp             → get a stamp for Swarm storage
 4. check_stamp_health         → poll until can_upload: true
 5. upload_data                → store data, receive Swarm reference hash
-6. anchor_hash(swarm_hash,    → register hash on-chain with storage reference linked
+6. anchor_hash(               → register the content hash on-chain with the
+     swarm_hash=<sha256>,       Swarm reference linked
      storage_ref=<swarm_ref>)
 7. lookup_by_storage_ref      → verify reverse lookup works
 ```
 
 ### F: Link Storage Reference After Transformation
 
-After recording a transformation, upload the transformed data to Swarm and link the storage location.
+After recording a transformation, upload the transformed data to Swarm and link the storage location. Here `new_hash` is the content hash (SHA-256) of the transformed data, so it differs from its Swarm reference. If `new_hash` is the Swarm reference itself, skip `set_storage_ref`: a storage reference must differ from the hash it is linked to.
 
 ```
 1. record_transform           → link original_hash → new_hash (new_hash auto-registered)

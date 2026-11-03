@@ -443,10 +443,16 @@ CHAIN WORKFLOW — store with on-chain provenance:
 health_check → purchase_stamp → check_stamp_health → upload_data → anchor_hash → verify_hash
 
 CHAIN WORKFLOW — store with storage reference linking:
-health_check → purchase_stamp → upload_data → anchor_hash (with storage_ref = Swarm reference) → lookup_by_storage_ref
+health_check → purchase_stamp → upload_data → anchor_hash → lookup_by_storage_ref
+In anchor_hash, swarm_hash is the SHA-256 of the data and storage_ref is the
+Swarm reference from upload_data. The two must differ.
 
 CHAIN WORKFLOW — record a transformation:
-upload_data (transformed data) → record_transform (original, new, description) → upload_data (to Swarm) → set_storage_ref (link Swarm ref to new hash) → get_provenance_chain
+upload_data (transformed data) → record_transform (original, new, description)
+→ upload_data (to Swarm) → set_storage_ref (link Swarm ref to new hash)
+→ get_provenance_chain
+set_storage_ref applies only when new is the SHA-256 of the transformed data. When
+new is the Swarm reference itself, skip it: a storage ref must differ from its hash.
 
 COMPANION SERVERS:
 - swarm_connect gateway (required) — the FastAPI gateway this server talks to, handles Bee node communication
@@ -536,7 +542,8 @@ def validate_and_clean_stamp_id(stamp_id: str) -> str:
         stamp_id = stamp_id[2:]
 
     # Validate format
-    if not STAMP_ID_PATTERN.match(stamp_id):
+    # fullmatch: "$" also matches before a final newline.
+    if not STAMP_ID_PATTERN.fullmatch(stamp_id):
         raise ValueError(
             f"Invalid stamp ID format. Expected 64-character hexadecimal string (without 0x prefix), got: {stamp_id}"
         )
@@ -564,7 +571,7 @@ def validate_and_clean_reference_hash(reference: str) -> str:
         reference = reference[2:]
 
     # Validate format
-    if not REFERENCE_HASH_PATTERN.match(reference):
+    if not REFERENCE_HASH_PATTERN.fullmatch(reference):
         raise ValueError(
             f"Invalid reference hash format. Expected 64-character hexadecimal string (without 0x prefix), got: {reference}"
         )
@@ -584,7 +591,7 @@ def validate_and_clean_swarm_reference(reference: str) -> str:
         raise ValueError("Reference cannot be empty")
     if reference.startswith(("0x", "0X")):
         reference = reference[2:]
-    if not SWARM_REFERENCE_PATTERN.match(reference):
+    if not SWARM_REFERENCE_PATTERN.fullmatch(reference):
         raise ValueError(
             "Invalid Swarm reference format. Expected 64 or 128 hexadecimal "
             "characters (128 for an encrypted reference), without 0x prefix; "
@@ -2475,7 +2482,10 @@ def create_server() -> Server:
                 f"4. Poll check_stamp_health every 15 seconds until can_upload is true (up to 2 minutes)\n"
                 f"5. Call upload_data with the data and your stamp_id — save the reference hash\n"
                 f"6. Call anchor_hash with the reference hash to register it on-chain. "
-                f"Optionally pass storage_ref (the Swarm reference from step 5) for bidirectional lookup.\n"
+                f"Do not pass the same reference as storage_ref: storage_ref must "
+                f"differ from swarm_hash. To link a storage reference, anchor the "
+                f"SHA-256 of the data as swarm_hash and pass the reference from "
+                f"step 5 as storage_ref.\n"
                 f"7. Call verify_hash to confirm the on-chain registration succeeded"
             )
 
@@ -2487,7 +2497,9 @@ def create_server() -> Server:
                     f"record_transform registers it automatically.\n"
                     f"10. Call record_transform with original_hash (from step 5), "
                     f'new_hash (from step 8), and description: "{transform_desc}"\n'
-                    f"11. Optionally call set_storage_ref to link the new hash to its Swarm reference (from step 8)\n"
+                    f"11. set_storage_ref does not apply here: the new hash is the "
+                    f"Swarm reference itself, and a storage reference must differ "
+                    f"from the hash it is linked to\n"
                     f"12. Call get_provenance_chain on the original hash to verify the lineage. "
                     f"If the output starts with INCOMPLETE, the lineage is partial: "
                     f"follow its Retry line before you rely on it"
@@ -4371,7 +4383,9 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
                     "No transaction was sent. A storage reference is set "
                     "once and only the record owner can set it, with "
                     "set_storage_ref, when the record has none. Use "
-                    "get_provenance to see the record.\n\n"
+                    "get_provenance to see the record. To link a different "
+                    "reference, change the content, upload it again, and "
+                    "anchor the new hash.\n\n"
                 )
                 msg += QUOTED_NOTE
                 return CallToolResult(
@@ -4388,6 +4402,10 @@ async def handle_anchor_hash(arguments: Dict[str, Any]) -> CallToolResult:
 
             # Not isError: the hash is already on-chain with the expected
             # owner, so the agent sees the existing record and proceeds.
+            # Golden constraint (#167): without owner and storage_ref together,
+            # this output must stay byte-identical to the code before #167
+            # (tests/fixtures/anchor_hash_golden_167.json). Add lines only
+            # under "if owner and storage_ref".
             response_text = f"⛓️  Hash already registered on-chain\n\n"
             response_text += f"   Swarm Hash: {clean_hash}\n"
             response_text += f"   Owner: {_chain_address(e.owner)}\n"

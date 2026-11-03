@@ -1012,7 +1012,7 @@ class TestHealthCheckBranchHintsAgree:
         [
             ("writable usable", [_stamp("shared")], True, "upload_data", None),
             ("degraded network", [_stamp("shared")], False, "health_check",
-             "Call health_check again after the gateway operator"),
+             "Call health_check again after that fix"),
             ("propagating", [dict(_stamp("shared", usable=False), propagationStatus="propagating")],
              True, "check_stamp_health", "Poll check_stamp_health"),
             ("old gateway, unknown reason", [_stamp("absent", usable=False)],

@@ -53,7 +53,7 @@ _UNREADABLE_CAUSES = {
     RecursionError: "it is nested too deeply",
     requests.exceptions.JSONDecodeError: "it is not valid JSON",
     requests.exceptions.ContentDecodingError: "its content encoding is corrupt",
-    requests.exceptions.ChunkedEncodingError: "it was cut off while it was received",
+    requests.exceptions.ChunkedEncodingError: "the body is incomplete",
 }
 
 

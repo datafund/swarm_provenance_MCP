@@ -278,6 +278,15 @@ class TestHostileFieldMatrix:
             assert _next_lines(text) == [f"_next: {unknown_next}"], text
         assert len(_next_lines(text)) == 1, text
         assert not [line for line in _hint_lines(text) if SENTINEL in line], text
+        if (
+            tool == "check_stamp_health"
+            and path[:1] == ("errors",)
+            and value != []
+            and not (path[-1] == "code" and isinstance(value, str))
+        ):
+            # The valid answer gives check_stamp_health. An error list the
+            # server cannot read must not lead to a purchase.
+            assert _next_lines(text) == ["_next: check_stamp_health"], text
         if path == () and not isinstance(value, dict):
             # A body that is not an object is described, never echoed.
             assert SENTINEL not in text, text
@@ -350,14 +359,15 @@ class TestBranchDecisionsUseCheckedValues:
         assert _next_lines(result.content[0].text) == ["_next: check_stamp_health"]
 
     @pytest.mark.parametrize("code", [[], {}, ["NOT_FOUND"], 7])
-    async def test_non_string_code_does_not_mean_propagating(self, server, code):
+    async def test_non_string_code_never_leads_to_purchase(self, server, code):
+        # The code cannot be read, so it may be NOT_FOUND: check again.
         def body(b):
             b["status"]["utilizationPercent"] = 50
             b["errors"] = [{"code": code, "message": "odd"}]
             return b
 
         text = (await _run(server, "check_stamp_health", {"check_stamp_health": body})).content[0].text
-        assert _next_lines(text) == ["_next: purchase_stamp"]
+        assert _next_lines(text) == ["_next: check_stamp_health"]
 
     @pytest.mark.parametrize(
         "field,value,degraded",
@@ -377,7 +387,8 @@ class TestBranchDecisionsUseCheckedValues:
             ("network_availability", 7, False),
             ("network_availability", {"a": "Unavailable"}, False),
             ("network_availability", "Unavailable", True),
-            ("network_availability", "", True),
+            ("network_availability", "", False),
+            ("network_availability", "   ", False),
         ],
     )
     async def test_health_check_bee_flags(self, server, field, value, degraded):
@@ -399,11 +410,12 @@ class TestBranchDecisionsUseCheckedValues:
         expected = "health_check" if degraded else "upload_data"
         assert _next_lines(text) == [f"_next: {expected}"], text
         if degraded:
-            assert "Call health_check again after the gateway operator" in text
+            assert "Call health_check again after that fix" in text
             # One recommendation, which does not say both "retrying will not
             # help" and "call health_check again".
             assert "retrying will not help" not in text
-            assert "The gateway operator must fix this." in text
+            assert "The gateway operator must fix the Bee node's network connection." in text
+            assert text.count("gateway operator") == 1
             assert "until health_check shows the Swarm network as connected." in text
             assert "\u2014" not in text.split("_recommendations:", 1)[1]
 
@@ -414,7 +426,7 @@ class TestBranchDecisionsUseCheckedValues:
 
         text = (await _run(server, "health_check", {"health_check": health})).content[0].text
         assert "Operator action required \u2014 retrying will not help." in text
-        assert "Call health_check again after the gateway operator" not in text
+        assert "Call health_check again after that fix" not in text
         assert _next_lines(text) == ["_next: check_stamp_health"]
 
 
@@ -921,6 +933,254 @@ class TestEstimatedReadyMustBeText:
         assert "0x" not in text
 
 
+class TestUploadOutcomeUnknown:
+    """An upload whose 2xx answer cannot be used may have completed."""
+
+    @pytest.mark.parametrize("sign", [None, "notary"])
+    @pytest.mark.parametrize("kind", sorted(BROKEN_BODIES))
+    async def test_real_client_path(self, server, requests_mock, kind, sign):
+        base = _base()
+        requests_mock.get(f"{base}/api/v1/stamps/{TEST_STAMP_ID}", json={"usable": True})
+        requests_mock.post(f"{base}/api/v1/data/", raw=BROKEN_BODIES[kind]())
+        arguments = {"data": '{"data": {"a": 1}}', "stamp_id": TEST_STAMP_ID}
+        if sign:
+            arguments["sign"] = sign
+        result = await call_tool_directly(server, "upload_data", arguments)
+        text = result.content[0].text
+        assert result.isError
+        assert "Upload outcome unknown" in text, text
+        assert "may have completed" in text
+        assert "reference is unknown" in text
+        assert "Do not upload the same data again" in text
+        assert "retryable: false" in text
+        assert _next_lines(text) == ["_next: check_stamp_health"]
+        assert "Validation error" not in text
+        assert ("second signed document" in text) is bool(sign)
+
+    async def test_unreadable_stamp_check_is_not_an_upload(self, server, requests_mock):
+        # The stamp check before the upload is a read: nothing was uploaded.
+        base = _base()
+        requests_mock.get(f"{base}/api/v1/stamps/{TEST_STAMP_ID}", raw=BROKEN_BODIES["not-json"]())
+        post = requests_mock.post(f"{base}/api/v1/data/", json={"reference": "b" * 64})
+        result = await call_tool_directly(
+            server, "upload_data", {"data": "{}", "stamp_id": TEST_STAMP_ID}
+        )
+        text = result.content[0].text
+        assert "Upload outcome unknown" not in text
+        assert not post.called
+
+    async def test_unreadable_non_2xx_stays_retryable(self, server):
+        from swarm_provenance_mcp.gateway_client import GatewayAnswerUnreadable
+
+        error = GatewayAnswerUnreadable("x", response=_deep_response(503))
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.get_stamp_details.return_value = {"usable": True}
+            gw.upload_data.side_effect = error
+            result = await call_tool_directly(
+                server, "upload_data", {"data": "{}", "stamp_id": TEST_STAMP_ID}
+            )
+        text = result.content[0].text
+        assert "Upload outcome unknown" not in text
+        assert "retryable: true" in text
+
+    @pytest.mark.parametrize(
+        "answer",
+        [[], "x", 7, None, {}, {"reference": 7}, {"reference": "abc"},
+         {"reference": FORGED}, {"reference": ["b" * 64]}],
+        ids=_hostile_id,
+    )
+    async def test_unusable_answer(self, server, answer):
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.get_stamp_details.return_value = {"usable": True}
+            gw.upload_data.return_value = answer
+            result = await call_tool_directly(
+                server, "upload_data", {"data": "{}", "stamp_id": TEST_STAMP_ID}
+            )
+        text = result.content[0].text
+        assert result.isError
+        assert "Upload outcome unknown" in text
+        assert "retryable: false" in text
+        assert SENTINEL not in text
+        assert "Error executing" not in text
+
+    @pytest.mark.parametrize("details", [[], "x", 7, None], ids=_hostile_id)
+    async def test_stamp_details_not_object(self, server, details):
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.get_stamp_details.return_value = details
+            gw.upload_data.return_value = {"reference": "b" * 64}
+            result = await call_tool_directly(
+                server, "upload_data", {"data": "{}", "stamp_id": TEST_STAMP_ID}
+            )
+        assert "Error executing" not in result.content[0].text
+
+    @pytest.mark.parametrize("signer", [7, ["0xabc"], {"a": FORGED}, True], ids=_hostile_id)
+    async def test_signer_must_be_text(self, server, signer):
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.get_stamp_details.return_value = {"usable": True}
+            gw.upload_data.return_value = {"reference": "b" * 64, "notary": {"signer": signer}}
+            result = await call_tool_directly(
+                server, "upload_data", {"data": "{}", "stamp_id": TEST_STAMP_ID}
+            )
+        assert "Signer:" not in result.content[0].text
+
+
+class TestDownloadNotFoundHealthShapes:
+    @pytest.mark.parametrize(
+        "health",
+        [[], "x", 7, None, {"gateway_response": "x"}, {"gateway_response": [1]},
+         {"gateway_response": {"bee_node": "x"}}],
+        ids=_hostile_id,
+    )
+    async def test_health_body_shapes(self, server, health):
+        from tests.test_tool_execution import TEST_REFERENCE, _http_error
+
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.download_data.side_effect = _http_error(404)
+            gw.health_check.return_value = health
+            result = await call_tool_directly(server, "download_data", {"reference": TEST_REFERENCE})
+        text = result.content[0].text
+        assert "Error executing" not in text, text
+        assert "Not found" in text
+        assert "cannot reach the Swarm network (not reported" in text
+
+
+class TestStampBaseline:
+    async def _hint(self, server, details):
+        with patch("swarm_provenance_mcp.server.gateway_client") as gw:
+            gw.get_stamp_details.return_value = details
+            gw.extend_stamp.side_effect = requests.exceptions.ReadTimeout("slow")
+            result = await call_tool_directly(
+                server, "extend_stamp", {"stamp_id": TEST_STAMP_ID, "duration_hours": 24}
+            )
+        return result.content[0].text
+
+    async def test_valid_values_unchanged(self, server):
+        text = await self._hint(server, {"expectedExpiration": "2026-12-01", "batchTTL": 86400})
+        assert "Before this call the stamp had expiry 2026-12-01, TTL 86400s." in text
+
+    @pytest.mark.parametrize("ttl", [True, "7", -1, 10**400, float("nan"), [1], FORGED], ids=_hostile_id)
+    async def test_bad_ttl_left_out(self, server, ttl):
+        text = await self._hint(server, {"expectedExpiration": "2026-12-01", "batchTTL": ttl})
+        assert "Before this call the stamp had expiry 2026-12-01. If" in text
+        assert "TTL" not in text
+
+    @pytest.mark.parametrize("expiry", [True, 7, [FORGED], {"a": 1}], ids=_hostile_id)
+    async def test_bad_expiry_left_out(self, server, expiry):
+        text = await self._hint(server, {"expectedExpiration": expiry, "batchTTL": 86400})
+        assert "Before this call the stamp had TTL 86400s." in text
+        assert SENTINEL not in text
+
+    async def test_nothing_valid(self, server):
+        text = await self._hint(server, {"expectedExpiration": 7, "batchTTL": "x"})
+        assert "The stamp's state before this call could not be read" in text
+
+
+class TestTextFieldsPrintOnlyText:
+    @pytest.mark.parametrize("value", [7, True, [FORGED], {"k": FORGED}, 10**400], ids=_hostile_id)
+    async def test_check_stamp_health(self, server, value):
+        def body(b):
+            b["status"]["utilizationStatus"] = value
+            b["status"]["expectedExpiration"] = value
+            b["propagationStatus"] = value
+            b["warnings"][0] = {"code": value, "message": value, "suggestion": value}
+            return b
+
+        text = (await _run(server, "check_stamp_health", {"check_stamp_health": body})).content[0].text
+        assert "   Utilization: 0% (unknown)\n" in text
+        assert "Expires:" not in text
+        assert "Propagation:" not in text
+        assert "Warnings:\n   [?] \n" in text
+        assert "→" not in text.split("Warnings:", 1)[1]
+        assert SENTINEL not in text
+
+    @pytest.mark.parametrize("value", [7, True, [FORGED], {"k": FORGED}], ids=_hostile_id)
+    async def test_get_stamp_status(self, server, value):
+        text = (await _run(server, "get_stamp_status", {
+            "get_stamp_details": _with(expectedExpiration=value, propagationStatus=value)
+        })).content[0].text
+        assert "Expected Expiration: N/A\n" in text
+        assert "Propagation:" not in text
+        assert SENTINEL not in text
+
+    @pytest.mark.parametrize("value", [7, True, [FORGED], {"k": FORGED}], ids=_hostile_id)
+    async def test_list_stamps(self, server, value):
+        def body(b):
+            b["stamps"][0]["expectedExpiration"] = value
+            b["stamps"][0]["propagationStatus"] = value
+            return b
+
+        text = (await _run(server, "list_stamps", {"list_stamps": body})).content[0].text
+        assert "Expiration: N/A |" in text
+        assert "Propagation:" not in text
+        assert SENTINEL not in text
+
+    @pytest.mark.parametrize("value", [7.5, True, [FORGED], {"k": FORGED}, None], ids=_hostile_id)
+    async def test_get_wallet_info(self, server, value):
+        text = (await _run(server, "get_wallet_info", {
+            "get_wallet_info": lambda b: {"walletAddress": value, "bzzBalance": [value]}
+        })).content[0].text
+        assert "   Address: N/A\n" in text
+        assert "   BZZ Balance: N/A\n" in text
+
+    @pytest.mark.parametrize("balance,shown", [("100", "100"), (100, "100"), (0.5, "0.5")])
+    async def test_wallet_balance_number(self, server, balance, shown):
+        text = (await _run(server, "get_wallet_info", {
+            "get_wallet_info": _with(bzzBalance=balance)
+        })).content[0].text
+        assert f"   BZZ Balance: {shown}\n" in text
+
+    async def test_advisories_only_text(self, server):
+        def health(h):
+            h["gateway_response"]["bee_node"]["warnings"] = ["few peers", 7, [FORGED]]
+            return h
+
+        text = (await _run(server, "health_check", {"health_check": health})).content[0].text
+        assert "Gateway advisory: few peers\n" in text
+
+    @pytest.mark.parametrize("value", ["3", True, [3], float("nan"), 0, -1], ids=_hostile_id)
+    async def test_rate_limit_must_be_a_count(self, server, value):
+        def health(h):
+            h["gateway_response"]["x402"]["free_tier"]["rate_limit_per_minute"] = value
+            return h
+
+        text = (await _run(server, "health_check", {"health_check": health})).content[0].text
+        assert "free tier" not in text
+        assert "💰 Payment: x402 enabled\n" in text
+
+
+class TestUnreadableErrorList:
+    @pytest.mark.parametrize(
+        "errors",
+        [None, {}, "x", 7, [7], [None], [{"message": "no code"}],
+         [{"code": 7}], [{"code": ["NOT_FOUND"]}],
+         [{"code": "NOT_USABLE", "message": "x"}, "junk"]],
+        ids=_hostile_id,
+    )
+    async def test_does_not_lead_to_purchase(self, server, errors):
+        def body(b):
+            b["status"]["utilizationPercent"] = 50
+            b["errors"] = errors
+            return b
+
+        text = (await _run(server, "check_stamp_health", {"check_stamp_health": body})).content[0].text
+        assert _next_lines(text) == ["_next: check_stamp_health"]
+        assert "not in the expected format" in text
+
+    @pytest.mark.parametrize(
+        "errors,expected",
+        [([], "purchase_stamp"), ([{"code": "EXPIRED", "message": "x"}], "purchase_stamp"),
+         ([{"code": "NOT_FOUND", "message": "x"}], "check_stamp_health")],
+    )
+    async def test_valid_lists_unchanged(self, server, errors, expected):
+        def body(b):
+            b["status"]["utilizationPercent"] = 50
+            b["errors"] = errors
+            return b
+
+        text = (await _run(server, "check_stamp_health", {"check_stamp_health": body})).content[0].text
+        assert _next_lines(text) == [f"_next: {expected}"]
+
+
 # Full output for valid gateway answers, captured from the code before #270
 # (one entry changed on purpose, marked below).
 GOLDEN = {
@@ -1022,7 +1282,7 @@ GOLDEN = {
         '\n'
         'ready: false\n'
         '_recommendations:\n'
-        "  - The gateway's Bee node cannot reliably reach the Swarm network: uploads may never propagate and only data stored on this node can be downloaded. The gateway operator must fix this. Call health_check again after the gateway operator fixes the Bee node's network connection, and do not upload until health_check shows the Swarm network as connected.\n"
+        "  - The gateway's Bee node cannot reliably reach the Swarm network: uploads may never propagate and only data stored on this node can be downloaded. The gateway operator must fix the Bee node's network connection. Call health_check again after that fix, and do not upload until health_check shows the Swarm network as connected.\n"
         '_gateway: http://localhost:8000 (connected)\n'
         '\n'
         '_next: health_check\n'

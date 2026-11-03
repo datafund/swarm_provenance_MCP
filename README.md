@@ -612,8 +612,9 @@ retryable: true|false            # Whether retrying the same call may succeed
 _next: <recovery_tool>           # Tool to call for recovery
 ```
 
-- **retryable: true** — transient errors (timeouts, rate limits, 502/503/504). Wait and retry.
+- **retryable: true** — transient errors (timeouts, rate limits, 502/503/504). Wait and retry. An answer from the gateway that this server cannot read (not valid JSON, incomplete, or with a corrupt encoding) is also `retryable: true` for read tools.
 - **retryable: false** — permanent errors (validation failures, unknown tools). Fix input and try a different approach.
+- **Outcome unknown** (`purchase_stamp`, `extend_stamp`, `upload_data`): the request reached the gateway, but no usable answer came back, so the write may already have happened. These results are `retryable: false`. Do not repeat the write. For a purchase or an extension, follow `_next` to check whether it happened. For an upload, the reference is unknown and a second upload uses stamp capacity again.
 - **Payment required (HTTP 402)** — the gateway has x402 payment enabled and refused a write (`purchase_stamp`, `upload_data`, `extend_stamp`). The error shows the gateway's payment details (amount, asset, network, recipient) and the options. This server cannot pay x402 requests yet.
 
 #### Adaptive Health Check

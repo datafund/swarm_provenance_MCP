@@ -2643,9 +2643,9 @@ def create_server() -> Server:
                                 "   - Stamps with low TTL → extend_stamp to add time\n"
                                 "   - Stamps marked 'Not usable yet' → poll check_stamp_health; do not buy another while they propagate\n"
                                 "   - No usable stamps and none pending → purchase_stamp\n"
-                                "   - The stamp list is unknown or incomplete, or a stamp "
-                                "has an access mode the gateway does not document → do "
-                                "not buy; follow _next\n"
+                                "   - The stamp list is unknown or incomplete, or a "
+                                "stamp has an access mode the gateway does not "
+                                "document → do not buy; follow _next\n"
                                 "5. Summarize the inventory status and recommended actions"
                             ),
                         ),

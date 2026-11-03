@@ -1252,9 +1252,11 @@ def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
     ``blocked`` (every stamp this server cannot use, by kind; ``spent`` is a
     writable stamp the gateway reports as expired, full or about to expire).
     Entries that are not objects are not counted. Each stamp is classified
-    by _stamp_readiness."""
+    by _stamp_readiness. A writable or pending stamp without a valid batch ID
+    cannot be used (an upload needs the ID): it counts as ``unreadable``."""
     counts: Dict[str, Any] = {
-        "writable": 0, "pending": 0, "pool": 0, "owned": 0, "other": 0
+        "writable": 0, "pending": 0, "unreadable": 0, "pool": 0, "owned": 0,
+        "other": 0,
     }
     counts["pending_ids"] = []
     # Every stamp this server cannot use, usable or not, by kind.
@@ -1270,11 +1272,11 @@ def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
                 counts[kind] += 1
         elif kind == "spent":
             blocked["spent"] += 1
+        elif _clean_gateway_batch_id(stamp.get("batchID")) is None:
+            counts["unreadable"] += 1
         elif kind == "pending":
             counts["pending"] += 1
-            batch_id = _clean_gateway_batch_id(stamp.get("batchID"))
-            if batch_id is not None:
-                counts["pending_ids"].append(batch_id)
+            counts["pending_ids"].append(_clean_gateway_batch_id(stamp["batchID"]))
         else:
             counts["writable"] += 1
     return counts
@@ -2994,6 +2996,8 @@ _STAMP_STATUS = {
     ),
     "other": "⛔ Not usable by this server (access mode it cannot use)",
 }
+# A writable or pending stamp whose batch ID cannot be read.
+_STAMP_STATUS_NO_ID = "⚠️ Cannot be used: the batch ID is not in the expected format"
 # secondsSincePurchase above this (ten years) is not printed.
 MAX_STAMP_AGE_SECONDS = 10 * 365 * 86400
 
@@ -3039,6 +3043,9 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
         # The gateway's total_count is not printed: the count is the number
         # of entries listed here.
         counts = _writable_stamp_counts(stamps)
+        # A usable or pending stamp without a valid batch ID counts as an
+        # entry this server cannot read.
+        unreadable += counts["unreadable"]
 
         if not stamps:
             response_text = "📭 No stamps found.\n\n💡 Use the 'purchase_stamp' tool to create your first stamp!"
@@ -3050,6 +3057,8 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                 expiration = _gw_text(stamp.get("expectedExpiration"), 40) or "N/A"
                 kind = _stamp_readiness(stamp)
                 status = _stamp_status(stamp, kind)
+                if kind in ("writable", "pending") and batch_id == "N/A":
+                    status = _STAMP_STATUS_NO_ID
 
                 response_text += f"Batch ID: {batch_id}\n"
                 detail_line = f"  Expiration: {expiration} | Status: {status}"
@@ -3863,6 +3872,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 total_stamps = len(stamps)
                 counts = _writable_stamp_counts(stamps)
                 usable_count = counts["writable"]
+                unreadable += counts["unreadable"]
 
                 stamps_info += (
                     f"\n📋 Stamps: {usable_count} usable by this server / "
@@ -3883,7 +3893,9 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 if others:
                     stamps_info += f" (usable but not by this server: {', '.join(others)})"
                 stamps_info += "\n"
-                if unreadable:
+                # Named here only when a stamp to use was found; otherwise the
+                # incomplete-list recommendation names it.
+                if unreadable and (usable_count or counts["pending"]):
                     stamps_info += f"   ⚠️  {_unreadable_entries_note(unreadable)}\n"
 
                 if usable_count > 0 and (network is None or network["ok"]):

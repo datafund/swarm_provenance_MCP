@@ -7,6 +7,7 @@ whole body, nested objects, list entries and each field.
 """
 
 import copy
+import re
 import http.client
 import io
 from unittest.mock import patch
@@ -330,6 +331,18 @@ class TestHostileFieldMatrix:
             tool, path, value
         ):
             assert _next_lines(text) != ["_next: purchase_stamp"], text
+        if _next_lines(text) == ["_next: upload_data"] and tool.startswith(("list_stamps", "health_check")):
+            # upload_data needs a stamp ID: list_stamps, on the same list
+            # answer, names at least one usable stamp by a valid batch ID.
+            listing = text
+            if tool.startswith("health_check"):
+                bodies = TOOLS[tool][1]
+                answer = bodies["list_stamps"]()
+                if method == "list_stamps":
+                    answer = _set(answer, path, copy.deepcopy(value))
+                listing = (await _run(server, "list_stamps", {"list_stamps": lambda b: answer})).content[0].text
+            usable_ids = re.findall(r"^Batch ID: ([0-9a-f]{64})\n  Expiration: [^\n]*Status: ✅ Usable", listing, re.M)
+            assert usable_ids, (text, listing)
         if (
             tool == "check_stamp_health"
             and path[:1] == ("errors",)
@@ -1506,6 +1519,46 @@ class TestBatchIdRules:
 
         with pytest.raises(ValueError):
             validate_and_clean_reference_hash("b" * 64 + "\n")
+
+
+class TestBatchIdNeededToUpload:
+    @pytest.mark.parametrize("batch_id", [5, "c" * 64 + "\n", "abc", None, [TEST_STAMP_ID]], ids=_hostile_id)
+    @pytest.mark.parametrize("usable", [True, False])
+    async def test_writable_or_pending_stamp_without_id_is_unreadable(self, server, batch_id, usable):
+        def body(b):
+            b = _list_body(usable=usable)
+            b["stamps"][0]["batchID"] = batch_id
+            b["stamps"][0].pop("unusableReason")
+            return b
+
+        for tool, nxt in (("health_check", "list_stamps"), ("list_stamps", "health_check")):
+            text = (await _run(server, tool, {"list_stamps": body})).content[0].text
+            assert _next_lines(text) == [f"_next: {nxt}"], (tool, text)
+            assert "The stamp list is incomplete: 1 entry is not in the expected format" in text
+            assert "ready: true" not in text
+        text = (await _run(server, "list_stamps", {"list_stamps": body})).content[0].text
+        assert "Status: ⚠️ Cannot be used: the batch ID is not in the expected format" in text
+
+    async def test_other_valid_writable_stamp_keeps_upload(self, server):
+        def body(b):
+            b = _two_stamps()
+            b["stamps"][0] = dict(b["stamps"][1], batchID=5)
+            return b
+
+        for tool in ("health_check", "list_stamps"):
+            text = (await _run(server, tool, {"list_stamps": body})).content[0].text
+            assert _next_lines(text) == ["_next: upload_data"], (tool, text)
+            assert "1 entry in the stamp list is not in the expected format" in text
+
+    async def test_incomplete_list_has_one_note_in_health_check(self, server):
+        def body(b):
+            b = _two_stamps()
+            b["stamps"][1] = "garbage"
+            return b
+
+        text = (await _run(server, "health_check", {"list_stamps": body})).content[0].text
+        assert text.count("not in the expected format") == 1, text
+        assert "The stamp list is incomplete" in text
 
 
 class TestRound9:

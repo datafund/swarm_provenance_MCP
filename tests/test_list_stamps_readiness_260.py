@@ -320,9 +320,12 @@ class TestStampReadiness:
             _stamp("weird", usable=False),
             "junk",
         ]
+        # A pending stamp without a valid batch ID cannot be used: it counts
+        # as unreadable, not pending (#270).
         assert _writable_stamp_counts(stamps) == {
             "writable": 2,
-            "pending": 2,
+            "pending": 1,
+            "unreadable": 1,
             "pool": 1,
             "owned": 1,
             "other": 1,

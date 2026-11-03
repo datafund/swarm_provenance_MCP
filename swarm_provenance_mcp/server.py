@@ -12,7 +12,7 @@ import secrets
 import time
 import traceback
 from decimal import Decimal, localcontext
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -50,6 +50,19 @@ from .untrusted import (
 def _gw(value: Any, max_chars: int = 100) -> str:
     """A gateway or RPC field, flattened to one capped line for printing."""
     return one_line(value, max_chars)
+
+
+def _number_in(value: Any, low: float, high: float) -> Optional[Union[int, float]]:
+    """A gateway number, only when it is an int or float (not a bool) from
+    ``low`` to ``high``; otherwise None.
+
+    Compares without converting, so NaN (every comparison is false), the
+    infinities and ints too large for a float are rejected without raising
+    (math.isfinite raises OverflowError on such an int)."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if low <= value <= high:
+            return value
+    return None
 
 
 # Configure logging
@@ -362,7 +375,7 @@ This server uses the free tier by default (rate limit: 3 write requests/minute, 
 STAMP OWNERSHIP:
 - purchase_stamp creates public stamps (accessMode: "shared"). Any gateway user can upload to them, so utilization is unpredictable. Suitable for testing and small workloads.
 - This server sends no wallet, so it can upload only to "shared" stamps and stamps without an access mode. The gateway refuses its uploads to "owned" stamps (registered to the wallet that paid for them) and "pool" stamps (gateway inventory).
-- list_stamps can also show "owned" and "pool" stamps. Do not pick them for upload_data. For capacity that other users cannot fill, run your own Bee node or gateway.
+- list_stamps can also show "owned" and "pool" stamps and marks them "Not usable by this server". Do not pick them for upload_data. Upload only to a stamp it marks "Usable". For capacity that other users cannot fill, run your own Bee node or gateway.
 
 TYPICAL WORKFLOW:
 1. health_check — verify gateway is reachable
@@ -1037,6 +1050,23 @@ _SPENT_REASONS = ("expired", "expiring_soon", "full", "invalid_depth", "unreadab
 # ago (its secondsSincePurchase) may not have reached the node yet: wait for
 # it. Older, or of unknown age, it will not appear.
 NOT_FOUND_GRACE_SECONDS = 180
+# How list_stamps and health_check name a lasting unusableReason. Only these known values
+# are printed; the gateway's text is never echoed.
+_SPENT_REASON_TEXT = {
+    "expired": "expired",
+    "expiring_soon": "about to expire",
+    "full": "full",
+    "invalid_depth": "invalid depth",
+    "unreadable": "unreadable on the node",
+    "not_found": "not found on the node",
+}
+# Every lasting reason in one phrase, for the list_stamps description and
+# the health_check recommendation.
+_SPENT_REASONS_PHRASE = (
+    ", ".join(list(_SPENT_REASON_TEXT.values())[:-1])
+    + ", or "
+    + list(_SPENT_REASON_TEXT.values())[-1]
+)
 
 
 def _recently_purchased(stamp: Dict[str, Any]) -> bool:
@@ -1050,13 +1080,44 @@ def _recently_purchased(stamp: Dict[str, Any]) -> bool:
     )
 
 
+def _stamp_readiness(stamp: Any) -> Optional[str]:
+    """Whether this server can upload to one stamp from a list_stamps answer.
+
+    ``writable``: usable, with an access mode this server can write to.
+    ``pending``: writable, not usable yet, for no lasting reason (it may
+    still be propagating). ``spent``: writable, but the gateway reports a
+    reason that waiting does not fix. ``pool``, ``owned`` or ``other``: an
+    access mode the gateway refuses for this server, usable or not.
+    None for an entry that is not an object."""
+    if not isinstance(stamp, dict):
+        return None
+    mode = stamp.get("accessMode")
+    writable = mode is None or (
+        isinstance(mode, str) and mode in _WRITABLE_ACCESS_MODES
+    )
+    if not writable:
+        return mode if mode in ("pool", "owned") else "other"
+    if stamp.get("usable") is True:
+        return "writable"
+    reason = stamp.get("unusableReason")
+    if isinstance(reason, str) and (
+        reason in _SPENT_REASONS
+        or (reason == "not_found" and not _recently_purchased(stamp))
+    ):
+        return "spent"
+    # Not usable yet, for no lasting reason: it may still be propagating,
+    # so wait for it rather than buy another.
+    return "pending"
+
+
 def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
     """Usable stamps in a list_stamps answer, split by whether this server can
     write to them, plus ``pending`` (writable stamps not usable yet, which may
     still be propagating; ``pending_ids`` holds their valid batch IDs) and
     ``blocked`` (every stamp this server cannot use, by kind; ``spent`` is a
     writable stamp the gateway reports as expired, full or about to expire).
-    Entries that are not objects are not counted."""
+    Entries that are not objects are not counted. Each stamp is classified
+    by _stamp_readiness."""
     counts: Dict[str, Any] = {
         "writable": 0, "pending": 0, "pool": 0, "owned": 0, "other": 0
     }
@@ -1065,39 +1126,22 @@ def _writable_stamp_counts(stamps: List[Any]) -> Dict[str, Any]:
     blocked = {"pool": 0, "owned": 0, "other": 0, "spent": 0}
     counts["blocked"] = blocked
     for stamp in stamps:
-        if not isinstance(stamp, dict):
+        kind = _stamp_readiness(stamp)
+        if kind is None:
             continue
-        mode = stamp.get("accessMode")
-        writable = mode is None or (
-            isinstance(mode, str) and mode in _WRITABLE_ACCESS_MODES
-        )
-        if not writable:
-            blocked[mode if mode in ("pool", "owned") else "other"] += 1
-        if stamp.get("usable") is not True:
-            if not writable:
-                continue
-            reason = stamp.get("unusableReason")
-            if isinstance(reason, str) and (
-                reason in _SPENT_REASONS
-                or (reason == "not_found" and not _recently_purchased(stamp))
-            ):
-                blocked["spent"] += 1
-                continue
-            # Not usable yet, for no lasting reason: it may still be
-            # propagating, so wait for it rather than buy another.
+        if kind in ("pool", "owned", "other"):
+            blocked[kind] += 1
+            if stamp.get("usable") is True:
+                counts[kind] += 1
+        elif kind == "spent":
+            blocked["spent"] += 1
+        elif kind == "pending":
             counts["pending"] += 1
             batch_id = stamp.get("batchID")
             if isinstance(batch_id, str) and STAMP_ID_PATTERN.match(batch_id):
                 counts["pending_ids"].append(batch_id)
-            continue
-        if writable:
-            counts["writable"] += 1
-        elif mode == "pool":
-            counts["pool"] += 1
-        elif mode == "owned":
-            counts["owned"] += 1
         else:
-            counts["other"] += 1
+            counts["writable"] += 1
     return counts
 
 
@@ -1124,8 +1168,7 @@ def _no_writable_stamp_text(blocked: Dict[str, int]) -> str:
     if spent:
         parts.append(
             f"{spent} stamp{'s' if spent != 1 else ''} cannot become usable "
-            "(expired, full or about to expire, or not found or unreadable on "
-            "the node)"
+            f"({_SPENT_REASONS_PHRASE})"
         )
     detail = f": {'; '.join(parts)}." if parts else "."
     return f"No stamp this server can write to{detail} Purchase a stamp with purchase_stamp"
@@ -1358,7 +1401,8 @@ def _bee_advisories(gateway_response: Dict[str, Any]) -> List[str]:
     bee = gateway_response.get("bee_node")
     if not isinstance(bee, dict):
         return []
-    return [str(w) for w in bee.get("warnings") or []]
+    warnings = bee.get("warnings")
+    return [str(w) for w in warnings] if isinstance(warnings, list) else []
 
 
 def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1797,7 +1841,7 @@ def create_server() -> Server:
             ),
             Tool(
                 name="list_stamps",
-                description="List postage stamps available on the gateway. Each stamp includes its access mode: shared (public, any gateway user can upload to it), owned (registered to the wallet that paid for it) or pool (gateway inventory). This server sends no wallet, so the gateway refuses its uploads to owned and pool stamps: use a shared stamp. Also shows usability status and expiration.",
+                description=f"List postage stamps available on the gateway. Each stamp includes its access mode: shared (public, any gateway user can upload to it), owned (registered to the wallet that paid for it) or pool (gateway inventory). This server sends no wallet, so the gateway refuses its uploads to owned and pool stamps: use a shared stamp. Each stamp's Status says whether this server can upload to it and, if not, why: not usable by this server (pool, owned or another access mode), not usable yet (may still be propagating: poll check_stamp_health, do not buy another) or cannot become usable ({_SPENT_REASONS_PHRASE}). Also shows expiration.",
                 inputSchema={"type": "object", "properties": {}, "required": []},
             ),
             Tool(
@@ -2300,7 +2344,7 @@ def create_server() -> Server:
                                 f"Follow these steps:\n"
                                 f"1. Call health_check to verify the gateway is reachable\n"
                                 f"2. Call purchase_stamp (size 'small' for small data) to get a stamp, "
-                                f"or reuse a usable 'shared' stamp from list_stamps (this server "
+                                f"or reuse a stamp that list_stamps marks 'Usable' (this server "
                                 f"cannot upload to 'owned' or 'pool' stamps).\n"
                                 f"3. Poll check_stamp_health every 15 seconds until ready (up to 2 minutes)\n"
                                 f"4. Call upload_data with the data and your stamp_id\n"
@@ -2355,13 +2399,14 @@ def create_server() -> Server:
                                 "Review my Swarm stamp inventory and recommend actions:\n\n"
                                 "list_stamps shows public stamps (accessMode 'shared'), which any gateway user can upload to, and can also show 'owned' and 'pool' stamps. This server sends no wallet, so the gateway refuses its uploads to 'owned' stamps (registered to the wallet that paid for them) and 'pool' stamps (gateway inventory). Only 'shared' stamps and stamps without an access mode are usable here. For production use with predictable capacity, recommend running your own Bee node or gateway.\n\n"
                                 "Steps:\n"
-                                "1. Call list_stamps to see all stamps\n"
+                                "1. Call list_stamps to see all stamps. Its Status field says whether this server can upload to each stamp, and why not\n"
                                 "2. For stamps this server can use, check if usable, utilization, and TTL\n"
                                 "3. Call check_stamp_health on any stamp that looks concerning\n"
                                 "4. Recommend actions:\n"
                                 "   - Stamps with high utilization → purchase a new one\n"
                                 "   - Stamps with low TTL → extend_stamp to add time\n"
-                                "   - No usable stamps → purchase_stamp\n"
+                                "   - Stamps marked 'Not usable yet' → poll check_stamp_health; do not buy another while they propagate\n"
+                                "   - No usable stamps and none pending → purchase_stamp\n"
                                 "5. Summarize the inventory status and recommended actions"
                             ),
                         ),
@@ -2380,7 +2425,7 @@ def create_server() -> Server:
                 f"1. Call health_check — verify gateway and chain connectivity\n"
                 f"2. Call chain_balance — confirm wallet has ETH for gas\n"
                 f"3. Call purchase_stamp (size 'small' for small data) to get a stamp, "
-                f"or reuse a usable 'shared' stamp from list_stamps (this server "
+                f"or reuse a stamp that list_stamps marks 'Usable' (this server "
                 f"cannot upload to 'owned' or 'pool' stamps).\n"
                 f"4. Poll check_stamp_health every 15 seconds until can_upload is true (up to 2 minutes)\n"
                 f"5. Call upload_data with the data and your stamp_id — save the reference hash\n"
@@ -2586,6 +2631,16 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
         )
 
 
+# A batch TTL above this (about 3,000 years) is printed as the gateway sent
+# it, not converted.
+MAX_TTL_SECONDS = 10**11
+
+
+def _ttl_text(ttl: Union[int, float]) -> str:
+    """A validated TTL in seconds, with the days it is."""
+    return f"{ttl:,} seconds ({ttl/86400:.1f} days)"
+
+
 def _format_stamp_utilization(details: Dict[str, Any]) -> str:
     """Stamp utilization as a percentage.
 
@@ -2596,14 +2651,7 @@ def _format_stamp_utilization(details: Dict[str, Any]) -> str:
     def _is_int(v: Any) -> bool:
         return isinstance(v, int) and not isinstance(v, bool)
 
-    percent = details.get("utilizationPercent")
-    if not (
-        isinstance(percent, (int, float))
-        and not isinstance(percent, bool)
-        and math.isfinite(percent)
-        and 0 <= percent <= 100
-    ):
-        percent = None
+    percent = _number_in(details.get("utilizationPercent"), 0, 100)
 
     raw = details.get("utilization")
     count = None
@@ -2655,13 +2703,13 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         response_text += f"Block Number: {result.get('blockNumber', 'N/A')}\n"
 
         # Enhanced TTL information
-        batch_ttl = result.get("batchTTL", "N/A")
-        if batch_ttl != "N/A":
-            response_text += (
-                f"Batch TTL: {batch_ttl:,} seconds ({batch_ttl/86400:.1f} days)\n"
-            )
+        batch_ttl = result.get("batchTTL")
+        ttl = _number_in(batch_ttl, 0, MAX_TTL_SECONDS)
+        if ttl is not None:
+            response_text += f"Batch TTL: {_ttl_text(ttl)}\n"
         else:
-            response_text += f"Batch TTL: {batch_ttl}\n"
+            shown = "N/A" if batch_ttl is None else _gw(batch_ttl, 40) or "N/A"
+            response_text += f"Batch TTL: {shown}\n"
 
         response_text += (
             f"Expected Expiration: {_gw(result.get('expectedExpiration', 'N/A'))}\n"
@@ -2742,76 +2790,123 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         )
 
 
+# list_stamps status for each _stamp_readiness kind.
+_STAMP_STATUS = {
+    "writable": "✅ Usable",
+    "pending": "⏳ Not usable yet (may still be propagating)",
+    "pool": "⛔ Not usable by this server (pool stamp: gateway inventory)",
+    "owned": (
+        "⛔ Not usable by this server (owned stamp: registered to the wallet "
+        "that paid for it)"
+    ),
+    "other": "⛔ Not usable by this server (access mode it cannot use)",
+}
+# secondsSincePurchase above this (ten years) is not printed.
+MAX_STAMP_AGE_SECONDS = 10 * 365 * 86400
+
+
+def _stamp_status(stamp: Dict[str, Any], kind: str) -> str:
+    """The Status field list_stamps prints for one stamp."""
+    if kind == "spent":
+        reason = _SPENT_REASON_TEXT.get(stamp.get("unusableReason"), "")
+        return f"❌ Cannot become usable ({reason})" if reason else "❌ Cannot become usable"
+    return _STAMP_STATUS[kind]
+
+
+def _plain_depth(value: Any) -> Optional[int]:
+    """A stamp depth, only as a plain int from 0 to 255."""
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 255:
+        return value
+    return None
+
+
+def _stamp_age(value: Any) -> Optional[float]:
+    """secondsSincePurchase, only as a finite, non-negative, sane number."""
+    return _number_in(value, 0, MAX_STAMP_AGE_SECONDS)
+
+
 async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
-    """Handle stamp listing requests."""
+    """Handle stamp listing requests.
+
+    Uses the readiness rule health_check uses (_stamp_readiness): a stamp is
+    usable here only when it is usable and its access mode is one this
+    server can write to. _next follows the same order as health_check.
+    """
     try:
         result = gateway_client.list_stamps()
-        stamps = result.get("stamps", [])
-        total_count = result.get("total_count", 0)
+        stamps = result.get("stamps") if isinstance(result, dict) else None
+        if not isinstance(stamps, list):
+            stamps = []
+        # The gateway's total_count is not printed: the count is the number
+        # of entries listed here.
+        stamps = [s for s in stamps if isinstance(s, dict)]
+        counts = _writable_stamp_counts(stamps)
 
-        has_usable = False
-        if total_count == 0:
+        if not stamps:
             response_text = "📭 No stamps found.\n\n💡 Use the 'purchase_stamp' tool to create your first stamp!"
         else:
-            response_text = f"📋 Found {total_count} stamp(s):\n\n"
+            response_text = f"📋 Found {len(stamps)} stamp(s):\n\n"
 
             for stamp in stamps:
-                batch_id = stamp.get("batchID", "N/A")
-                expiration = stamp.get("expectedExpiration", "N/A")
-                usable = stamp.get("usable", "N/A")
-
-                if usable is True:
-                    has_usable = True
-
-                # Status with emoji
-                if usable is True:
-                    status = "✅ Usable"
-                elif usable is False:
-                    status = "❌ Expired"
-                else:
-                    status = "❓ Unknown"
+                batch_id = stamp.get("batchID")
+                if not (isinstance(batch_id, str) and STAMP_ID_PATTERN.match(batch_id)):
+                    batch_id = _gw(batch_id, 70) if batch_id is not None else "N/A"
+                expiration = _gw(stamp.get("expectedExpiration"), 40) or "N/A"
+                kind = _stamp_readiness(stamp)
+                status = _stamp_status(stamp, kind)
 
                 response_text += f"Batch ID: {batch_id}\n"
                 detail_line = f"  Expiration: {expiration} | Status: {status}"
 
-                # Surface access mode when provided by gateway
+                # Surface access mode when provided by gateway. A rejected
+                # mode is always shown, even an empty one.
                 access_mode = stamp.get("accessMode")
-                if access_mode:
-                    detail_line += f" | Access: {_gw(access_mode)}"
+                if access_mode or kind == "other":
+                    shown = _gw(access_mode, 30) or "(empty)"
+                    detail_line += f" | Access: {shown}"
 
                 # Surface propagation status when provided
                 propagation_status = stamp.get("propagationStatus")
                 if propagation_status:
-                    detail_line += f" | Propagation: {_gw(propagation_status)}"
+                    detail_line += f" | Propagation: {_gw(propagation_status, 30)}"
 
                 # What identifies a batch from an unanswered purchase
                 identity = []
                 if stamp.get("label"):
-                    identity.append(f"Label: {quote(stamp['label'])}")
-                if stamp.get("depth") is not None:
-                    identity.append(f"Depth: {stamp['depth']}")
-                age = stamp.get("secondsSincePurchase")
-                if isinstance(age, (int, float)):
+                    identity.append(f"Label: {_label(stamp['label'])}")
+                depth = _plain_depth(stamp.get("depth"))
+                if depth is not None:
+                    identity.append(f"Depth: {depth}")
+                age = _stamp_age(stamp.get("secondsSincePurchase"))
+                if age is not None:
                     identity.append(f"Purchased: {_format_age(age)} ago")
                 if identity:
                     detail_line += "\n  " + " | ".join(identity)
 
                 response_text += detail_line + "\n\n"
 
-        # Public-only hint: all stamps are shared, none owned
-        if stamps and not any(s.get("accessMode") == "owned" for s in stamps):
+        # Public-only hint: every listed stamp is shared
+        if stamps and all(s.get("accessMode") == "shared" for s in stamps):
             response_text += "\n💡 All stamps are public (shared): other gateway users can fill them. For production use with predictable capacity, run your own Bee node or gateway. This server sends no wallet, so it cannot upload to wallet-owned stamps.\n"
 
         # Labels of shared stamps are written by other gateway users.
-        if any(isinstance(s, dict) and s.get("label") for s in stamps or []):
+        if any(s.get("label") for s in stamps):
             response_text += f"\n{QUOTED_NOTE}\n"
 
-        # Contextual hints
-        if has_usable:
+        # Contextual hints, in health_check's order. Each recommendation
+        # matches its _next.
+        if counts["writable"]:
             response_text += _format_hints(
                 "upload_data", ["get_stamp_status", "check_stamp_health"]
             )
+        elif counts["pending"]:
+            response_text += (
+                f"\n💡 {_pending_stamp_text(counts['pending'], counts['pending_ids'])}.\n"
+            )
+            response_text += _format_hints("check_stamp_health", ["get_stamp_status"])
         else:
+            if stamps:
+                response_text += f"\n💡 {_no_writable_stamp_text(counts['blocked'])}.\n"
             response_text += _format_hints("purchase_stamp", ["get_wallet_info"])
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])
@@ -3379,20 +3474,20 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
 
         status = result.get("status", "unknown")
         gateway_url = result.get("gateway_url", "N/A")
-        response_time = result.get("response_time_ms", "N/A")
+        response_time = _number_in(result.get("response_time_ms"), 0, 10**9)
 
         gateway_ok = status == "healthy"
 
         if gateway_ok:
             response_text = f"✅ Gateway operational\n\n"
             response_text += f"🌐 Gateway: {gateway_url}\n"
-            if isinstance(response_time, (int, float)):
+            if response_time is not None:
                 response_text += f"⚡ Response Time: {response_time:.0f}ms\n"
         else:
             response_text = f"⚠️  Gateway issues detected\n\n"
             response_text += f"Status: {status}\n"
             response_text += f"Gateway: {gateway_url}\n"
-            if isinstance(response_time, (int, float)):
+            if response_time is not None:
                 response_text += f"Response Time: {response_time:.0f}ms\n"
             recommendations.append(
                 "Gateway not healthy — check connectivity or try again later"
@@ -3412,7 +3507,10 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
         x402 = gw_resp.get("x402") or {}
         free_tier = x402.get("free_tier") or {}
         rate_limit = free_tier.get("rate_limit_per_minute")
-        if rate_limit:
+        if rate_limit and _number_in(rate_limit, 1, 10**6) is None:
+            # Not a sane count: say free tier without printing the value.
+            response_text += "\n💰 Payment: free tier\n"
+        elif rate_limit:
             response_text += f"\n💰 Payment: free tier ({rate_limit} write req/min, reads unlimited)\n"
         elif x402:
             response_text += "\n💰 Payment: x402 enabled\n"
@@ -3667,8 +3765,9 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
             if status.get("utilizationPercent") is not None:
                 response_text += f"   Utilization: {status['utilizationPercent']}% ({_gw(status.get('utilizationStatus', 'unknown'))})\n"
             if status.get("batchTTL") is not None:
-                ttl = status["batchTTL"]
-                response_text += f"   TTL: {ttl:,} seconds ({ttl/86400:.1f} days)\n"
+                ttl = _number_in(status["batchTTL"], 0, MAX_TTL_SECONDS)
+                shown = _ttl_text(ttl) if ttl is not None else _gw(status["batchTTL"], 40)
+                response_text += f"   TTL: {shown}\n"
             if status.get("expectedExpiration"):
                 response_text += f"   Expires: {_gw(status['expectedExpiration'])}\n"
 

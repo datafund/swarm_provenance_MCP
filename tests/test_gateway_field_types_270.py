@@ -149,9 +149,15 @@ def _wallet_body():
     return {"walletAddress": "wallet-1", "bzzBalance": "100"}
 
 
-# tool -> (arguments, {gateway method: valid body})
+# tool -> (arguments, {gateway method: valid body}). A name such as
+# "health_check[usable]" runs the tool before the bracket with other answers.
 TOOLS = {
     "health_check": ({}, {"health_check": _health, "list_stamps": _list_body}),
+    # A usable stamp: the Bee node fields then decide ready and _next.
+    "health_check[usable]": (
+        {},
+        {"health_check": _health, "list_stamps": lambda: _list_body(usable=True)},
+    ),
     "check_stamp_health": (
         {"stamp_id": TEST_STAMP_ID},
         {"check_stamp_health": _check_body},
@@ -219,7 +225,9 @@ async def _run(server, tool, overrides=None):
             if method in overrides:
                 body = overrides[method](body)
             getattr(gw, method).return_value = body
-        return await call_tool_directly(server, tool, copy.deepcopy(arguments))
+        return await call_tool_directly(
+            server, tool.split("[")[0], copy.deepcopy(arguments)
+        )
 
 
 def _hint_lines(text):
@@ -230,12 +238,18 @@ def _next_lines(text):
     return [line for line in text.splitlines() if line.startswith("_next:")]
 
 
-def _expects_error(tool, method, path):
-    """A write whose answer cannot be read: the tool reports the outcome as
-    unknown (or, for a missing batch ID, as failed), never as a success."""
-    if tool == "purchase_stamp":
-        return path in ((), ("batchID",))
-    return tool == "extend_stamp" and method == "extend_stamp" and path == ()
+def _outcome_unknown_next(tool, method, path, value):
+    """The _next of the outcome-unknown result a write gives when its 2xx
+    answer has no usable batch ID or is not an object; None when the write
+    must report success. A purchase answer without a valid batchID (an
+    object without one included) cannot be confirmed."""
+    if tool == "purchase_stamp" and path in ((), ("batchID",)):
+        return "list_stamps"
+    if (tool, method, path) == ("extend_stamp", "extend_stamp", ()) and not isinstance(
+        value, dict
+    ):
+        return "get_stamp_status"
+    return None
 
 
 class TestHostileFieldMatrix:
@@ -251,10 +265,14 @@ class TestHostileFieldMatrix:
         )
         text = result.content[0].text
         assert "Error executing" not in text, text
-        if not _expects_error(tool, method, path):
+        unknown_next = _outcome_unknown_next(tool, method, path, value)
+        if unknown_next is None:
             assert not result.isError, text
-        elif result.isError:
-            assert "retryable:" in text, text
+        else:
+            assert result.isError, text
+            assert "outcome unknown" in text, text
+            assert "retryable: false" in text, text
+            assert _next_lines(text) == [f"_next: {unknown_next}"], text
         assert len(_next_lines(text)) == 1, text
         assert not [line for line in _hint_lines(text) if SENTINEL in line], text
         if path == () and not isinstance(value, dict):
@@ -289,11 +307,18 @@ class TestBranchDecisionsUseCheckedValues:
             (0.0, "check_stamp_health"),
             ("missing", "check_stamp_health"),
             (None, "check_stamp_health"),
-            (False, "purchase_stamp"),
-            ("", "purchase_stamp"),
-            ([], "purchase_stamp"),
-            (float("nan"), "purchase_stamp"),
+            # A value that fails validation counts as not reported, so
+            # malformed data never sends the agent to buy a stamp.
+            (False, "check_stamp_health"),
+            (True, "check_stamp_health"),
+            ("", "check_stamp_health"),
+            ("0", "check_stamp_health"),
+            ([], "check_stamp_health"),
+            (-1, "check_stamp_health"),
+            (150, "check_stamp_health"),
+            (float("nan"), "check_stamp_health"),
             (50, "purchase_stamp"),
+            (100, "purchase_stamp"),
         ],
     )
     async def test_propagation_uses_validated_percent(self, server, percent, expected):
@@ -343,6 +368,13 @@ class TestBranchDecisionsUseCheckedValues:
             ("warming_up", 1, False),
             ("warming_up", [0], False),
             ("warming_up", True, True),
+            ("network_availability", False, False),
+            ("network_availability", None, False),
+            ("network_availability", [], False),
+            ("network_availability", 7, False),
+            ("network_availability", {"a": "Unavailable"}, False),
+            ("network_availability", "Unavailable", True),
+            ("network_availability", "", True),
         ],
     )
     async def test_health_check_bee_flags(self, server, field, value, degraded):
@@ -359,6 +391,43 @@ class TestBranchDecisionsUseCheckedValues:
         ).content[0].text
         assert ("DEGRADED" in text) is degraded, text
         assert ("ready: true" in text) is (not degraded), text
+        # Every result has one _next. A degraded network with a usable stamp
+        # cannot upload yet: check again once the operator fixes the node.
+        expected = "health_check" if degraded else "upload_data"
+        assert _next_lines(text) == [f"_next: {expected}"], text
+        if degraded:
+            assert "Call health_check again after the gateway operator" in text
+
+
+class TestCheckStampHealthUtilizationLine:
+    @pytest.mark.parametrize("value", [True, False, 150, -1, "0", "x", [], float("nan")],
+                             ids=_hostile_id)
+    async def test_invalid_percent_prints_na(self, server, value):
+        def body(b):
+            b["status"]["utilizationPercent"] = value
+            return b
+
+        text = (await _run(server, "check_stamp_health", {"check_stamp_health": body})).content[0].text
+        assert "   Utilization: N/A (ok)\n" in text
+
+    @pytest.mark.parametrize("value", [0, 12.5, 100])
+    async def test_valid_percent_unchanged(self, server, value):
+        def body(b):
+            b["status"]["utilizationPercent"] = value
+            return b
+
+        text = (await _run(server, "check_stamp_health", {"check_stamp_health": body})).content[0].text
+        assert f"   Utilization: {value}% (ok)\n" in text
+
+    @pytest.mark.parametrize("value", [[1], "x", 7, True], ids=_hostile_id)
+    async def test_status_not_object_names_only_status(self, server, value):
+        def body(b):
+            b["status"] = value
+            return b
+
+        text = (await _run(server, "check_stamp_health", {"check_stamp_health": body})).content[0].text
+        assert "\nStatus: not in the expected format\n" in text
+        assert "gateway's answer" not in text
 
 
 NOT_OBJECT = [[], [FORGED], "x", FORGED, 7, True, None, 10**400, float("nan")]
@@ -411,19 +480,29 @@ class TestNonObjectAnswers:
         assert _next_lines(text) == ["_next: list_stamps"]
 
     @pytest.mark.parametrize(
-        "batch_id", ["abc", "g" * 64, "a" * 63, 7, True, ["a" * 64], FORGED], ids=_hostile_id
+        "batch_id",
+        ["abc", "g" * 64, "a" * 63, 7, True, ["a" * 64], FORGED,
+         False, 0, "", [], {}, None, "missing"],
+        ids=_hostile_id,
     )
     async def test_purchase_bad_batch_id_outcome_unknown(self, server, batch_id):
         def body(b):
-            b["batchID"] = batch_id
+            if batch_id == "missing":
+                del b["batchID"]
+            else:
+                b["batchID"] = batch_id
+            b["message"] = FORGED
             return b
 
         result = await _run(server, "purchase_stamp", {"purchase_stamp": body})
         text = result.content[0].text
         assert result.isError
         assert "outcome unknown" in text
+        assert "retryable: false" in text
         assert "purchased successfully" not in text
         assert _next_lines(text) == ["_next: list_stamps"]
+        # The answer is described, never echoed.
+        assert SENTINEL not in text
 
     async def test_purchase_accepts_0x_batch_id(self, server):
         def body(b):
@@ -479,18 +558,28 @@ class TestNonObjectAnswers:
         assert "0 usable by this server / 0 local" in text
         assert _next_lines(text) == ["_next: purchase_stamp"]
 
-    async def test_health_check_non_object_stamps_are_not_usable(self, server):
+    async def test_health_check_skips_non_object_stamps(self, server):
         def stamps(b):
             b["stamps"] = [7, "x", [], FORGED] + b["stamps"]
             return b
 
         text = (await _run(server, "health_check", {"list_stamps": stamps})).content[0].text
-        assert "0 usable by this server / 5 local" in text
+        # Skipped, as list_stamps skips them: only the one object is counted.
+        assert "0 usable by this server / 1 local" in text
         assert SENTINEL not in text
         assert _next_lines(text) == ["_next: check_stamp_health"]
 
+    async def test_health_check_only_non_object_stamps(self, server):
+        text = (
+            await _run(server, "health_check", {"list_stamps": lambda b: {"stamps": ["junk", 5]}})
+        ).content[0].text
+        assert "0 usable by this server / 0 local" in text
+        assert "No stamps found" in text
+        assert _next_lines(text) == ["_next: purchase_stamp"]
 
-# Full output for valid gateway answers, captured from the code before #270.
+
+# Full output for valid gateway answers, captured from the code before #270
+# (one entry changed on purpose, marked below).
 GOLDEN = {
     'health_check': (
         '✅ Gateway operational\n'
@@ -573,6 +662,8 @@ GOLDEN = {
         '_related: list_stamps, purchase_stamp, get_wallet_info'
     ),
     'health_check_peers_0': (
+        # Changed in #270 round 2: a degraded network with a usable stamp
+        # now gives _next: health_check and says when to call it.
         '✅ Gateway operational\n'
         '\n'
         '🌐 Gateway: http://localhost:8000\n'
@@ -589,8 +680,10 @@ GOLDEN = {
         'ready: false\n'
         '_recommendations:\n'
         "  - The gateway's Bee node cannot reliably reach the Swarm network: uploads may never propagate and only data stored on this node can be downloaded. Operator action required — retrying will not help.\n"
+        "  - Call health_check again after the gateway operator fixes the Bee node's network connection. Do not upload until it reports the Swarm network as connected\n"
         '_gateway: http://localhost:8000 (connected)\n'
         '\n'
+        '_next: health_check\n'
         '_related: list_stamps, purchase_stamp, get_wallet_info'
     ),
     'check_stamp_health': (

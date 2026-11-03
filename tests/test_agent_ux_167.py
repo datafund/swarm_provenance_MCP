@@ -192,10 +192,21 @@ class TestHealthCheckCountsOnlyWritableStamps:
         assert "2 owned stamps belong to the wallet that paid for them" in rec
         assert "1 stamp has an access mode this server cannot use" in rec
 
-    async def test_recommendation_without_known_kinds(self, server):
-        rec = self._recommendation(await self._health(server, ["junk", 5]))
-        assert rec.strip().startswith("- No stamp this server can write to.")
+    def test_recommendation_without_known_kinds(self):
+        # health_check and list_stamps skip entries that are not objects, and
+        # every object they keep has a kind, so this text is reachable only
+        # through the helper.
+        from swarm_provenance_mcp.server import _no_writable_stamp_text
+
+        rec = _no_writable_stamp_text({"pool": 0, "owned": 0, "other": 0, "spent": 0})
+        assert rec.startswith("No stamp this server can write to.")
         assert "pool" not in rec and "owned" not in rec
+
+    async def test_non_object_entries_count_as_no_stamps(self, server):
+        text = await self._health(server, ["junk", 5])
+        assert "0 usable by this server / 0 local" in text
+        assert "No stamps found" in text
+        assert "_next: purchase_stamp" in text
 
     async def test_unusable_unwritable_stamp_leads_to_purchase(self, server):
         text = await self._health(server, [_stamp("pool", usable=False)])
@@ -1000,7 +1011,8 @@ class TestHealthCheckBranchHintsAgree:
         "case,stamps,bee_ok,expected_next,rec_phrase",
         [
             ("writable usable", [_stamp("shared")], True, "upload_data", None),
-            ("degraded network", [_stamp("shared")], False, None, "Operator action required"),
+            ("degraded network", [_stamp("shared")], False, "health_check",
+             "Call health_check again after the gateway operator"),
             ("propagating", [dict(_stamp("shared", usable=False), propagationStatus="propagating")],
              True, "check_stamp_health", "Poll check_stamp_health"),
             ("old gateway, unknown reason", [_stamp("absent", usable=False)],

@@ -975,7 +975,7 @@ def _is_ambiguous_write_error(e: Exception) -> bool:
 
 
 def _ambiguous_write_result(
-    action: str, e: Exception, check_tool: str, how_to_check: str = ""
+    action: str, e: Union[Exception, str], check_tool: str, how_to_check: str = ""
 ) -> CallToolResult:
     """Tell the agent not to repeat a write whose outcome is unknown.
 
@@ -1455,7 +1455,9 @@ def _bee_network_status(gateway_response: Dict[str, Any]) -> Optional[Dict[str, 
     problems = []
     if bee.get("healthy") is False:
         problems.append("gateway reports the Bee node unhealthy")
-    if availability is not None and availability != "Available":
+    # Only a text value other than "Available" is a problem; a value of
+    # another type says nothing about the network.
+    if isinstance(availability, str) and availability != "Available":
         problems.append(f"network availability is {_gw(availability)}")
     # Only a real number counts: False or "0" says nothing about the peers.
     if _number_in(peers, 0, 0) is not None:
@@ -2560,31 +2562,18 @@ async def handle_purchase_stamp(arguments: Dict[str, Any]) -> CallToolResult:
                 _new_batch_hint(label, depth),
             )
 
-        # Check if purchase was actually successful
+        # A 2xx without a valid batch ID: the purchase may still have
+        # happened, so the agent must look before it buys again.
         batch_id = result.get("batchID")
-        if not batch_id:
-            error_msg = f"❌ Stamp purchase failed - no stamp ID returned!\n\nGateway response: {_gw(repr(result), 300)}"
-            logger.error(
-                f"Purchase failed - missing batchID in response: {_gw(repr(result), 300)}"
-            )
-            return CallToolResult(
-                content=[
-                    TextContent(
-                        type="text",
-                        text=_format_error(
-                            error_msg, retryable=True, next_tool="health_check"
-                        ),
-                    )
-                ],
-                isError=True,
-            )
         if not _is_gateway_batch_id(batch_id):
+            reason = (
+                "the gateway's answer has no batch ID"
+                if batch_id is None
+                else "the batch ID in the gateway's answer is not a "
+                "64-character hexadecimal string"
+            )
             return _ambiguous_write_result(
-                "Stamp purchase",
-                "the batch ID in the gateway's answer is not a 64-character "
-                "hexadecimal string",
-                "list_stamps",
-                _new_batch_hint(label, depth),
+                "Stamp purchase", reason, "list_stamps", _new_batch_hint(label, depth)
             )
 
         response_text = f"🎉 Stamp purchased successfully!\n\n"
@@ -3631,7 +3620,8 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
             try:
                 stamps_result = gateway_client.list_stamps()
                 # The same rule as list_stamps: an answer or a stamp list
-                # that is not the expected type counts as no stamps.
+                # that is not the expected type counts as no stamps, and
+                # entries that are not objects are skipped.
                 stamps = (
                     stamps_result.get("stamps")
                     if isinstance(stamps_result, dict)
@@ -3639,6 +3629,7 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                 )
                 if not isinstance(stamps, list):
                     stamps = []
+                stamps = [s for s in stamps if isinstance(s, dict)]
                 total_stamps = len(stamps)
                 counts = _writable_stamp_counts(stamps)
                 usable_count = counts["writable"]
@@ -3667,7 +3658,13 @@ async def handle_health_check(arguments: Dict[str, Any]) -> CallToolResult:
                     ready = True
                     next_tool = "upload_data"
                 elif usable_count > 0:
-                    next_tool = None
+                    # The degraded network blocks uploads to a usable stamp.
+                    recommendations.append(
+                        "Call health_check again after the gateway operator "
+                        "fixes the Bee node's network connection. Do not upload "
+                        "until it reports the Swarm network as connected"
+                    )
+                    next_tool = "health_check"
                 elif counts["pending"]:
                     recommendations.append(
                         _pending_stamp_text(counts["pending"], counts["pending_ids"])
@@ -3863,21 +3860,21 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
         response_text += _health_entries("Errors", errors)
         response_text += _health_entries("Warnings", warnings)
 
-        # The utilization the propagation check below uses: only a number
-        # from 0 to 100, and 0 when the gateway does not report one.
+        # The utilization the Utilization line and the propagation check
+        # use: only a number from 0 to 100.
         percent = None
         utilization = None
         if isinstance(status, dict):
             utilization = status.get("utilizationPercent")
             percent = _number_in(utilization, 0, 100)
         elif status:
-            response_text += f"\nStatus: {_NOT_EXPECTED_FORMAT}\n"
+            response_text += "\nStatus: not in the expected format\n"
             status = {}
 
         if status:
             response_text += f"\nStatus:\n"
             if utilization is not None:
-                shown = f"{percent}%" if percent is not None else _gw(utilization, 20) or "N/A"
+                shown = f"{percent}%" if percent is not None else "N/A"
                 response_text += f"   Utilization: {shown} ({_gw(status.get('utilizationStatus', 'unknown'))})\n"
             if status.get("batchTTL") is not None:
                 ttl = _number_in(status["batchTTL"], 0, MAX_TTL_SECONDS)
@@ -3916,7 +3913,9 @@ async def handle_check_stamp_health(arguments: Dict[str, Any]) -> CallToolResult
                     for e in (errors if isinstance(errors, list) else [])
                     if isinstance(e, dict) and isinstance(e.get("code"), str)
                 }
-                util_pct = 0 if utilization is None else percent
+                # A value that fails validation counts as not reported, so
+                # malformed data never leads to purchase_stamp.
+                util_pct = 0 if percent is None else percent
                 is_propagating = ("NOT_FOUND" in error_codes) or (
                     "NOT_USABLE" in error_codes and util_pct == 0
                 )

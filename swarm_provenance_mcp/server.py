@@ -2756,34 +2756,86 @@ async def handle_get_stamp_status(arguments: Dict[str, Any]) -> CallToolResult:
         )
 
 
+# list_stamps status for each _stamp_readiness kind.
+_STAMP_STATUS = {
+    "writable": "✅ Usable",
+    "pending": "⏳ Not usable yet (may still be propagating)",
+    "pool": "⛔ Not usable by this server (pool stamp: gateway inventory)",
+    "owned": (
+        "⛔ Not usable by this server (owned stamp: registered to the wallet "
+        "that paid for it)"
+    ),
+    "other": "⛔ Not usable by this server (access mode it cannot use)",
+}
+# How list_stamps names a lasting unusableReason. Only these known values
+# are printed; the gateway's text is never echoed.
+_SPENT_REASON_TEXT = {
+    "expired": "expired",
+    "expiring_soon": "about to expire",
+    "full": "full",
+    "invalid_depth": "invalid depth",
+    "unreadable": "unreadable on the node",
+    "not_found": "not found on the node",
+}
+# secondsSincePurchase above this (ten years) is not printed.
+MAX_STAMP_AGE_SECONDS = 10 * 365 * 86400
+
+
+def _stamp_status(stamp: Dict[str, Any], kind: str) -> str:
+    """The Status field list_stamps prints for one stamp."""
+    if kind == "spent":
+        reason = _SPENT_REASON_TEXT.get(stamp.get("unusableReason"), "")
+        return f"❌ Cannot become usable ({reason})" if reason else "❌ Cannot become usable"
+    return _STAMP_STATUS[kind]
+
+
+def _plain_depth(value: Any) -> Optional[int]:
+    """A stamp depth, only as a plain int from 0 to 255."""
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 255:
+        return value
+    return None
+
+
+def _stamp_age(value: Any) -> Optional[float]:
+    """secondsSincePurchase, only as a finite, non-negative, sane number."""
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and 0 <= value <= MAX_STAMP_AGE_SECONDS
+    ):
+        return value
+    return None
+
+
 async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
-    """Handle stamp listing requests."""
+    """Handle stamp listing requests.
+
+    Uses the readiness rule health_check uses (_stamp_readiness): a stamp is
+    usable here only when it is usable and its access mode is one this
+    server can write to. _next follows the same order as health_check.
+    """
     try:
         result = gateway_client.list_stamps()
-        stamps = result.get("stamps", [])
-        total_count = result.get("total_count", 0)
+        stamps = result.get("stamps") if isinstance(result, dict) else None
+        if not isinstance(stamps, list):
+            stamps = []
+        # The gateway's total_count is not printed: the count is the number
+        # of entries listed here.
+        stamps = [s for s in stamps if isinstance(s, dict)]
+        counts = _writable_stamp_counts(stamps)
 
-        has_usable = False
-        if total_count == 0:
+        if not stamps:
             response_text = "📭 No stamps found.\n\n💡 Use the 'purchase_stamp' tool to create your first stamp!"
         else:
-            response_text = f"📋 Found {total_count} stamp(s):\n\n"
+            response_text = f"📋 Found {len(stamps)} stamp(s):\n\n"
 
             for stamp in stamps:
-                batch_id = stamp.get("batchID", "N/A")
-                expiration = stamp.get("expectedExpiration", "N/A")
-                usable = stamp.get("usable", "N/A")
-
-                if usable is True:
-                    has_usable = True
-
-                # Status with emoji
-                if usable is True:
-                    status = "✅ Usable"
-                elif usable is False:
-                    status = "❌ Expired"
-                else:
-                    status = "❓ Unknown"
+                batch_id = stamp.get("batchID")
+                if not (isinstance(batch_id, str) and STAMP_ID_PATTERN.match(batch_id)):
+                    batch_id = _gw(batch_id, 70) if batch_id is not None else "N/A"
+                expiration = _gw(stamp.get("expectedExpiration", "N/A"), 40)
+                status = _stamp_status(stamp, _stamp_readiness(stamp))
 
                 response_text += f"Batch ID: {batch_id}\n"
                 detail_line = f"  Expiration: {expiration} | Status: {status}"
@@ -2791,41 +2843,50 @@ async def handle_list_stamps(arguments: Dict[str, Any]) -> CallToolResult:
                 # Surface access mode when provided by gateway
                 access_mode = stamp.get("accessMode")
                 if access_mode:
-                    detail_line += f" | Access: {_gw(access_mode)}"
+                    detail_line += f" | Access: {_gw(access_mode, 30)}"
 
                 # Surface propagation status when provided
                 propagation_status = stamp.get("propagationStatus")
                 if propagation_status:
-                    detail_line += f" | Propagation: {_gw(propagation_status)}"
+                    detail_line += f" | Propagation: {_gw(propagation_status, 30)}"
 
                 # What identifies a batch from an unanswered purchase
                 identity = []
                 if stamp.get("label"):
                     identity.append(f"Label: {quote(stamp['label'])}")
-                if stamp.get("depth") is not None:
-                    identity.append(f"Depth: {stamp['depth']}")
-                age = stamp.get("secondsSincePurchase")
-                if isinstance(age, (int, float)):
+                depth = _plain_depth(stamp.get("depth"))
+                if depth is not None:
+                    identity.append(f"Depth: {depth}")
+                age = _stamp_age(stamp.get("secondsSincePurchase"))
+                if age is not None:
                     identity.append(f"Purchased: {_format_age(age)} ago")
                 if identity:
                     detail_line += "\n  " + " | ".join(identity)
 
                 response_text += detail_line + "\n\n"
 
-        # Public-only hint: all stamps are shared, none owned
-        if stamps and not any(s.get("accessMode") == "owned" for s in stamps):
+        # Public-only hint: every listed stamp is shared
+        if stamps and all(s.get("accessMode") == "shared" for s in stamps):
             response_text += "\n💡 All stamps are public (shared): other gateway users can fill them. For production use with predictable capacity, run your own Bee node or gateway. This server sends no wallet, so it cannot upload to wallet-owned stamps.\n"
 
         # Labels of shared stamps are written by other gateway users.
-        if any(isinstance(s, dict) and s.get("label") for s in stamps or []):
+        if any(s.get("label") for s in stamps):
             response_text += f"\n{QUOTED_NOTE}\n"
 
-        # Contextual hints
-        if has_usable:
+        # Contextual hints, in health_check's order. Each recommendation
+        # matches its _next.
+        if counts["writable"]:
             response_text += _format_hints(
                 "upload_data", ["get_stamp_status", "check_stamp_health"]
             )
+        elif counts["pending"]:
+            response_text += (
+                f"\n💡 {_pending_stamp_text(counts['pending'], counts['pending_ids'])}.\n"
+            )
+            response_text += _format_hints("check_stamp_health", ["get_stamp_status"])
         else:
+            if stamps:
+                response_text += f"\n💡 {_no_writable_stamp_text(counts['blocked'])}.\n"
             response_text += _format_hints("purchase_stamp", ["get_wallet_info"])
 
         return CallToolResult(content=[TextContent(type="text", text=response_text)])

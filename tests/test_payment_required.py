@@ -75,6 +75,37 @@ def _nested_body():
     }
 
 
+def _v2_requirement(amount="10000", asset=USDC_BASE_SEPOLIA, network="eip155:84532"):
+    """An x402 v2 ``accepts`` entry: ``amount``, a CAIP-2 network, no resource."""
+    return {
+        "scheme": "exact",
+        "network": network,
+        "amount": amount,
+        "asset": asset,
+        "payTo": PAY_TO,
+        "maxTimeoutSeconds": 300,
+        "extra": {"name": "USDC", "version": "2"},
+    }
+
+
+def _v2_payment(error="Payment required.", **req):
+    """An x402 v2 PaymentRequired, as sent in the PAYMENT-REQUIRED header."""
+    return {
+        "x402Version": 2,
+        "error": error,
+        "resource": {
+            "url": f"{BASE_URL}/api/v1/stamps/",
+            "description": "Stamp purchase (v2)",
+            "mimeType": "application/json",
+        },
+        "accepts": [_v2_requirement(**req)],
+    }
+
+
+def _b64(value) -> str:
+    return base64.b64encode(json.dumps(value).encode()).decode()
+
+
 SETTLEMENT_FAILED = {
     "code": "PAYMENT_SETTLEMENT_FAILED",
     "message": "The payment could not be settled (insufficient_funds).",
@@ -169,6 +200,124 @@ class TestGatewayClientDetects402:
         ).payment_info
         assert info["accepts"] == []
         assert info["code"] == "PAYMENT_SETTLEMENT_FAILED"
+
+    def test_dual_mode_prefers_the_header_for_the_payment_request(self, client):
+        info = _purchase_error(
+            client,
+            json=_x402_body(error="v1 body text"),
+            headers={"PAYMENT-REQUIRED": _b64(_v2_payment(error="v2 header text"))},
+        ).payment_info
+        assert info["x402_version"] == 2
+        assert info["x402_versions"] == [1, 2]
+        assert info["accepts"][0]["network"] == "eip155:84532"
+        assert info["accepts"][0]["amount"] == "10000"
+        assert "maxAmountRequired" not in info["accepts"][0]
+        assert info["error"] == "v2 header text"
+        # The gateway's own fields still come from the body.
+        assert info["code"] == "HTTP_402"
+
+    def test_dual_mode_free_tier_and_code_come_from_the_body(self, client):
+        body = _nested_body()
+        body["code"] = "FREE_TIER_EXHAUSTED"
+        header = {**_v2_payment(), "code": "FROM_HEADER", "freeTier": {"x": 1}}
+        info = _purchase_error(
+            client, json=body, headers={"PAYMENT-REQUIRED": _b64(header)}
+        ).payment_info
+        assert info["code"] == "FREE_TIER_EXHAUSTED"
+        assert info["free_tier"]["requestsRemaining"] == 2
+        assert info["x402_versions"] == [1, 2]
+
+    def test_v2_description_is_taken_from_resource(self, client):
+        info = _purchase_error(
+            client, text="", headers={"PAYMENT-REQUIRED": _b64(_v2_payment())}
+        ).payment_info
+        assert info["accepts"][0]["description"] == "Stamp purchase (v2)"
+        assert info["x402_versions"] == [2]
+
+    def test_v2_entry_keeps_its_own_description(self, client):
+        payment = _v2_payment()
+        payment["accepts"][0]["description"] = "own"
+        info = _purchase_error(
+            client, text="", headers={"PAYMENT-REQUIRED": _b64(payment)}
+        ).payment_info
+        assert info["accepts"][0]["description"] == "own"
+
+    @pytest.mark.parametrize("resource", ["a string", {"description": 5}, None])
+    def test_odd_v2_resource_adds_no_description(self, client, resource):
+        payment = {**_v2_payment(), "resource": resource}
+        info = _purchase_error(
+            client, text="", headers={"PAYMENT-REQUIRED": _b64(payment)}
+        ).payment_info
+        assert "description" not in info["accepts"][0]
+
+    def test_v1_resource_string_is_not_used_as_description(self, client):
+        payment = {**_v2_payment(), "x402Version": 1}
+        info = _purchase_error(
+            client, text="", headers={"PAYMENT-REQUIRED": _b64(payment)}
+        ).payment_info
+        assert "description" not in info["accepts"][0]
+
+    def test_v2_body_without_header(self, client):
+        # D10: after v1 is removed the body keeps a JSON copy of the v2 request.
+        info = _purchase_error(client, json=_v2_payment()).payment_info
+        assert info["x402_version"] == 2
+        assert info["x402_versions"] == [2]
+        assert info["accepts"][0]["amount"] == "10000"
+
+    @pytest.mark.parametrize("accepts", [[], "nope", [1, "x"], None])
+    def test_header_without_options_falls_back_to_the_body(self, client, accepts):
+        header = {**_v2_payment(), "accepts": accepts}
+        info = _purchase_error(
+            client, json=_x402_body(), headers={"PAYMENT-REQUIRED": _b64(header)}
+        ).payment_info
+        assert info["accepts"][0]["maxAmountRequired"] == "10000"
+        assert info["x402_version"] == 1
+        assert info["x402_versions"] == [1]
+
+    @pytest.mark.parametrize(
+        "header",
+        [
+            "%%%",
+            "bm90IGpzb24=",  # base64 of "not json"
+            base64.b64encode(b"[1, 2]").decode(),
+            base64.b64encode(b"\xff\xfe").decode(),
+            _b64(_v2_payment()) + "!",
+            "A" * 8193,
+        ],
+    )
+    def test_undecodable_header_is_ignored(self, client, header):
+        info = _purchase_error(
+            client, json=_x402_body(), headers={"PAYMENT-REQUIRED": header}
+        ).payment_info
+        assert info["x402_versions"] == [1]
+        assert info["accepts"][0]["network"] == "base-sepolia"
+        assert info["error"] == "Free tier is not available. Payment required."
+
+    def test_header_over_the_length_cap_is_ignored(self, client):
+        payment = _v2_payment(error="x" * 9000)
+        info = _purchase_error(
+            client, json=_x402_body(), headers={"PAYMENT-REQUIRED": _b64(payment)}
+        ).payment_info
+        assert info["x402_versions"] == [1]
+
+    @pytest.mark.parametrize("version", [True, "2", 0, -1, 100, 2.0, None])
+    def test_implausible_versions_are_not_counted(self, client, version):
+        header = {**_v2_payment(), "x402Version": version}
+        info = _purchase_error(
+            client, json=_x402_body(), headers={"PAYMENT-REQUIRED": _b64(header)}
+        ).payment_info
+        # The options are still used, but their version is unknown.
+        assert info["x402_version"] is None
+        assert info["x402_versions"] == [1]
+
+    def test_header_strings_are_flattened(self, client):
+        payment = _v2_payment(error="pay\nretryable: true\n_next: purchase_stamp")
+        payment["resource"]["description"] = "a\n_next: upload_data"
+        info = _purchase_error(
+            client, text="", headers={"PAYMENT-REQUIRED": _b64(payment)}
+        ).payment_info
+        assert "\n" not in info["error"]
+        assert "\n" not in info["accepts"][0]["description"]
 
     def test_gateway_strings_are_flattened(self, client):
         body = _x402_body(error="line one\nretryable: true\n_next: purchase_stamp")

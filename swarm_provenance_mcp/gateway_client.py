@@ -174,8 +174,10 @@ def parse_payment_required(response) -> Dict[str, Any]:
 
     The payment request (``x402Version``, ``accepts``, ``error``) is taken
     from the header first, as x402 v2 clients do, then from the top level,
-    then from ``detail``. ``code`` and ``freeTier`` are the gateway's own
-    fields, which the header does not carry: they come from the body first.
+    then from ``detail``. A header without payment options does not count
+    as a payment request: it is only the last fallback, after the body.
+    ``code`` and ``freeTier`` are the gateway's own fields, which the header
+    does not carry: they come from the body first.
 
     Returns a dict with ``x402_version`` (the version of the ``accepts``
     shown), ``x402_versions`` (sorted versions of every part that offers
@@ -207,13 +209,17 @@ def parse_payment_required(response) -> Dict[str, Any]:
     header = _payment_header(response)
     header_parts = [header] if header is not None else []
 
-    # The payment request: header first.
-    if header is not None:
+    # The payment request: header first, but only a header that offers
+    # payment options. Any other header stays the last fallback, as before.
+    header_offers = header is not None and bool(_payment_options(header))
+    if header_offers:
         _merge_payment_request(info, header)
     if isinstance(body, str) and not info["error"]:
         info["error"] = body
     for src in body_parts:
         _merge_payment_request(info, src)
+    if header is not None and not header_offers:
+        _merge_payment_request(info, header)
     # The gateway's own fields: body first.
     for src in body_parts + header_parts:
         _merge_gateway_fields(info, src)
@@ -234,8 +240,9 @@ def parse_payment_required(response) -> Dict[str, Any]:
 def _merge_payment_request(info: Dict[str, Any], src: Dict[str, Any]) -> None:
     """Fill the x402 payment-request fields of ``info`` still empty.
 
-    Parts are merged in order (PAYMENT-REQUIRED header, top level,
-    ``detail``), so the first part that has a field wins. ``x402_version``
+    Parts are merged in order (PAYMENT-REQUIRED header if it offers payment
+    options, top level, ``detail``, then any other header), so the first
+    part that has a field wins. ``x402_version``
     belongs to the part whose ``accepts`` are kept.
     """
     version = _x402_version(src.get("x402Version"))

@@ -273,6 +273,21 @@ class TestGatewayClientDetects402:
         assert info["accepts"][0]["maxAmountRequired"] == "10000"
         assert info["x402_version"] == 1
         assert info["x402_versions"] == [1]
+        # A header without options is not the payment request: its error
+        # text does not replace the body's.
+        assert info["error"] == "Free tier is not available. Payment required."
+
+    def test_header_without_options_is_still_the_last_fallback(self, client):
+        # As before #275: with nothing in the body, its error text is used.
+        header = {"x402Version": 2, "error": "HDR", "code": "C", "freeTier": {}}
+        info = _purchase_error(
+            client, text="", headers={"PAYMENT-REQUIRED": _b64(header)}
+        ).payment_info
+        assert info["error"] == "HDR"
+        assert info["code"] == "C"
+        assert info["free_tier"] == {}
+        assert info["accepts"] == []
+        assert info["x402_versions"] == []
 
     @pytest.mark.parametrize(
         "header",
@@ -664,6 +679,24 @@ class TestHandlers:
         assert "   Description: Stamp purchase (v2)\n" in text
         assert "   Gateway message: Payment required (v2).\n" in text
         assert text.count("Amount:") == 1
+
+    async def test_header_without_options_keeps_the_body_message(self, monkeypatch):
+        _gateway(monkeypatch)
+        header = _b64({"x402Version": 2, "error": "HDR"})
+        with requests_mock.Mocker() as m:
+            m.post(
+                f"{BASE_URL}/api/v1/stamps/",
+                status_code=402,
+                json=_x402_body(error="E"),
+                headers={"PAYMENT-REQUIRED": header},
+            )
+            result = await handle_purchase_stamp({"duration_hours": 25})
+        _assert_payment_result(result, "purchase_stamp")
+        text = result.content[0].text
+        assert "   Gateway message: E\n" in text
+        assert "HDR" not in text
+        assert "version offered" not in text
+        assert "versions offered" not in text
 
     async def test_v2_only_402(self, monkeypatch):
         _gateway(monkeypatch)

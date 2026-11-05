@@ -91,6 +91,8 @@ def _json(response) -> Any:
 MAX_PAYMENT_HEADER_CHARS = 8192
 # Longest snippet of a non-JSON 402 body kept in ``payment_info["raw"]``.
 MAX_RAW_402_CHARS = 300
+# Highest x402Version accepted from the gateway; anything else is ignored.
+MAX_X402_VERSION = 99
 
 
 class PaymentRequiredError(requests.HTTPError):
@@ -109,9 +111,10 @@ class PaymentRequiredError(requests.HTTPError):
 def _payment_header(response) -> Optional[Dict[str, Any]]:
     """The decoded PAYMENT-REQUIRED header (base64 JSON), if any.
 
-    The gateway sends the payment request in the body (x402 v1). x402 v2
-    moves it to this header, so it is read as a fallback. Anything that does
-    not decode to a JSON object is ignored.
+    x402 v2 sends the payment request in this header, and v2 clients read it
+    before the body; parse_payment_required does the same. Anything that does
+    not decode to a JSON object, or a value over MAX_PAYMENT_HEADER_CHARS, is
+    ignored, so the body is used.
     """
     value = response.headers.get("PAYMENT-REQUIRED") if response is not None else None
     if not value or len(value) > MAX_PAYMENT_HEADER_CHARS:
@@ -125,6 +128,34 @@ def _payment_header(response) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _x402_version(value: Any) -> Optional[int]:
+    """An x402Version from the gateway if it is a plausible one, else None."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 1 <= value <= MAX_X402_VERSION else None
+
+
+def _payment_options(src: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The object entries of one part's ``accepts`` list, normalised.
+
+    An x402 v2 entry has no description of its own: v2 moves it to the
+    top-level ``resource`` object, which is copied into entries without one.
+    """
+    accepts = src.get("accepts")
+    if not isinstance(accepts, list):
+        return []
+    options = [a for a in accepts if isinstance(a, dict)]
+    resource = src.get("resource")
+    if _x402_version(src.get("x402Version")) == 2 and isinstance(resource, dict):
+        description = resource.get("description")
+        if isinstance(description, str) and description:
+            options = [
+                o if o.get("description") else {**o, "description": description}
+                for o in options
+            ]
+    return options
+
+
 def parse_payment_required(response) -> Dict[str, Any]:
     """Normalise a 402 response into a payment_info dict. Never raises.
 
@@ -136,14 +167,27 @@ def parse_payment_required(response) -> Dict[str, Any]:
     - older gateways: the same body only under ``detail``;
     - gateway-specific bodies without ``accepts``, such as
       ``{"code": "PAYMENT_SETTLEMENT_FAILED", "message": ...}``;
-    - an empty or non-JSON body (a proxy page, for example).
+    - an empty or non-JSON body (a proxy page, for example);
+    - with x402 v2: a ``PAYMENT-REQUIRED`` header (base64 JSON with
+      ``x402Version``, ``error``, ``resource``, ``accepts``), alone or next
+      to a v1 body (dual mode), or a v2 copy of it in the body.
 
-    Returns a dict with ``x402_version``, ``error``, ``code``, ``accepts``
-    (a list of dicts), ``free_tier`` (dict or None) and ``raw`` (a capped
-    snippet of a non-JSON body, else "").
+    The payment request (``x402Version``, ``accepts``, ``error``) is taken
+    from the header first, as x402 v2 clients do, then from the top level,
+    then from ``detail``. A header without payment options does not count
+    as a payment request: it is only the last fallback, after the body.
+    ``code`` and ``freeTier`` are the gateway's own fields, which the header
+    does not carry: they come from the body first.
+
+    Returns a dict with ``x402_version`` (the version of the ``accepts``
+    shown), ``x402_versions`` (sorted versions of every part that offers
+    payment options, e.g. ``[1, 2]`` in dual mode), ``error``, ``code``,
+    ``accepts`` (a list of dicts), ``free_tier`` (dict or None) and ``raw``
+    (a capped snippet of a non-JSON body, else "").
     """
     info: Dict[str, Any] = {
         "x402_version": None,
+        "x402_versions": [],
         "error": "",
         "code": "",
         "accepts": [],
@@ -157,39 +201,66 @@ def parse_payment_required(response) -> Dict[str, Any]:
         # Empty or not JSON (a proxy page, for example): keep the start.
         info["raw"] = flatten(getattr(response, "text", "") or "", MAX_RAW_402_CHARS)
 
-    sources: List[Dict[str, Any]] = []
+    body_parts: List[Dict[str, Any]] = []
     if isinstance(body, dict):
-        sources.append(body)
+        body_parts.append(body)
         if isinstance(body.get("detail"), dict):
-            sources.append(body["detail"])
-    elif isinstance(body, str):
-        info["error"] = body
+            body_parts.append(body["detail"])
     header = _payment_header(response)
-    if header is not None:
-        sources.append(header)
+    header_parts = [header] if header is not None else []
 
-    for src in sources:
-        _merge_payment_source(info, src)
+    # The payment request: header first, but only a header that offers
+    # payment options. Any other header stays the last fallback, as before.
+    header_offers = header is not None and bool(_payment_options(header))
+    if header_offers:
+        _merge_payment_request(info, header)
+    if isinstance(body, str) and not info["error"]:
+        info["error"] = body
+    for src in body_parts:
+        _merge_payment_request(info, src)
+    if header is not None and not header_offers:
+        _merge_payment_request(info, header)
+    # The gateway's own fields: body first.
+    for src in body_parts + header_parts:
+        _merge_gateway_fields(info, src)
+    info["x402_versions"] = sorted(
+        {
+            v
+            for v in (
+                _x402_version(src.get("x402Version"))
+                for src in header_parts + body_parts
+                if _payment_options(src)
+            )
+            if v is not None
+        }
+    )
     return info
 
 
-def _merge_payment_source(info: Dict[str, Any], src: Dict[str, Any]) -> None:
-    """Fill the fields of ``info`` still empty from one part of a 402.
+def _merge_payment_request(info: Dict[str, Any], src: Dict[str, Any]) -> None:
+    """Fill the x402 payment-request fields of ``info`` still empty.
 
-    Parts are merged in order (top level, ``detail``, PAYMENT-REQUIRED
-    header), so the first part that has a field wins.
+    Parts are merged in order (PAYMENT-REQUIRED header if it offers payment
+    options, top level, ``detail``, then any other header), so the first
+    part that has a field wins. ``x402_version``
+    belongs to the part whose ``accepts`` are kept.
     """
-    accepts = src.get("accepts")
-    if not info["accepts"] and isinstance(accepts, list):
-        info["accepts"] = [a for a in accepts if isinstance(a, dict)]
-    version = src.get("x402Version")
-    if info["x402_version"] is None and isinstance(version, (int, str)):
+    version = _x402_version(src.get("x402Version"))
+    options = _payment_options(src)
+    if not info["accepts"] and options:
+        info["accepts"] = options
         info["x402_version"] = version
-    if not info["code"] and isinstance(src.get("code"), str):
-        info["code"] = src["code"]
+    elif info["x402_version"] is None and not info["accepts"]:
+        info["x402_version"] = version
     if not info["error"]:
         texts = [src.get(k) for k in ("error", "message", "detail")]
         info["error"] = next((t for t in texts if isinstance(t, str) and t), "")
+
+
+def _merge_gateway_fields(info: Dict[str, Any], src: Dict[str, Any]) -> None:
+    """Fill ``code`` and ``free_tier`` of ``info`` from one part of a 402."""
+    if not info["code"] and isinstance(src.get("code"), str):
+        info["code"] = src["code"]
     free = src.get("freeTier")
     if info["free_tier"] is None and isinstance(free, dict):
         info["free_tier"] = free

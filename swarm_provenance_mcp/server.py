@@ -1515,6 +1515,8 @@ for _net in ("base-sepolia", "eip155:84532"):
 _MAX_AMOUNT_DIGITS = 40
 # Payment options listed in a Payment Required message, at most.
 _MAX_PAYMENT_OPTIONS = 5
+# Highest x402 version named in a Payment Required message.
+_MAX_X402_VERSION = 99
 
 
 def _format_x402_amount(amount: Any, network: Any, asset: Any) -> str:
@@ -1549,15 +1551,51 @@ def _format_x402_amount(amount: Any, network: Any, asset: Any) -> str:
     return f"{digits} atomic units ({value:f} {symbol})"
 
 
-def _format_payment_options(accepts: List[Dict[str, Any]]) -> str:
-    """The ``accepts`` entries of an x402 payment request, for display."""
+def _offered_x402_versions(payment_info: Dict[str, Any]) -> str:
+    """The x402 versions the gateway offers, as a line, or "" for v1 only.
+
+    Today's gateway offers only v1, and its 402 says nothing about versions:
+    the line appears only when another version is offered. Only plausible
+    integers are used, so no gateway text reaches the line.
+    """
+    raw = payment_info.get("x402_versions")
+    versions = sorted(
+        {
+            v
+            for v in (raw if isinstance(raw, list) else [])
+            if isinstance(v, int)
+            and not isinstance(v, bool)
+            and 1 <= v <= _MAX_X402_VERSION
+        }
+    )
+    if not versions or versions == [1]:
+        return ""
+    names = [f"v{v}" for v in versions]
+    if len(names) == 1:
+        return f"   x402 version offered: {names[0]}\n"
+    listed = ", ".join(names[:-1]) + f" and {names[-1]}"
+    return f"   x402 versions offered: {listed}\n"
+
+
+def _format_payment_options(
+    accepts: List[Dict[str, Any]], version: Any = None, versions_line: str = ""
+) -> str:
+    """The ``accepts`` entries of an x402 payment request, for display.
+
+    ``version`` is the x402 version of these entries. v2 names the price
+    ``amount``; v1 names it ``maxAmountRequired`` (D8 may add ``amount``).
+    """
     msg = "\n📋 Payment details (from the gateway's x402 payment request):\n"
+    msg += versions_line
     for i, option in enumerate(accepts[:_MAX_PAYMENT_OPTIONS]):
         if len(accepts) > 1:
             msg += f"   Option {i + 1}:\n"
         network = option.get("network")
         asset = option.get("asset")
-        amount = option.get("maxAmountRequired", option.get("amount"))
+        if version == 2 and option.get("amount") is not None:
+            amount = option.get("amount")
+        else:
+            amount = option.get("maxAmountRequired", option.get("amount"))
         pay_to = _gw(option.get("payTo"), 100) or "not given"
         msg += f"   Amount: {_format_x402_amount(amount, network, asset)}\n"
         msg += f"   Asset: {_gw(asset, 100) or 'not given'}\n"
@@ -1609,8 +1647,12 @@ def _free_tier_option() -> str:
 def format_payment_required(payment_info: Dict[str, Any], action: str) -> str:
     """Explain an HTTP 402 Payment Required from the gateway.
 
-    ``payment_info`` comes from ``gateway_client.parse_payment_required``.
-    Every value in it is gateway text, so it is printed through ``_gw``.
+    ``payment_info`` comes from ``gateway_client.parse_payment_required``,
+    which prefers the x402 v2 ``PAYMENT-REQUIRED`` header. Every value in it
+    is gateway text, so it is printed through ``_gw``. When the gateway
+    offers a version other than v1, the offered versions are named (for
+    example "x402 versions offered: v1 and v2"); a v1-only 402 reads as
+    before.
     """
     msg = (
         "💳 Payment required: the gateway requires payment for this operation "
@@ -1626,7 +1668,11 @@ def format_payment_required(payment_info: Dict[str, Any], action: str) -> str:
 
     accepts = [a for a in payment_info.get("accepts") or [] if isinstance(a, dict)]
     if accepts:
-        msg += _format_payment_options(accepts)
+        msg += _format_payment_options(
+            accepts,
+            payment_info.get("x402_version"),
+            _offered_x402_versions(payment_info),
+        )
     else:
         msg += "\n📋 The gateway sent no payment details.\n"
         if payment_info.get("raw"):

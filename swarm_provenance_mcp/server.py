@@ -35,6 +35,7 @@ from requests.exceptions import RequestException
 from . import bmt
 from .config import WALLET_KEY_HINT, is_plain_http_remote, settings
 from .gateway_client import (
+    MAX_X402_VERSION,
     GatewayAnswerUnreadable,
     PaymentRequiredError,
     SwarmGatewayClient,
@@ -1515,8 +1516,6 @@ for _net in ("base-sepolia", "eip155:84532"):
 _MAX_AMOUNT_DIGITS = 40
 # Payment options listed in a Payment Required message, at most.
 _MAX_PAYMENT_OPTIONS = 5
-# Highest x402 version named in a Payment Required message.
-_MAX_X402_VERSION = 99
 
 
 def _format_x402_amount(amount: Any, network: Any, asset: Any) -> str:
@@ -1565,7 +1564,7 @@ def _offered_x402_versions(payment_info: Dict[str, Any]) -> str:
             for v in (raw if isinstance(raw, list) else [])
             if isinstance(v, int)
             and not isinstance(v, bool)
-            and 1 <= v <= _MAX_X402_VERSION
+            and 1 <= v <= MAX_X402_VERSION
         }
     )
     if not versions or versions == [1]:

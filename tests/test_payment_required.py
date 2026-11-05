@@ -431,3 +431,275 @@ class TestHandlers:
         assert lines.count("retryable: false") == 1
         assert "retryable: true" not in lines
         assert not any(line.startswith("_next:") for line in lines)
+
+
+# Full tool results for the v1 402 shapes the gateway sends today, captured
+# from the code before #275 with PAYMENT_MODE=free. "{action}" is the tool
+# name. Preferring the PAYMENT-REQUIRED header (#275) must not change any of
+# them: today's gateway sends no header.
+GOLDEN_V1_402 = {
+    "top_level": (
+        "💳 Payment required: the gateway requires payment for this operation "
+        "({action}) and refused the request.\n"
+        "   Gateway message: Free tier is not available. Payment required.\n"
+        "\n"
+        "📋 Payment details (from the gateway's x402 payment request):\n"
+        "   Amount: 10000 atomic units (0.01 USDC)\n"
+        "   Asset: 0x036CbD53842c5426634e7929541eC2318f3dCF7e\n"
+        "   Network: base-sepolia\n"
+        "   Recipient (payTo): 0x0000000000000000000000000000000000000001\n"
+        "   Scheme: exact\n"
+        "   Description: Stamp purchase\n"
+        "\n"
+        "Paid x402 access is not supported by this server yet, so it cannot pay "
+        "for this request.\n"
+        "\n"
+        "Options:\n"
+        "   1. Ask the gateway operator which access options exist for this "
+        "operation, for example whether its free tier covers it.\n"
+        "   2. Use a different gateway that does not require x402 payment or "
+        "that offers a free tier: set SWARM_GATEWAY_URL and restart this server.\n"
+        "   3. Ask the gateway operator whether the free tier covers this "
+        "operation: this server already requests the free tier "
+        "(PAYMENT_MODE=free), and the gateway still asks for payment.\n"
+        "\n"
+        "Retrying without one of these changes will not help.\n"
+        "\n"
+        "retryable: false"
+    ),
+    "nested_detail": (
+        "💳 Payment required: the gateway requires payment for this operation "
+        "({action}) and refused the request.\n"
+        "   Gateway message: Payment required. Use X-PAYMENT header for paid "
+        "access.\n"
+        "\n"
+        "📋 Payment details (from the gateway's x402 payment request):\n"
+        "   Amount: 10000 atomic units (0.01 USDC)\n"
+        "   Asset: 0x036CbD53842c5426634e7929541eC2318f3dCF7e\n"
+        "   Network: base-sepolia\n"
+        "   Recipient (payTo): 0x0000000000000000000000000000000000000001\n"
+        "   Scheme: exact\n"
+        "   Description: Stamp purchase\n"
+        "\n"
+        "🆓 The gateway reports that it offers a free tier: 2 of 3 requests left "
+        "in a 60-second window.\n"
+        "\n"
+        "Paid x402 access is not supported by this server yet, so it cannot pay "
+        "for this request.\n"
+        "\n"
+        "Options:\n"
+        "   1. Ask the gateway operator which access options exist for this "
+        "operation, for example whether its free tier covers it.\n"
+        "   2. Use a different gateway that does not require x402 payment or "
+        "that offers a free tier: set SWARM_GATEWAY_URL and restart this server.\n"
+        "   3. Ask the gateway operator whether the free tier covers this "
+        "operation: this server already requests the free tier "
+        "(PAYMENT_MODE=free), and the gateway still asks for payment.\n"
+        "\n"
+        "Retrying without one of these changes will not help.\n"
+        "\n"
+        "retryable: false"
+    ),
+    "settlement_failed": (
+        "💳 Payment required: the gateway requires payment for this operation "
+        "({action}) and refused the request.\n"
+        "   Gateway message: The payment could not be settled "
+        "(insufficient_funds).\n"
+        "   Gateway error code: PAYMENT_SETTLEMENT_FAILED\n"
+        "\n"
+        "📋 The gateway sent no payment details.\n"
+        "\n"
+        "Paid x402 access is not supported by this server yet, so it cannot pay "
+        "for this request.\n"
+        "\n"
+        "Options:\n"
+        "   1. Ask the gateway operator which access options exist for this "
+        "operation, for example whether its free tier covers it.\n"
+        "   2. Use a different gateway that does not require x402 payment or "
+        "that offers a free tier: set SWARM_GATEWAY_URL and restart this server.\n"
+        "   3. Ask the gateway operator whether the free tier covers this "
+        "operation: this server already requests the free tier "
+        "(PAYMENT_MODE=free), and the gateway still asks for payment.\n"
+        "\n"
+        "Retrying without one of these changes will not help.\n"
+        "\n"
+        "retryable: false"
+    ),
+    "free_tier_disabled": (
+        "💳 Payment required: the gateway requires payment for this operation "
+        "({action}) and refused the request.\n"
+        "   Gateway message: This operation requires payment (free tier "
+        "disabled).\n"
+        "   Gateway error code: FREE_TIER_DISABLED\n"
+        "\n"
+        "📋 The gateway sent no payment details.\n"
+        "\n"
+        "Paid x402 access is not supported by this server yet, so it cannot pay "
+        "for this request.\n"
+        "\n"
+        "Options:\n"
+        "   1. Ask the gateway operator which access options exist for this "
+        "operation, for example whether its free tier covers it.\n"
+        "   2. Use a different gateway that does not require x402 payment or "
+        "that offers a free tier: set SWARM_GATEWAY_URL and restart this server.\n"
+        "   3. Ask the gateway operator whether the free tier covers this "
+        "operation: this server already requests the free tier "
+        "(PAYMENT_MODE=free), and the gateway still asks for payment.\n"
+        "\n"
+        "Retrying without one of these changes will not help.\n"
+        "\n"
+        "retryable: false"
+    ),
+    "empty": (
+        "💳 Payment required: the gateway requires payment for this operation "
+        "({action}) and refused the request.\n"
+        "\n"
+        "📋 The gateway sent no payment details.\n"
+        "\n"
+        "Paid x402 access is not supported by this server yet, so it cannot pay "
+        "for this request.\n"
+        "\n"
+        "Options:\n"
+        "   1. Ask the gateway operator which access options exist for this "
+        "operation, for example whether its free tier covers it.\n"
+        "   2. Use a different gateway that does not require x402 payment or "
+        "that offers a free tier: set SWARM_GATEWAY_URL and restart this server.\n"
+        "   3. Ask the gateway operator whether the free tier covers this "
+        "operation: this server already requests the free tier "
+        "(PAYMENT_MODE=free), and the gateway still asks for payment.\n"
+        "\n"
+        "Retrying without one of these changes will not help.\n"
+        "\n"
+        "retryable: false"
+    ),
+    "html": (
+        "💳 Payment required: the gateway requires payment for this operation "
+        "({action}) and refused the request.\n"
+        "\n"
+        "📋 The gateway sent no payment details.\n"
+        "   Response body (start): <html> <body>Payment Required</body> </html>\n"
+        "\n"
+        "Paid x402 access is not supported by this server yet, so it cannot pay "
+        "for this request.\n"
+        "\n"
+        "Options:\n"
+        "   1. Ask the gateway operator which access options exist for this "
+        "operation, for example whether its free tier covers it.\n"
+        "   2. Use a different gateway that does not require x402 payment or "
+        "that offers a free tier: set SWARM_GATEWAY_URL and restart this server.\n"
+        "   3. Ask the gateway operator whether the free tier covers this "
+        "operation: this server already requests the free tier "
+        "(PAYMENT_MODE=free), and the gateway still asks for payment.\n"
+        "\n"
+        "Retrying without one of these changes will not help.\n"
+        "\n"
+        "retryable: false"
+    ),
+    "malformed_header": (
+        "💳 Payment required: the gateway requires payment for this operation "
+        "({action}) and refused the request.\n"
+        "   Gateway message: Free tier is not available. Payment required.\n"
+        "\n"
+        "📋 Payment details (from the gateway's x402 payment request):\n"
+        "   Amount: 10000 atomic units (0.01 USDC)\n"
+        "   Asset: 0x036CbD53842c5426634e7929541eC2318f3dCF7e\n"
+        "   Network: base-sepolia\n"
+        "   Recipient (payTo): 0x0000000000000000000000000000000000000001\n"
+        "   Scheme: exact\n"
+        "   Description: Stamp purchase\n"
+        "\n"
+        "Paid x402 access is not supported by this server yet, so it cannot pay "
+        "for this request.\n"
+        "\n"
+        "Options:\n"
+        "   1. Ask the gateway operator which access options exist for this "
+        "operation, for example whether its free tier covers it.\n"
+        "   2. Use a different gateway that does not require x402 payment or "
+        "that offers a free tier: set SWARM_GATEWAY_URL and restart this server.\n"
+        "   3. Ask the gateway operator whether the free tier covers this "
+        "operation: this server already requests the free tier "
+        "(PAYMENT_MODE=free), and the gateway still asks for payment.\n"
+        "\n"
+        "Retrying without one of these changes will not help.\n"
+        "\n"
+        "retryable: false"
+    ),
+}
+
+GOLDEN_V1_402_ERROR = {
+    "top_level": (
+        "402 Client Error: None for url: http://test-gateway:8001/api/v1/stamps/ "
+        "— Free tier is not available. Payment required."
+    ),
+    "nested_detail": (
+        "402 Client Error: None for url: http://test-gateway:8001/api/v1/stamps/ "
+        "— Payment required. Use X-PAYMENT header for paid access."
+    ),
+    "settlement_failed": (
+        "402 Client Error: None for url: http://test-gateway:8001/api/v1/stamps/ "
+        "— The payment could not be settled (insufficient_funds)."
+    ),
+    "free_tier_disabled": (
+        "402 Client Error: None for url: http://test-gateway:8001/api/v1/stamps/ "
+        "— This operation requires payment (free tier disabled)."
+    ),
+    "empty": (
+        "402 Client Error: None for url: http://test-gateway:8001/api/v1/stamps/"
+    ),
+    "html": (
+        "402 Client Error: None for url: http://test-gateway:8001/api/v1/stamps/"
+    ),
+    "malformed_header": (
+        "402 Client Error: None for url: http://test-gateway:8001/api/v1/stamps/ "
+        "— Free tier is not available. Payment required."
+    ),
+}
+
+V1_402_SHAPES = {
+    "top_level": {"json": _x402_body()},
+    "nested_detail": {"json": _nested_body()},
+    "settlement_failed": {"json": SETTLEMENT_FAILED},
+    "free_tier_disabled": {"json": FREE_TIER_DISABLED},
+    "empty": {"text": ""},
+    "html": {"text": "<html>\n<body>Payment Required</body>\n</html>"},
+    "malformed_header": {
+        "json": _x402_body(),
+        "headers": {"PAYMENT-REQUIRED": "%%%"},
+    },
+}
+
+
+async def _tool_402_result(tool, mock_kwargs):
+    """Call one paid tool against a gateway that answers 402 with these kwargs."""
+    with requests_mock.Mocker() as m:
+        m.get(f"{BASE_URL}/api/v1/stamps/{STAMP_ID}", json={"usable": True})
+        if tool == "purchase_stamp":
+            m.post(f"{BASE_URL}/api/v1/stamps/", status_code=402, **mock_kwargs)
+            return await handle_purchase_stamp({"duration_hours": 25})
+        if tool == "upload_data":
+            m.post(f"{BASE_URL}/api/v1/data/", status_code=402, **mock_kwargs)
+            return await handle_upload_data({"data": "hello", "stamp_id": STAMP_ID})
+        m.patch(
+            f"{BASE_URL}/api/v1/stamps/{STAMP_ID}/extend",
+            status_code=402,
+            **mock_kwargs,
+        )
+        return await handle_extend_stamp({"stamp_id": STAMP_ID, "duration_hours": 25})
+
+
+class TestGoldenV1Payment402:
+    @pytest.mark.parametrize("tool", ["purchase_stamp", "upload_data", "extend_stamp"])
+    @pytest.mark.parametrize("shape", sorted(V1_402_SHAPES))
+    async def test_tool_result_is_unchanged(self, monkeypatch, shape, tool):
+        _gateway(monkeypatch)
+        monkeypatch.setattr(server_module.settings, "payment_mode", "free")
+        result = await _tool_402_result(tool, V1_402_SHAPES[shape])
+        assert result.isError is True
+        assert [c.text for c in result.content] == [
+            GOLDEN_V1_402[shape].format(action=tool)
+        ]
+
+    @pytest.mark.parametrize("shape", sorted(V1_402_SHAPES))
+    def test_error_message_is_unchanged(self, client, shape):
+        err = _purchase_error(client, **V1_402_SHAPES[shape])
+        assert str(err) == GOLDEN_V1_402_ERROR[shape]
